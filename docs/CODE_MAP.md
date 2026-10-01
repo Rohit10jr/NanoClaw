@@ -22,6 +22,7 @@ so line numbers stay correct even as nanobot changes.
 |---|---|---|---|---|
 | 1 Provider | `nanoclaw/providers/` (4 modules) | ~520 | `providers/base.py`, `openai_compat_provider.py`, `registry.py`, `factory.py` | ~5,400 |
 | 2 Runner | `nanoclaw/agent/runner.py`, `messages.py`, `tools/base.py`, `tools/registry.py` | ~540 | `agent/runner.py`, `agent/tools/base.py`, `registry.py`, `execution.py` | ~2,250 |
+| 3 Tools | `nanoclaw/agent/tools/schema.py`, `filesystem.py`, `shell.py`, `web.py` | ~1,230 | `agent/tools/filesystem.py`, `shell.py`, `web.py`, `schema.py`, `loader.py` | ~4,170 |
 | CLI (`ask`) | `nanoclaw/__main__.py` | ~45 | `cli/agent.py`, `cli/commands.py` | ~1,180 |
 
 ## Layer 1 — Provider
@@ -83,22 +84,22 @@ Note: [`notes/02-runner.md`](notes/02-runner.md)
 
 | NanoClaw | nanobot | How it compares |
 |---|---|---|
-| [`ToolResult`](../nanoclaw/agent/tools/base.py#L9) | [`agent/tools/base.py:149`][nb-l2-toolresult] | Same: a `str` with an `is_error` flag; `ToolResult.error(...)` |
-| [`is_tool_error`](../nanoclaw/agent/tools/base.py#L29) | [`agent/tools/registry.py:15`][nb-l2-iste] `is_tool_error_result` | Same |
-| [`Tool`](../nanoclaw/agent/tools/base.py#L33) | [`agent/tools/base.py:164`][nb-l2-tool] | Simplified: `name`, `description`, `parameters`, `execute`, `to_schema`. No concurrency flags, plugin metadata, `cast_params` or `validate_params` (layer 3) |
+| [`ToolResult`](../nanoclaw/agent/tools/base.py#L11) | [`agent/tools/base.py:149`][nb-l2-toolresult] | Same: a `str` with an `is_error` flag; `ToolResult.error(...)` |
+| [`is_tool_error`](../nanoclaw/agent/tools/base.py#L31) | [`agent/tools/registry.py:15`][nb-l2-iste] `is_tool_error_result` | Same |
+| [`Tool`](../nanoclaw/agent/tools/base.py#L35) | [`agent/tools/base.py:164`][nb-l2-tool] | Simplified: `name`, `description`, `parameters`, `execute`, `to_schema`. No concurrency flags, plugin metadata, `cast_params` or `validate_params` (layer 3) |
 | ↳ `to_schema()` | [`base.py:313`][nb-l2-toschema] | Same |
 
 ### Registry — `nanoclaw/agent/tools/registry.py`
 
 | NanoClaw | nanobot | How it compares |
 |---|---|---|
-| [`ToolRegistry`](../nanoclaw/agent/tools/registry.py#L18) | [`agent/tools/registry.py:19`][nb-l2-registry] | Simplified |
+| [`ToolRegistry`](../nanoclaw/agent/tools/registry.py#L19) | [`agent/tools/registry.py:19`][nb-l2-registry] | Simplified |
 | ↳ `register` / `unregister` / `get` / `has` / `tool_names` | [`:30`][nb-l2-register]–`:71`, `:204` | Same |
-| ↳ [`get_definitions()`](../nanoclaw/agent/tools/registry.py#L46) | [`:86`][nb-l2-defs] | Simplified: sorted by name; no MCP grouping or caching |
-| ↳ [`_suggest_name()`](../nanoclaw/agent/tools/registry.py#L54) | [`:58`][nb-l2-suggest] | Same: "Did you mean ...?" for case/punctuation differences, never auto-runs |
-| ↳ [`prepare_call()`](../nanoclaw/agent/tools/registry.py#L65) | [`:110`][nb-l2-prepare] | Simplified: unknown tool, non-object arguments, missing required keys. Same messages. No argument unwrapping, casting or full schema validation |
-| ↳ [`execute()`](../nanoclaw/agent/tools/registry.py#L90) | [`:187`][nb-l2-execute] | Same: never raises; errors get the retry hint. (The runner uses `prepare_call` + its own execution, like nanobot's runner) |
-| [`RETRY_HINT`](../nanoclaw/agent/tools/registry.py#L10), [`with_retry_hint`](../nanoclaw/agent/tools/registry.py#L13) | [`agent/tools/execution.py:23`][nb-l2-hint], `:50` `_with_retry_hint` | Same text; added once |
+| ↳ [`get_definitions()`](../nanoclaw/agent/tools/registry.py#L47) | [`:86`][nb-l2-defs] | Simplified: sorted by name; no MCP grouping or caching |
+| ↳ [`_suggest_name()`](../nanoclaw/agent/tools/registry.py#L55) | [`:58`][nb-l2-suggest] | Same: "Did you mean ...?" for case/punctuation differences, never auto-runs |
+| ↳ [`prepare_call()`](../nanoclaw/agent/tools/registry.py#L66) | [`:110`][nb-l2-prepare] | Simplified: unknown tool, non-object arguments, missing required keys. Same messages. No argument unwrapping, casting or full schema validation |
+| ↳ [`execute()`](../nanoclaw/agent/tools/registry.py#L119) | [`:187`][nb-l2-execute] | Same: never raises; errors get the retry hint. (The runner uses `prepare_call` + its own execution, like nanobot's runner) |
+| [`RETRY_HINT`](../nanoclaw/agent/tools/registry.py#L11), [`with_retry_hint`](../nanoclaw/agent/tools/registry.py#L14) | [`agent/tools/execution.py:23`][nb-l2-hint], `:50` `_with_retry_hint` | Same text; added once |
 
 ### Runner — `nanoclaw/agent/runner.py`
 
@@ -133,11 +134,67 @@ Note: [`notes/02-runner.md`](notes/02-runner.md)
 | `MODEL_ERROR_PLACEHOLDER`, `DEFAULT_ERROR_MESSAGE` | [`runner.py:67–72`][nb-l2-consts] | Same text |
 | `MAX_ITERATIONS_MESSAGE` | [`templates/agent/max_iterations_message.md`][nb-l2-maxtpl] | Same text (Python format instead of Jinja) |
 
+## Layer 3 — Tools
+
+Note: [`notes/03-tools.md`](notes/03-tools.md)
+
+### Parameter checking — `nanoclaw/agent/tools/schema.py`, `registry.py`, `base.py`
+
+| NanoClaw | nanobot | How it compares |
+|---|---|---|
+| [`object_schema`](../nanoclaw/agent/tools/schema.py#L27) | [`agent/tools/schema.py:217`][nb-l3-tps] `tool_parameters_schema` | Simplified: plain dicts instead of `StringSchema`/`IntegerSchema` classes; same `additionalProperties: false` default |
+| [`validate_json_schema_value`](../nanoclaw/agent/tools/schema.py#L57) | [`agent/tools/base.py:51`][nb-l3-validate] `Schema.validate_json_schema_value` | Same rules and messages |
+| [`cast_params`](../nanoclaw/agent/tools/schema.py#L123), `_cast_value` | [`base.py:256`][nb-l3-cast] `Tool.cast_params`, `:263` `_cast_value` | Same |
+| [`Tool.cast_params()`](../nanoclaw/agent/tools/base.py#L57), `validate_params()` | [`base.py:256`][nb-l3-cast], `:304` | Same |
+| [`_coerce_params`](../nanoclaw/agent/tools/registry.py#L107) | [`agent/tools/registry.py:171`][nb-l3-coerce] | Same: JSON string → object; `{"arguments": ...}` unwrapped |
+| [`prepare_call()`](../nanoclaw/agent/tools/registry.py#L66) | [`registry.py:110`][nb-l2-prepare] | Now the same: unknown tool → non-object → cast → validate |
+
+### File tools — `nanoclaw/agent/tools/filesystem.py`
+
+| NanoClaw | nanobot | How it compares |
+|---|---|---|
+| [`_FsTool`](../nanoclaw/agent/tools/filesystem.py#L21) | [`agent/tools/filesystem.py:34`][nb-l3-fstool] | Simplified: workspace-relative paths only; no allowed dirs or restriction (layer 9) |
+| [`ReadFileTool`](../nanoclaw/agent/tools/filesystem.py#L70) | [`filesystem.py:270`][nb-l3-read] | Simplified: text only (no PDF/Office/images), no unchanged-file check. Same numbering, footers, limits, errors |
+| [`_is_blocked_device`](../nanoclaw/agent/tools/filesystem.py#L55) | [`filesystem.py:210`][nb-l3-device] | Same |
+| [`WriteFileTool`](../nanoclaw/agent/tools/filesystem.py#L182) | [`filesystem.py:557`][nb-l3-write] | Same |
+| [`EditFileTool`](../nanoclaw/agent/tools/filesystem.py#L352) | [`filesystem.py:877`][nb-l3-edit] | Simplified: no `line_hint`, `expected_replacements`, re-indenting or curly-quote preservation |
+| [`_find_matches`](../nanoclaw/agent/tools/filesystem.py#L287) (+ `_find_exact_matches`, `_find_trim_matches`, `_find_quote_matches`) | [`filesystem.py:793`][nb-l3-match] | Same strategies, same order |
+| [`_best_window`](../nanoclaw/agent/tools/filesystem.py#L319), `_diagnose_near_match`, `_not_found_msg`, `_file_not_found_msg` | [`filesystem.py:827`][nb-l3-best], `:1073`, `:1059` | Same |
+| [`_count_changed_lines`](../nanoclaw/agent/tools/filesystem.py#L335) | `utils/file_edit_events.py:59` `FileDiff.from_text` | Simplified: `difflib` instead of `rapidfuzz` |
+| [`ListDirTool`](../nanoclaw/agent/tools/filesystem.py#L530) | [`filesystem.py:1115`][nb-l3-list] | Same, except ignore rules only look below the listed folder (difference #3 in the note) |
+
+### Shell — `nanoclaw/agent/tools/shell.py`
+
+| NanoClaw | nanobot | How it compares |
+|---|---|---|
+| [`ExecTool`](../nanoclaw/agent/tools/shell.py#L39) | [`agent/tools/shell.py:162`][nb-l3-exec] | Simplified: bash only; no sessions, sandbox, shell choice, PATH config or Windows |
+| [`DEFAULT_DENY_PATTERNS`](../nanoclaw/agent/tools/shell.py#L26) | [`shell.py:215`][nb-l3-deny] | Same general patterns; memory-file patterns come in layer 6 |
+| [`_guard_command`](../nanoclaw/agent/tools/shell.py#L137) | [`shell.py:840`][nb-l3-guard], called at [`:446`][nb-l3-guardcall] | **Different: always applied.** nanobot only when `restrict_to_workspace` is on (off by default). Deny list only; no allowlist or internal-URL check |
+| [`_build_env`](../nanoclaw/agent/tools/shell.py#L152) | [`shell.py:791`][nb-l3-env] | Same (Unix) |
+| [`_kill_process_tree`](../nanoclaw/agent/tools/shell.py#L167) | [`shell.py:730`][nb-l3-kill] | Simplified: `killpg` on the process group |
+
+### Web — `nanoclaw/agent/tools/web.py`
+
+| NanoClaw | nanobot | How it compares |
+|---|---|---|
+| [`WebFetchTool`](../nanoclaw/agent/tools/web.py#L56) | [`agent/tools/web.py:1118`][nb-l3-fetch] | Simplified: readability path only; no Jina Reader, image fetching, proxy or SSRF checks (layer 9) |
+| [`_get_with_redirects`](../nanoclaw/agent/tools/web.py#L135) | [`web.py:208`][nb-l3-redirects] `_get_with_safe_redirects` | Simplified: scheme check per hop (nanobot also checks resolved IPs) |
+| [`_validate_url`](../nanoclaw/agent/tools/web.py#L39), `_strip_tags`, `_normalize`, `_to_markdown`, `_extract_readable_html` | [`web.py:100`][nb-l3-validate-url], `:86`, `:94`, `:1338`, `:1330` | Same |
+| [`UNTRUSTED_BANNER`](../nanoclaw/agent/tools/web.py#L22) | `web.py:34` | Same text |
+| [`WebSearchTool`](../nanoclaw/agent/tools/web.py#L201) | [`web.py:365`][nb-l3-search] | Simplified: DuckDuckGo only (nanobot's default of ~10 providers) |
+| [`_format_results`](../nanoclaw/agent/tools/web.py#L179), `_duckduckgo_search` | [`web.py:306`][nb-l3-format], `:1024` | Same |
+
+### Default tool set — `nanoclaw/agent/tools/__init__.py`
+
+| NanoClaw | nanobot | How it compares |
+|---|---|---|
+| [`build_default_tools`](../nanoclaw/agent/tools/__init__.py#L11) | [`agent/tools/loader.py:26`][nb-l3-loader] `ToolLoader` + `agent/loop.py:608` | Replaced: an explicit list instead of package scanning and plugins |
+
 ## CLI — `nanoclaw/__main__.py`
 
 | NanoClaw | nanobot | How it compares |
 |---|---|---|
-| [`main()`](../nanoclaw/__main__.py#L31) `nanoclaw ask "..."` | [`cli/agent.py:55`][nb-cli] `nanobot agent -m "..."` | Simplified: one `AgentRunner` turn with an empty tool registry (tools arrive in layer 3). Switches to `AgentLoop` in layer 5 and a chat REPL in layer 10 |
+| [`main()`](../nanoclaw/__main__.py#L36) `nanoclaw ask "..." [-w DIR]` | [`cli/agent.py:55`][nb-cli] `nanobot agent -m "..."` | Simplified: one `AgentRunner` turn with the default tools in the workspace (default `~/.nanoclaw/workspace`). Switches to `AgentLoop` in layer 5 and a chat REPL in layer 10 |
 
 ## Tests
 
@@ -148,6 +205,11 @@ Note: [`notes/02-runner.md`](notes/02-runner.md)
 | `tests/test_fake_provider_and_cli.py` | `FakeProvider`, `nanoclaw ask` |
 | `tests/toy_tools.py` | toy tools for tests: `echo`, `add`, `boom`, `fail`, `silent`, `big` |
 | `tests/test_tools_registry.py` | `ToolResult`, `to_schema`, sorted definitions, every registry error message, retry hint once |
+| `tests/test_schema.py` | validation messages, casting, unknown parameters, `arguments` unwrapping |
+| `tests/test_filesystem_tools.py` | the four file tools on real files |
+| `tests/test_shell_tool.py` | `exec` with real bash: output, timeout, secrets hidden, deny list |
+| `tests/test_web_tools.py` | `web_fetch` over mocked HTTP; `web_search` with a fake search |
+| `tests/test_tools_end_to_end.py` | runner + default tools with a scripted model |
 | `tests/test_runner.py` | the loop end to end with `FakeProvider`: exact history, requests sent, tool failures, truncation, cut-off replies, empty-reply handling, model errors, iteration limit, usage, no mutation, one result per call |
 | `tests/test_cli_version.py` | `--version` |
 
@@ -215,3 +277,27 @@ Note: [`notes/02-runner.md`](notes/02-runner.md)
 [nb-l2-dropmal]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/runner.py#L1068
 [nb-l2-think]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/utils/helpers.py#L167
 [nb-l2-malnote]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/runner.py#L1106
+[nb-l3-tps]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/tools/schema.py#L217
+[nb-l3-validate]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/tools/base.py#L51
+[nb-l3-cast]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/tools/base.py#L256
+[nb-l3-coerce]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/tools/registry.py#L171
+[nb-l3-fstool]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/tools/filesystem.py#L34
+[nb-l3-read]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/tools/filesystem.py#L270
+[nb-l3-device]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/tools/filesystem.py#L210
+[nb-l3-write]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/tools/filesystem.py#L557
+[nb-l3-edit]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/tools/filesystem.py#L877
+[nb-l3-match]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/tools/filesystem.py#L793
+[nb-l3-best]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/tools/filesystem.py#L827
+[nb-l3-list]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/tools/filesystem.py#L1115
+[nb-l3-exec]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/tools/shell.py#L162
+[nb-l3-deny]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/tools/shell.py#L215
+[nb-l3-guard]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/tools/shell.py#L840
+[nb-l3-guardcall]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/tools/shell.py#L446
+[nb-l3-env]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/tools/shell.py#L791
+[nb-l3-kill]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/tools/shell.py#L730
+[nb-l3-fetch]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/tools/web.py#L1118
+[nb-l3-redirects]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/tools/web.py#L208
+[nb-l3-validate-url]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/tools/web.py#L100
+[nb-l3-search]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/tools/web.py#L365
+[nb-l3-format]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/tools/web.py#L306
+[nb-l3-loader]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/tools/loader.py#L26

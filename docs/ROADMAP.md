@@ -25,8 +25,8 @@ with a note in [`notes/`](notes/).
 | 0 | Architecture + skeleton | Map of how nanobot works; Python project | `docs/architecture.md`, `.agent/design.md` | `pyproject.toml`, `docs/notes/00` | ✅ done |
 | 1 | Provider | One interface for calling a model | `providers/base.py`, `providers/openai_compat_provider.py` | `nanoclaw/providers/` | ✅ done |
 | 2 | Runner | The agent loop: call model → run tools → repeat | `agent/runner.py`, `agent/tools/execution.py`, `agent/tools/base.py`, `agent/tools/registry.py` | `nanoclaw/agent/runner.py`, `nanoclaw/agent/tools/` | ✅ done |
-| 3 | Tools | Real capabilities: files, shell, web | `agent/tools/filesystem.py`, `shell.py`, `web.py`, `schema.py` | `nanoclaw/agent/tools/` | ⏭ next |
-| 4 | Context | Building the system prompt | `agent/context.py`, `templates/` | `nanoclaw/agent/context.py`, `nanoclaw/templates/` | planned |
+| 3 | Tools | Real capabilities: files, shell, web | `agent/tools/filesystem.py`, `shell.py`, `web.py`, `schema.py` | `nanoclaw/agent/tools/` | ✅ done |
+| 4 | Context | Building the system prompt | `agent/context.py`, `templates/` | `nanoclaw/agent/context.py`, `nanoclaw/templates/` | ⏭ next |
 | 5 | Sessions + AgentLoop | Conversations saved and resumed; one turn = context → runner → save | `session/manager.py`, `agent/loop.py` (`process_direct`) | `nanoclaw/session/`, `nanoclaw/agent/loop.py` | planned |
 | 6 | Memory | Long-term memory; compacting old history | `agent/memory.py`, `agent/autocompact.py` | `nanoclaw/agent/memory.py` | planned |
 | 7 | Skills | Markdown procedures loaded on demand | `agent/skills.py`, `skills/` | `nanoclaw/agent/skills.py`, `nanoclaw/skills/` | planned |
@@ -54,10 +54,13 @@ because the loop needs something to call.
 tools, repeated-lookup throttling, streaming.
 
 **3 — Tools.** `read_file`, `write_file`, `edit_file`, `list_dir`, `exec`
-(shell with timeout), `web_fetch`, and maybe `web_search`. Parameter schema
-validation in the registry.
+(shell with timeout and minimal environment), `web_fetch`, `web_search`
+(DuckDuckGo). Full parameter schema validation in the registry.
+**Decision:** the `exec` deny list is applied to every command, unlike nanobot,
+which only applies it when workspace restriction is on (off by default).
+See `notes/03-tools.md`, "Differences from nanobot".
 *Skipped:* `apply_patch`, ripgrep search, MCP, cron, image generation,
-long-running shell sessions.
+long-running shell sessions, PDF/Office/image reading.
 
 **4 — Context.** `ContextBuilder` assembles the system prompt from identity
 (`SOUL.md`, `USER.md`), project instructions (`AGENTS.md`), runtime info
@@ -83,9 +86,11 @@ One or two bundled example skills.
 **8 — Subagents.** `SubagentManager` + `spawn` tool: run a child `AgentRunner`
 with its own task and a restricted toolset; return its result to the parent.
 
-**9 — Safety.** Path checks so file tools stay in the workspace; a deny-list
-and timeout for shell commands; blocking private-network addresses in
-`web_fetch`.
+**9 — Safety.** `restrict_to_workspace`: path checks so file tools and
+`exec` stay in the workspace; blocking private-network addresses in
+`web_fetch`. (The deny list and timeout already exist from layer 3.)
+**To revisit here:** keep the deny list always on, or switch to nanobot's
+behaviour of applying it only in restricted mode.
 *Skipped:* bubblewrap / macOS seatbelt sandboxing (maybe later).
 
 **10 — Terminal chat.** `nanoclaw chat`: REPL with session resume, `/new`,
