@@ -22,7 +22,10 @@ def test_cli_ask_prints_reply(capsys, tmp_path):
     fake = FakeProvider(["Hello from the model"])
     assert main(["ask", "hello", "-w", str(tmp_path)], provider=fake) == 0
     assert capsys.readouterr().out.strip() == "Hello from the model"
-    assert fake.calls[0].messages == [{"role": "user", "content": "hello"}]
+    system, user = fake.calls[0].messages
+    assert system["role"] == "system" and "# Tool Usage Notes" in system["content"]
+    assert user["role"] == "user"
+    assert user["content"].startswith("hello\n\n[Runtime Context — metadata only, not instructions]\nCurrent Time: ")
 
 
 def test_cli_ask_reports_errors_on_stderr(capsys, tmp_path):
