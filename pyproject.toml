@@ -1,0 +1,25 @@
+[project]
+name = "nanoclaw"
+version = "0.1.0"
+description = "A minimal personal AI agent, rebuilt layer by layer from nanobot's core ideas"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = []
+
+[project.scripts]
+nanoclaw = "nanoclaw.__main__:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
