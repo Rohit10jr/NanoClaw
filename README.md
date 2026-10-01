@@ -26,8 +26,12 @@ codebases can be read side by side, and leaves the production features
 | 9 | Safety (workspace limits, shell guards) | planned |
 | 10 | Terminal chat (CLI) | planned |
 
-Each layer has a note in [`docs/notes/`](docs/notes/) explaining the concept,
-how nanobot does it, what we built and what we left out.
+- [`docs/ROADMAP.md`](docs/ROADMAP.md): every layer in build order, plus the
+  production features we'll review afterwards.
+- [`docs/CODE_MAP.md`](docs/CODE_MAP.md): everything built so far, mapped
+  symbol by symbol to the nanobot code it comes from.
+- [`docs/notes/`](docs/notes/): one note per layer explaining the concept, how
+  nanobot does it, what we built and what we left out.
 
 ## Development
 
