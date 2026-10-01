@@ -15,7 +15,7 @@ codebases can be read side by side, and leaves the production features
 | # | Layer | Status |
 |---|---|---|
 | 0 | Architecture recon + project skeleton | done |
-| 1 | Provider interface (OpenAI-compatible) | planned |
+| 1 | Provider interface (OpenAI-compatible) | done |
 | 2 | Agent loop (runner) | planned |
 | 3 | Tools (files, shell, web) | planned |
 | 4 | Context / system prompt | planned |
@@ -35,4 +35,16 @@ how nanobot does it, what we built and what we left out.
 uv sync
 uv run pytest
 uv run nanoclaw --version
+```
+
+## Configuration
+
+NanoClaw talks to any OpenAI-compatible API (OpenAI, OpenRouter, DeepSeek,
+Groq, Ollama, vLLM, ...):
+
+```bash
+export NANOCLAW_API_KEY=sk-...
+export NANOCLAW_MODEL=gpt-4o-mini                  # default
+export NANOCLAW_API_BASE=https://openrouter.ai/api/v1   # omit for OpenAI
+uv run nanoclaw ask "hello"
 ```

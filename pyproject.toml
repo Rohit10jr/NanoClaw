@@ -5,7 +5,9 @@ description = "A minimal personal AI agent, rebuilt layer by layer from nanobot'
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-dependencies = []
+dependencies = [
+    "openai>=2.8.0",
+]
 
 [project.scripts]
 nanoclaw = "nanoclaw.__main__:main"
