@@ -117,7 +117,7 @@ Note: [`notes/02-runner.md`](notes/02-runner.md)
 | ↳ model error | [`runner.py:714`][nb-l2-error] | Same, minus the arrearage message |
 | ↳ empty final response | [`runner.py:737`][nb-l2-emptyfinal] | Same |
 | [`_execute_tool_call()`](../nanoclaw/agent/runner.py#L233) | [`agent/tools/execution.py:57`][nb-l2-exec] `execute_tool_calls`, [`:115`][nb-l2-exec1] `_execute_tool_call` | Simplified: `prepare_call`, run, `Error: <Type>: <msg>` on exceptions, same as nanobot. No batching, throttling or violation classification |
-| ↳ empty-output marker + keeping results in budget | [`context_governance.py:716`][nb-l2-normalize] `normalize_tool_result` | Same since the layer 3 review: see [`normalize_tool_result`](../nanoclaw/agent/tool_results.py#L88) under Layer 3 |
+| ↳ empty-output marker + keeping results in budget | [`context_governance.py:716`][nb-l2-normalize] `normalize_tool_result` | Same since the layer 3 review: see [`normalize_tool_result`](../nanoclaw/agent/tool_results.py#L96) under Layer 3 |
 | [`_finalize_after_max_iterations()`](../nanoclaw/agent/runner.py#L254) | [`runner.py:1154`][nb-l2-finmax], [`:1249`][nb-l2-maxfallback] `_max_iterations_fallback` | Same |
 | [`_append_model_error_placeholder()`](../nanoclaw/agent/runner.py#L269) | [`runner.py:1361`][nb-l2-placeholder] | Same |
 | [`_add_usage()`](../nanoclaw/agent/runner.py#L73) | `runner.py:1326` `_merge_usage` | Simplified |
@@ -192,10 +192,10 @@ Note: [`notes/03-tools.md`](notes/03-tools.md)
 
 | NanoClaw | nanobot | How it compares |
 |---|---|---|
-| [`normalize_tool_result`](../nanoclaw/agent/tool_results.py#L88) | [`agent/context_governance.py:716`][nb-l2-normalize] `ContextGovernor.normalize_tool_result` | Same order: empty marker → `read_file` exempt → truncate (no workspace) or save |
-| [`OFFLOAD_EXEMPT_TOOLS`](../nanoclaw/agent/tool_results.py#L22) | [`context_governance.py:68`][nb-l3-exempt] `TOOL_RESULT_OFFLOAD_EXEMPT_TOOLS` | Same: `{"read_file"}` |
-| [`maybe_persist_tool_result`](../nanoclaw/agent/tool_results.py#L56) | [`utils/helpers.py:624`][nb-l3-persist] | Simplified: one `default` folder, overwrites, no clean-up (difference #5 in the note) |
-| [`render_tool_result_reference`](../nanoclaw/agent/tool_results.py#L36), `safe_filename`, `ensure_nonempty_tool_result` | `utils/helpers.py:511`, `:372`; `utils/runtime.py:48` | Same text |
+| [`normalize_tool_result`](../nanoclaw/agent/tool_results.py#L96) | [`agent/context_governance.py:716`][nb-l2-normalize] `ContextGovernor.normalize_tool_result` | Same order: empty marker → `read_file` exempt → truncate (no workspace) or save |
+| [`OFFLOAD_EXEMPT_TOOLS`](../nanoclaw/agent/tool_results.py#L23) | [`context_governance.py:68`][nb-l3-exempt] `TOOL_RESULT_OFFLOAD_EXEMPT_TOOLS` | Same: `{"read_file"}` |
+| [`maybe_persist_tool_result`](../nanoclaw/agent/tool_results.py#L57) | [`utils/helpers.py:624`][nb-l3-persist] | Simplified: one `default` folder, no clean-up. **Different file name:** `<id>-<content hash>.txt`, fixing nanobot's stale-output bug ([`UPSTREAM_BUGS.md`](UPSTREAM_BUGS.md) #3) |
+| [`render_tool_result_reference`](../nanoclaw/agent/tool_results.py#L37), `safe_filename`, `ensure_nonempty_tool_result` | `utils/helpers.py:511`, `:372`; `utils/runtime.py:48` | Same text |
 
 ### Default tool set — `nanoclaw/agent/tools/__init__.py`
 

@@ -1,5 +1,6 @@
 """Oversized tool results: saved to the workspace with a preview, read_file exempt."""
 
+import hashlib
 from pathlib import Path
 
 from nanoclaw.agent.messages import TRUNCATED_SUFFIX
@@ -27,13 +28,40 @@ def test_large_result_is_saved_with_head_and_tail_preview(tmp_path):
     content = "HEAD" + "m" * 5000 + "TAIL"
     out = maybe_persist_tool_result(tmp_path, "default", "call/1", content, max_chars=1000)
 
-    saved = tmp_path / TOOL_RESULTS_DIR / "default" / "call_1.txt"  # unsafe "/" replaced
+    digest = hashlib.sha256(content.encode()).hexdigest()[:12]
+    saved = tmp_path / TOOL_RESULTS_DIR / "default" / f"call_1-{digest}.txt"  # unsafe "/" replaced
     assert saved.read_text() == content
     assert out.startswith(f"[tool output persisted]\nFull output saved to workspace path: {saved.resolve()}\n")
     assert "Original size: 5008 chars" in out
     assert "HEAD" in out and "TAIL" in out
     assert out.endswith("Result truncated. Read the saved file if you need the complete output.")
     assert len(out) <= 1000
+
+
+def _saved_path(reference: str) -> Path:
+    return Path(reference.split("workspace path: ")[1].split("\n")[0])
+
+
+def test_repeated_call_id_never_points_to_stale_output(tmp_path):
+    """Regression test for the NanoClaw side of docs/UPSTREAM_BUGS.md bug 3."""
+    old, new = "OLD-" + "a" * 3000, "NEW-" + "b" * 3000
+    r_old = maybe_persist_tool_result(tmp_path, "default", "call_0", old, max_chars=1000)
+    r_new = maybe_persist_tool_result(tmp_path, "default", "call_0", new, max_chars=1000)
+
+    # Each reference shows a preview of, and points to, its own output.
+    assert r_old.split("Preview:\n")[1].startswith("OLD-")
+    assert r_new.split("Preview:\n")[1].startswith("NEW-")
+    assert _saved_path(r_old).read_text() == old  # the earlier reference is not overwritten
+    assert _saved_path(r_new).read_text() == new
+    assert _saved_path(r_old) != _saved_path(r_new)
+
+
+def test_identical_output_reuses_one_file(tmp_path):
+    content = "same" * 1000
+    r1 = maybe_persist_tool_result(tmp_path, "default", "c1", content, max_chars=500)
+    r2 = maybe_persist_tool_result(tmp_path, "default", "c1", content, max_chars=500)
+    assert r1 == r2
+    assert len(list((tmp_path / TOOL_RESULTS_DIR / "default").iterdir())) == 1
 
 
 def test_tiny_budget_falls_back_to_bare_reference(tmp_path):
@@ -78,7 +106,9 @@ async def test_runner_offloads_large_exec_output_to_workspace(tmp_path):
     )
     content = result.messages[2]["content"]
     assert content.startswith("[tool output persisted]")
-    saved = tmp_path / TOOL_RESULTS_DIR / "default" / "c1.txt"
+    saved = _saved_path(content)
+    assert saved.parent == tmp_path / TOOL_RESULTS_DIR / "default"
+    assert saved.name.startswith("c1-") and saved.suffix == ".txt"
     assert saved.read_text().startswith("1\n2\n3\n")
     assert "Exit code: 0" in saved.read_text()
 

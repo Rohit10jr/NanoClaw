@@ -10,6 +10,7 @@ workspace the result is truncated instead.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from pathlib import Path
 
@@ -67,8 +68,15 @@ def maybe_persist_tool_result(
 
     directory = workspace / TOOL_RESULTS_DIR / safe_filename(bucket)
     directory.mkdir(parents=True, exist_ok=True)
-    path = directory / f"{safe_filename(tool_call_id)}.txt"
-    path.write_text(content, encoding="utf-8")
+    # The name includes a hash of the content, so the same tool-call ID with
+    # different output can never share a file: every reference in the history
+    # keeps pointing at the output it previewed. Identical output reuses the
+    # file. (nanobot names files by ID only and never overwrites, so a repeated
+    # ID can point the model at stale output: docs/UPSTREAM_BUGS.md, bug 3.)
+    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()[:12]
+    path = directory / f"{safe_filename(tool_call_id)}-{digest}.txt"
+    if not path.exists():
+        path.write_text(content, encoding="utf-8")
 
     reference_path = str(path.resolve())
     overhead = len(render_tool_result_reference(reference_path, original_size=len(content), preview=""))

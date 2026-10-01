@@ -21,7 +21,7 @@ the original project NanoClaw is based on.
 |---|---|---|---|---|
 | 1 | `list_dir(recursive=true)` reports an empty directory when the workspace is inside a folder named `build`, `dist`, `venv`, ... | Confirmed | Medium | Fixed (layer 3) |
 | 2 | The configured timezone has no effect: no current date/time reaches the model, although the docs say it does | Confirmed | Medium | Added a current-time block (layer 4) |
-| 3 | A saved oversized tool result can point the model to stale content when a tool-call ID repeats in a session | Mechanism confirmed; real-world trigger not yet confirmed | Low–medium | Has the mirror-image issue; fix proposed below |
+| 3 | A saved oversized tool result can point the model to stale content when a tool-call ID repeats in a session | Mechanism confirmed; real-world trigger not yet confirmed | Low–medium | Fixed with the suggested fix (content-hash file names) |
 
 ---
 
@@ -197,10 +197,16 @@ trigger before filing, or file it as a robustness issue.
 idempotent for identical content (which is presumably why nanobot never
 overwrites) and different content can never share a file.
 
-**NanoClaw:** `nanoclaw/agent/tool_results.py` overwrites the file instead,
-which has the mirror-image problem: an *older* reference in the history would
-then point to the newer content. The same content-hash file name fixes both;
-not yet applied.
+**NanoClaw:** fixed with exactly this suggested fix. Before the fix, NanoClaw
+overwrote the file instead, which had the mirror-image problem: an *older*
+reference in the history would then point to the newer content. Now
+`nanoclaw/agent/tool_results.py` (`maybe_persist_tool_result`) names files
+`<call id>-<first 12 hex chars of sha256(content)>.txt` and writes only if the
+file doesn't exist. Regression tests in `tests/test_tool_results.py`:
+`test_repeated_call_id_never_points_to_stale_output` (both references keep
+their own content) and `test_identical_output_reuses_one_file`. Removing the
+hash from the name makes three tests fail. This doubles as a tested version of
+the upstream fix for the PR.
 
 ---
 

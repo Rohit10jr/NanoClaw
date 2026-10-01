@@ -136,13 +136,13 @@ The runner keeps every tool result (errors included) within
 - **`read_file` is never cut.** It already pages itself and ends with
   "Use offset=N to continue"; cutting it would lose that instruction.
 - **Anything else that is too long is saved in full** to
-  `<workspace>/.nanoclaw/tool-results/default/<call id>.txt`, and the model
+  `<workspace>/.nanoclaw/tool-results/default/<call id>-<content hash>.txt`, and the model
   gets the start and end as a preview plus the path, so it can `read_file`
   the rest:
 
 ```
 [tool output persisted]
-Full output saved to workspace path: /home/me/.nanoclaw/workspace/.nanoclaw/tool-results/default/call_1.txt
+Full output saved to workspace path: /home/me/.nanoclaw/workspace/.nanoclaw/tool-results/default/call_1-3f2a9c81d0e4.txt
 Original size: 48211 chars
 Preview:
 <start of output>
@@ -153,6 +153,9 @@ Preview is also truncated.
 Result truncated. Read the saved file if you need the complete output.
 ```
 
+- **The file name includes a hash of the content**, so if a tool-call ID ever
+  repeats, each reference in the history still points at the output it
+  previewed (an improvement over nanobot; see `docs/UPSTREAM_BUGS.md`, bug 3).
 - **Without a workspace** (the runner on its own) results are simply truncated.
 
 ## Differences from nanobot (deliberate)
@@ -163,7 +166,7 @@ Result truncated. Read the saved file if you need the complete output.
 | 2 | Deny patterns for memory files | Also blocks shell writes to `history.jsonl` / `.dream_cursor` | Not yet | Those files arrive with memory in layer 6; the patterns come with them |
 | 3 | `list_dir` recursive ignore rule | Checks every part of the **absolute** path, so a workspace that itself sits under a folder named `build` or `dist` lists as empty | Checks only the parts **below** the listed folder | Avoids that surprise; tested |
 | 4 | Images, PDFs, Office files | `read_file` returns images and extracts PDF/DOCX/XLSX/PPTX | Text only; binary files get a clear error | Out of scope for the core |
-| 5 | Saved tool results | One folder per session; old folders deleted after 7 days or beyond 32; an existing file is never overwritten | One `default` folder; files overwritten; no clean-up | Sessions arrive in layer 5, which is when per-session folders and clean-up make sense |
+| 5 | Saved tool results | One folder per session; old folders deleted after 7 days or beyond 32; files named `<call id>.txt` and never overwritten | One `default` folder; no clean-up; files named `<call id>-<content hash>.txt` | Per-session folders and clean-up come with sessions in layer 5. The content hash fixes a stale-output bug in nanobot's naming (`docs/UPSTREAM_BUGS.md`, bug 3): the same ID with different output gets a different file, identical output reuses one |
 
 **What the deny list really is.** It is a list of text patterns
 (`DEFAULT_DENY_PATTERNS` in `shell.py`) matched against the lower-cased command.
