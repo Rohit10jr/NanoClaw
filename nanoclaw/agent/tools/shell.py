@@ -86,7 +86,7 @@ class ExecTool(Tool):
             return guard_error
 
         cwd = self._resolve_cwd(working_dir)
-        effective_timeout = min(timeout, self._MAX_TIMEOUT) if timeout else self.timeout
+        effective_timeout = self._resolve_timeout(timeout)
         process: asyncio.subprocess.Process | None = None
         try:
             process = await asyncio.create_subprocess_exec(
@@ -134,6 +134,18 @@ class ExecTool(Tool):
                 await self._kill_process_tree(process)
             return ToolResult.error(f"Error executing command: {e}")
 
+    def _resolve_timeout(self, timeout: int | None) -> int | None:
+        """Effective timeout in seconds; ``None`` means no limit (nanobot: _resolve_timeout).
+
+        A timeout chosen by the model is capped at 600 s. The configured default
+        (``self.timeout``) may be higher, and 0 disables the limit entirely.
+        """
+        if timeout:
+            return min(timeout, self._MAX_TIMEOUT)
+        if self.timeout and self.timeout > 0:
+            return self.timeout
+        return None
+
     def _guard_command(self, command: str) -> ToolResult | None:
         lower = command.strip().lower()
         for pattern in self.deny_patterns:
@@ -169,6 +181,11 @@ class ExecTool(Tool):
             os.killpg(process.pid, signal.SIGKILL)
         except (ProcessLookupError, PermissionError):
             pass
+        if process.returncode is None:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
         try:
             await asyncio.wait_for(process.wait(), timeout=5.0)
         except asyncio.TimeoutError:

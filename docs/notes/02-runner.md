@@ -131,7 +131,9 @@ turn doesn't start right after a dangling `user` or `tool` message.
 **Tool output is bounded.** Results longer than `max_tool_result_chars`
 (16,000, nanobot's default) are cut with `\n... (truncated)`. Empty results
 become `(<tool> completed with no output)` so the model doesn't think the tool
-hung.
+hung. *(Updated in layer 3: when the runner has a workspace, long results are
+saved to a file with a preview instead, and `read_file` is never cut. See
+`03-tools.md`, "Large tool results".)*
 
 **The caller's messages are never changed.** The runner deep-copies
 `initial_messages`; the full new history is returned in `result.messages`.
@@ -148,7 +150,7 @@ hung.
 | Repeated-call throttling | `repeated_external_lookup_error`, workspace-violation counting | Stop the model hammering the same URL or forbidden path |
 | SSRF / workspace violation classification | `execution.py` `_classify_violation` | Treat security blocks specially (layer 9 territory) |
 | Argument casting + full schema validation | `Tool.cast_params`, `validate_params`, `tools/schema.py` | `"5"` → `5`, type checks; **comes in layer 3** |
-| Context governance + compaction | `agent/context_governance.py` | Keep requests inside the context window; offload huge tool results to files (**layer 6**) |
+| Context governance + compaction | `agent/context_governance.py` | Keep requests inside the context window (**layer 6**). Its tool-result offloading was ported in layer 3 |
 | Streaming, reasoning events | hooks, `IncrementalThinkExtractor` | Live output in UIs |
 | Provider-state continuation | `ProviderConversationStateController` | OpenAI Responses API server-side state |
 | Usage estimation + per-round usage | `_usage_or_estimate`, `round_usages` | Cost tracking when providers don't report usage |

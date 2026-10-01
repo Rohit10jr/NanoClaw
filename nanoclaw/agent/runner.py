@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from nanoclaw.agent.messages import (
@@ -24,8 +25,8 @@ from nanoclaw.agent.messages import (
     build_tool_message,
     is_blank,
     strip_think,
-    truncate_text,
 )
+from nanoclaw.agent.tool_results import normalize_tool_result
 from nanoclaw.agent.tools import ToolRegistry, is_tool_error
 from nanoclaw.agent.tools.registry import with_retry_hint
 from nanoclaw.providers import LLMProvider, LLMResponse, LLMUsage, ToolCallRequest
@@ -47,6 +48,8 @@ class AgentRunSpec:
     model: str | None = None
     max_iterations: int = 20  # nanobot's default is 200
     max_tool_result_chars: int = 16_000
+    # Where oversized tool results are saved; without it they are truncated.
+    workspace: Path | None = None
     max_tokens: int = 4096
     temperature: float = 0.7
 
@@ -102,7 +105,14 @@ class AgentRunner:
                     )
                 )
                 for call in response.tool_calls:
-                    content, ok = await self._execute_tool_call(spec, call)
+                    raw, ok = await self._execute_tool_call(spec, call)
+                    content = normalize_tool_result(
+                        call.name,
+                        call.id,
+                        raw,
+                        workspace=spec.workspace,
+                        max_chars=spec.max_tool_result_chars,
+                    )
                     messages.append(build_tool_message(call.id, call.name, content))
                     if ok:
                         tools_used.append(call.name)
@@ -239,10 +249,7 @@ class AgentRunner:
             return with_retry_hint(f"Error: {type(exc).__name__}: {exc}"), False
         if is_tool_error(result):
             return with_retry_hint(str(result)), False
-        text = "" if result is None else str(result)
-        if is_blank(text):
-            text = f"({call.name} completed with no output)"
-        return truncate_text(text, spec.max_tool_result_chars), True
+        return ("" if result is None else str(result)), True
 
     async def _finalize_after_max_iterations(
         self,

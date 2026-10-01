@@ -39,6 +39,23 @@ async def test_read_absolute_path_and_crlf(ws):
     assert (await ReadFileTool(ws).execute(path=str(p))).startswith("1| a\n2| b")
 
 
+@pytest.mark.parametrize("encoding", ["utf-16", "utf-32"])
+async def test_read_utf16_and_utf32_with_bom(ws, encoding):
+    (ws / "win.txt").write_bytes("caf\u00e9\nna\u00efve".encode(encoding))  # Python adds the BOM
+    assert (await ReadFileTool(ws).execute(path="win.txt")).startswith("1| caf\u00e9\n2| na\u00efve")
+
+
+async def test_read_latin1_text_file(ws):
+    (ws / "old.csv").write_bytes("name\ncaf\u00e9".encode("latin-1"))
+    assert (await ReadFileTool(ws).execute(path="old.csv")).startswith("1| name\n2| caf\u00e9")
+
+
+async def test_non_utf8_without_text_extension_is_binary(ws):
+    (ws / "blob.bin").write_bytes("caf\u00e9".encode("latin-1"))
+    out = await ReadFileTool(ws).execute(path="blob.bin")
+    assert is_tool_error(out) and out.startswith("Error: Cannot read binary file blob.bin")
+
+
 async def test_read_utf8_bom_is_dropped(ws):
     (ws / "bom.txt").write_bytes("﻿hello".encode("utf-8"))
     assert (await ReadFileTool(ws).execute(path="bom.txt")).startswith("1| hello")
@@ -119,15 +136,40 @@ async def test_edit_matches_despite_different_indentation(ws):
     await EditFileTool(ws).execute(path="f.py", old_text="return 1", new_text="return 2")
     assert p.read_text() == "def f():\n    return 2\n"
     p = write(ws, "g.py", "def g():\n    x = 1\n    return x\n")
-    # Multi-line old_text with the wrong indentation still matches line by line.
-    await EditFileTool(ws).execute(path="g.py", old_text="x = 1\nreturn x", new_text="    return 1")
-    assert p.read_text() == "def g():\n    return 1\n"
+    # Multi-line old_text with the wrong indentation still matches line by line,
+    # and new_text (written in the same unindented style) is shifted to match the file.
+    await EditFileTool(ws).execute(path="g.py", old_text="x = 1\nreturn x", new_text="y = 2\nreturn y")
+    assert p.read_text() == "def g():\n    y = 2\n    return y\n"
+
+
+async def test_edit_reindents_nested_blocks_relative_to_the_match(ws):
+    p = write(ws, "h.py", "class A:\n    def f(self):\n        if x:\n            go()\n")
+    old = "if x:\n    go()"  # model dropped the 8-space indent
+    new = "if x:\n    go()\nelse:\n    stop()"
+    await EditFileTool(ws).execute(path="h.py", old_text=old, new_text=new)
+    assert p.read_text() == (
+        "class A:\n    def f(self):\n        if x:\n            go()\n        else:\n            stop()\n"
+    )
+
+
+async def test_edit_keeps_indentation_when_old_text_was_exact(ws):
+    p = write(ws, "k.py", "def k():\n    a = 1\n")
+    await EditFileTool(ws).execute(path="k.py", old_text="    a = 1", new_text="    a = 2")
+    assert p.read_text() == "def k():\n    a = 2\n"
 
 
 async def test_edit_matches_curly_quotes(ws):
     p = write(ws, "q.txt", "say “hello” now\n")
     await EditFileTool(ws).execute(path="q.txt", old_text='say "hello" now', new_text="say bye now")
     assert p.read_text() == "say bye now\n"
+
+
+async def test_edit_writes_curly_quotes_back_when_the_file_used_them(ws):
+    p = write(ws, "q.md", "She said \u201chi\u201d and it\u2019s fine.\n")
+    await EditFileTool(ws).execute(
+        path="q.md", old_text='She said "hi" and it\'s fine.', new_text='She said "bye" and it\'s \'ok\'.'
+    )
+    assert p.read_text() == "She said \u201cbye\u201d and it\u2019s \u2018ok\u2019.\n"
 
 
 async def test_edit_multiple_matches_warns_and_changes_nothing(ws):

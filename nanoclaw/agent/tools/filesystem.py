@@ -7,6 +7,7 @@ restrict by default either.
 
 from __future__ import annotations
 
+import codecs
 import difflib
 import mimetypes
 import re
@@ -67,6 +68,25 @@ def _is_blocked_device(path: str | Path) -> bool:
     return resolved.startswith("/dev/")
 
 
+# Extensions read as Latin-1 when they aren't valid UTF-8 (nanobot utils/document.py).
+_TEXT_EXTENSIONS = frozenset({
+    ".txt", ".md", ".csv", ".json", ".xml", ".html", ".htm",
+    ".log", ".yaml", ".yml", ".toml", ".ini", ".cfg",
+})
+
+
+def _decode_bom_text(raw: bytes) -> str | None:
+    """Decode text whose byte-order mark names its encoding (UTF-8/16/32)."""
+    if raw.startswith(codecs.BOM_UTF8):
+        return raw.decode("utf-8-sig")
+    # UTF-32 LE starts with the UTF-16 LE BOM, so check UTF-32 first.
+    if raw.startswith((codecs.BOM_UTF32_LE, codecs.BOM_UTF32_BE)):
+        return raw.decode("utf-32")
+    if raw.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        return raw.decode("utf-16")
+    return None
+
+
 class ReadFileTool(_FsTool):
     _MAX_CHARS = 128_000
     _MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024
@@ -120,14 +140,18 @@ class ReadFileTool(_FsTool):
             raw = fp.read_bytes()
             if not raw:
                 return f"(Empty file: {path})"
-            try:
-                text = raw.decode("utf-8-sig")
-            except UnicodeDecodeError:
-                mime = mimetypes.guess_type(path)[0]
-                return ToolResult.error(
-                    f"Error: Cannot read binary file {path} (MIME: {mime or 'unknown'}). "
-                    "Only supported text files can be read."
-                )
+            text = _decode_bom_text(raw)
+            if text is None:
+                try:
+                    text = raw.decode("utf-8")
+                except UnicodeDecodeError:
+                    if fp.suffix.lower() not in _TEXT_EXTENSIONS:
+                        mime = mimetypes.guess_type(path)[0]
+                        return ToolResult.error(
+                            f"Error: Cannot read binary file {path} (MIME: {mime or 'unknown'}). "
+                            "Only supported text files can be read."
+                        )
+                    text = raw.decode("latin-1")
             if not text:
                 return f"(Empty file: {path})"
 
@@ -225,6 +249,88 @@ _QUOTE_TABLE = str.maketrans({"‘": "'", "’": "'", "“": '"', "”": '"'})
 
 def _normalize_quotes(s: str) -> str:
     return s.translate(_QUOTE_TABLE)
+
+
+def _curly_double_quotes(text: str) -> str:
+    parts: list[str] = []
+    opening = True
+    for ch in text:
+        if ch == '"':
+            parts.append("\u201c" if opening else "\u201d")
+            opening = not opening
+        else:
+            parts.append(ch)
+    return "".join(parts)
+
+
+def _curly_single_quotes(text: str) -> str:
+    parts: list[str] = []
+    opening = True
+    for i, ch in enumerate(text):
+        if ch != "'":
+            parts.append(ch)
+            continue
+        prev_ch = text[i - 1] if i > 0 else ""
+        next_ch = text[i + 1] if i + 1 < len(text) else ""
+        if prev_ch.isalnum() and next_ch.isalnum():  # apostrophe, as in "don't"
+            parts.append("\u2019")
+            continue
+        parts.append("\u2018" if opening else "\u2019")
+        opening = not opening
+    return "".join(parts)
+
+
+def _preserve_quote_style(old_text: str, actual_text: str, new_text: str) -> str:
+    """If the match only succeeded by treating curly quotes as straight, write curly quotes back."""
+    if _normalize_quotes(old_text.strip()) != _normalize_quotes(actual_text.strip()) or old_text == actual_text:
+        return new_text
+    styled = new_text
+    if any(ch in actual_text for ch in ("\u201c", "\u201d")) and '"' in styled:
+        styled = _curly_double_quotes(styled)
+    if any(ch in actual_text for ch in ("\u2018", "\u2019")) and "'" in styled:
+        styled = _curly_single_quotes(styled)
+    return styled
+
+
+def _leading_ws(line: str) -> str:
+    return line[: len(line) - len(line.lstrip(" \t"))]
+
+
+def _reindent_like_match(old_text: str, actual_text: str, new_text: str) -> str:
+    """If the match only succeeded by ignoring indentation, shift ``new_text`` to the file's indentation.
+
+    Example: the file has ``    x = 1`` inside a function, the model sends
+    ``old_text="x = 1"``-style lines without the indent and ``new_text`` without it
+    too. Without this, the replacement would land unindented and break the code.
+    """
+    old_lines = old_text.split("\n")
+    actual_lines = actual_text.split("\n")
+    if len(old_lines) != len(actual_lines):
+        return new_text
+    comparable = [
+        (old_line, actual_line)
+        for old_line, actual_line in zip(old_lines, actual_lines)
+        if old_line.strip() and actual_line.strip()
+    ]
+    if not comparable or any(
+        _normalize_quotes(old_line.strip()) != _normalize_quotes(actual_line.strip())
+        for old_line, actual_line in comparable
+    ):
+        return new_text
+
+    old_ws = _leading_ws(comparable[0][0])
+    actual_ws = _leading_ws(comparable[0][1])
+    if actual_ws == old_ws:
+        return new_text
+    if old_ws:
+        if not actual_ws.startswith(old_ws):
+            return new_text
+        delta = actual_ws[len(old_ws):]
+    else:
+        delta = actual_ws
+    if not delta:
+        return new_text
+    return "\n".join((delta + line) if line else line for line in new_text.split("\n"))
 
 
 @dataclass(slots=True)
@@ -417,8 +523,9 @@ class EditFileTool(_FsTool):
                     return self._summary(fp, "", new_text, created=True)
                 return self._file_not_found_msg(path, fp)
 
-            if fp.stat().st_size > self._MAX_EDIT_FILE_SIZE:
-                return ToolResult.error("Error: File too large to edit. Maximum is 1 GiB.")
+            fsize = fp.stat().st_size
+            if fsize > self._MAX_EDIT_FILE_SIZE:
+                return ToolResult.error(f"Error: File too large to edit ({fsize / (1024**3):.1f} GiB). Maximum is 1 GiB.")
 
             raw = fp.read_bytes()
             if old_text == "":
@@ -467,16 +574,18 @@ class EditFileTool(_FsTool):
 
             new_content = content
             for match in reversed(selected):
+                replacement = _preserve_quote_style(norm_old, match.text, norm_new)
+                replacement = _reindent_like_match(norm_old, match.text, replacement)
                 end = match.end
                 # Deleting whole lines also removes their line break.
                 if (
-                    norm_new == ""
+                    replacement == ""
                     and (match.start == 0 or content[match.start - 1] == "\n")
                     and not match.text.endswith("\n")
                     and content[end : end + 1] == "\n"
                 ):
                     end += 1
-                new_content = new_content[: match.start] + norm_new + new_content[end:]
+                new_content = new_content[: match.start] + replacement + new_content[end:]
 
             out = new_content.replace("\n", "\r\n") if uses_crlf else new_content
             fp.write_bytes(out.encode("utf-8"))

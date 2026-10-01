@@ -22,6 +22,7 @@ async def _ask(provider: LLMProvider, prompt: str, workspace: Path) -> int:
             initial_messages=[{"role": "user", "content": prompt}],
             tools=build_default_tools(workspace),
             provider=provider,
+            workspace=workspace,
         )
     )
     if result.tools_used:

@@ -44,6 +44,19 @@ async def test_timeout_kills_the_command_and_its_children(tool, tmp_path):
     assert not marker.exists()  # the background child was killed too
 
 
+def test_timeout_resolution(tmp_path):
+    assert ExecTool(timeout=60)._resolve_timeout(None) == 60
+    assert ExecTool(timeout=60)._resolve_timeout(5) == 5
+    assert ExecTool(timeout=60)._resolve_timeout(9999) == 600  # model's choice is capped
+    assert ExecTool(timeout=1200)._resolve_timeout(None) == 1200  # configured default may exceed the cap
+    assert ExecTool(timeout=0)._resolve_timeout(None) is None  # 0 = no limit
+
+
+async def test_zero_timeout_means_no_limit(tmp_path):
+    out = await ExecTool(working_dir=tmp_path, timeout=0).execute(command="sleep 0.2; echo done")
+    assert out == "done\n\n\nExit code: 0"
+
+
 async def test_long_output_keeps_head_and_tail(tool):
     out = await tool.execute(command="python3 -c \"print('a' * 6000 + 'b' * 6000)\"")
     assert out.startswith("a" * 5000)

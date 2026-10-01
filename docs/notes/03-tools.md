@@ -32,7 +32,7 @@ model: Changed the port to 9090.
 | `agent/tools/web.py` | `web_fetch`, `web_search` | `agent/tools/web.py` |
 | `agent/tools/__init__.py` | `build_default_tools(workspace)` | `agent/tools/loader.py` (auto-discovery) |
 
-About 1,230 lines, versus about 4,170 in the same nanobot files.
+About 1,420 lines (including `agent/tool_results.py`), versus about 4,170 in the same nanobot files.
 
 `nanoclaw ask` now gets all seven tools, working in `--workspace`
 (default `~/.nanoclaw/workspace`, like nanobot's `~/.nanobot/workspace`), and
@@ -66,6 +66,9 @@ of `path` is reported instead of silently ignored.
   `(End of file — N lines total)`.
 - Limits: 128,000 characters per call, 100 MB files.
 - Refuses device files (`/dev/zero`, `/dev/stdin`, ...) that could hang or never end.
+- Reads UTF-8, UTF-16 and UTF-32 files with a byte-order mark (common on
+  Windows), and falls back to Latin-1 for text extensions such as `.txt`,
+  `.csv`, `.ini` that aren't valid UTF-8.
 - Clear errors: not found, not a file, binary file, offset past the end.
 
 ### `write_file(path, content)`
@@ -75,6 +78,11 @@ Creates parent folders; overwrites; replies `Successfully wrote N characters to 
 The most model-friendly tool, because models rarely copy text perfectly:
 - **Matching gets looser step by step:** exact → each line trimmed of
   indentation → also treating curly and straight quotes as equal.
+- **The replacement follows the file's style:** if the match only worked by
+  ignoring indentation, `new_text` is shifted to the file's real indentation
+  (otherwise an unindented replacement would break Python code). If it only
+  worked by treating curly quotes as straight, curly quotes are written back.
+  So the model writes `new_text` in the same style as its `old_text`.
 - **More than one match:** nothing changes; the model gets
   `Warning: old_text appears 3 times at line 4, line 9, line 20. Provide more context, set occurrence ...`
 - **No match:** the closest block is shown as a diff with a hint
@@ -91,8 +99,9 @@ The most model-friendly tool, because models rarely copy text perfectly:
 `.venv` and similar; notes truncation.
 
 ### `exec(command, working_dir, timeout=60)`
-- Runs `bash -c` in the workspace; maximum timeout 600 s. On timeout the
-  whole process group is killed, including background children.
+- Runs `bash -c` in the workspace. The model may pick a timeout up to 600 s;
+  the configured default is 60 s and may be higher, and 0 means no limit.
+  On timeout the whole process group is killed, including background children.
 - Output: stdout, `STDERR:` + stderr, `Exit code: N`; over 10,000 characters
   keeps the start and the end. A non-zero exit code is **not** a tool error:
   failing tests or a failed `grep` are normal information for the model.
@@ -117,6 +126,35 @@ DuckDuckGo through the `ddgs` package (nanobot's default provider; free, no
 key), run in a thread with a 30 s timeout. Results formatted as nanobot does:
 `1. Title\n   URL\n   snippet`.
 
+## Large tool results
+
+The runner keeps every tool result (errors included) within
+`max_tool_result_chars` (16,000), using nanobot's approach
+(`agent/tool_results.py`; nanobot `context_governance.py` and
+`utils/helpers.py` `maybe_persist_tool_result`):
+
+- **`read_file` is never cut.** It already pages itself and ends with
+  "Use offset=N to continue"; cutting it would lose that instruction.
+- **Anything else that is too long is saved in full** to
+  `<workspace>/.nanoclaw/tool-results/default/<call id>.txt`, and the model
+  gets the start and end as a preview plus the path, so it can `read_file`
+  the rest:
+
+```
+[tool output persisted]
+Full output saved to workspace path: /home/me/.nanoclaw/workspace/.nanoclaw/tool-results/default/call_1.txt
+Original size: 48211 chars
+Preview:
+<start of output>
+...
+<end of output>
+...
+Preview is also truncated.
+Result truncated. Read the saved file if you need the complete output.
+```
+
+- **Without a workspace** (the runner on its own) results are simply truncated.
+
 ## Differences from nanobot (deliberate)
 
 | # | Difference | nanobot | NanoClaw | Why |
@@ -125,6 +163,7 @@ key), run in a thread with a 30 s timeout. Results formatted as nanobot does:
 | 2 | Deny patterns for memory files | Also blocks shell writes to `history.jsonl` / `.dream_cursor` | Not yet | Those files arrive with memory in layer 6; the patterns come with them |
 | 3 | `list_dir` recursive ignore rule | Checks every part of the **absolute** path, so a workspace that itself sits under a folder named `build` or `dist` lists as empty | Checks only the parts **below** the listed folder | Avoids that surprise; tested |
 | 4 | Images, PDFs, Office files | `read_file` returns images and extracts PDF/DOCX/XLSX/PPTX | Text only; binary files get a clear error | Out of scope for the core |
+| 5 | Saved tool results | One folder per session; old folders deleted after 7 days or beyond 32; an existing file is never overwritten | One `default` folder; files overwritten; no clean-up | Sessions arrive in layer 5, which is when per-session folders and clean-up make sense |
 
 **What the deny list really is.** It is a list of text patterns
 (`DEFAULT_DENY_PATTERNS` in `shell.py`) matched against the lower-cased command.
@@ -145,7 +184,7 @@ blocked and the slip-through cases are tested in `tests/test_shell_tool.py`.
 | Private-network (SSRF) blocking | `security/network.py`, `_validate_url_safe` | Stop `web_fetch` reaching `localhost` or cloud metadata (**layer 9**) |
 | Sandbox (bubblewrap / macOS seatbelt) | `tools/sandbox.py` | OS-level isolation for `exec` (**layer 9**) |
 | "File unchanged since last read" | `file_state.py` | Saves tokens when the model rereads a file |
-| `edit_file` `line_hint`, `expected_replacements`, re-indenting, curly-quote preservation | `filesystem.py` | Finer control and style preservation |
+| `edit_file` `line_hint`, `expected_replacements` | `filesystem.py` | Pick a match by line number; guard the number of replacements |
 | `apply_patch`, ripgrep `search` | `tools/apply_patch.py`, `tools/search.py` | Multi-file patches, fast code search |
 | Background shell sessions | `exec_session.py`, `yield_time_ms` | Long-running commands the model polls |
 | Shell choice, login shells, PATH config, Windows | `shell.py` | Platform support |
@@ -169,3 +208,24 @@ blocked and the slip-through cases are tested in `tests/test_shell_tool.py`.
 
 The web tools were also checked once against the real internet
 (example.com, and a DuckDuckGo search), outside the test suite.
+
+## Review against nanobot (before layer 4)
+
+After building layer 3 we re-read nanobot's `filesystem.py`, `shell.py`,
+`web.py`, `utils/document.py`, `context_governance.py` and
+`utils/helpers.py` against our code. These differences were fixed:
+
+| # | Difference | Risk if left | Fix | nanobot |
+|---|---|---|---|---|
+| 1 | Every tool result was cut at 16,000 characters, **including `read_file`** | A large `read_file` lost its "Use offset=N to continue" footer, so the model couldn't page through the file; long `web_fetch` JSON was cut mid-way | `read_file` exempt; other long results saved to the workspace with a head-and-tail preview; error results handled too | `context_governance.py:68`, `:716`; `utils/helpers.py:624` |
+| 2 | `edit_file` didn't re-indent `new_text` after an indentation-insensitive match | An unindented replacement inside a function, i.e. broken Python | Ported `_reindent_like_match` and `_preserve_quote_style` | `filesystem.py` `_reindent_like_match`, `_preserve_quote_style` |
+| 3 | `read_file` treated UTF-16/UTF-32 files and Latin-1 text files as binary | Couldn't read common Windows-saved or older text files | Ported `_decode_bom_text` and the Latin-1 fallback for text extensions | `utils/document.py:607`, `:643`; `filesystem.py` `ReadFileTool.execute` |
+| 4 | `exec` with a configured timeout of 0 timed out instantly | "No limit" setting unusable | Ported `_resolve_timeout` | `shell.py:386` |
+| 5 | Small gaps: `edit_file` size message lacked the size; process kill had no fallback | Minor | nanobot's message; `process.kill()` after the group kill | `filesystem.py` `EditFileTool.execute`, `shell.py:730` |
+
+Each fix has tests, and removing any one of them makes tests fail.
+
+Checked and already matching: parameter validation and casting, `write_file`,
+`list_dir` (apart from documented difference #3), the deny list and its
+message, the minimal environment, output formatting and truncation in `exec`,
+the redirect loop and JSON result in `web_fetch`, and `web_search` formatting.

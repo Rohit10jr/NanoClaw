@@ -22,7 +22,7 @@ so line numbers stay correct even as nanobot changes.
 |---|---|---|---|---|
 | 1 Provider | `nanoclaw/providers/` (4 modules) | ~520 | `providers/base.py`, `openai_compat_provider.py`, `registry.py`, `factory.py` | ~5,400 |
 | 2 Runner | `nanoclaw/agent/runner.py`, `messages.py`, `tools/base.py`, `tools/registry.py` | ~540 | `agent/runner.py`, `agent/tools/base.py`, `registry.py`, `execution.py` | ~2,250 |
-| 3 Tools | `nanoclaw/agent/tools/schema.py`, `filesystem.py`, `shell.py`, `web.py` | ~1,230 | `agent/tools/filesystem.py`, `shell.py`, `web.py`, `schema.py`, `loader.py` | ~4,170 |
+| 3 Tools | `nanoclaw/agent/tools/schema.py`, `filesystem.py`, `shell.py`, `web.py`, `agent/tool_results.py` | ~1,420 | `agent/tools/filesystem.py`, `shell.py`, `web.py`, `schema.py`, `loader.py` | ~4,170 |
 | CLI (`ask`) | `nanoclaw/__main__.py` | ~45 | `cli/agent.py`, `cli/commands.py` | ~1,180 |
 
 ## Layer 1 — Provider
@@ -105,21 +105,21 @@ Note: [`notes/02-runner.md`](notes/02-runner.md)
 
 | NanoClaw | nanobot | How it compares |
 |---|---|---|
-| [`AgentRunSpec`](../nanoclaw/agent/runner.py#L41) | [`agent/runner.py:89`][nb-l2-spec] | Simplified: 8 fields instead of ~25 (no hooks, callbacks, checkpoints, workspace) |
-| [`AgentRunResult`](../nanoclaw/agent/runner.py#L55) | [`runner.py:119`][nb-l2-result] | Simplified: `final_content`, `messages`, `tools_used`, `usage`, `stop_reason`, `error` |
-| [`AgentRunner.run()`](../nanoclaw/agent/runner.py#L84) | [`runner.py:284`][nb-l2-run] `run` + [`:368`][nb-l2-core] `_run_core` | Simplified: the same loop and stop rules, ~75 lines instead of ~520 |
+| [`AgentRunSpec`](../nanoclaw/agent/runner.py#L42) | [`agent/runner.py:89`][nb-l2-spec] | Simplified: 8 fields instead of ~25 (no hooks, callbacks, checkpoints, workspace) |
+| [`AgentRunResult`](../nanoclaw/agent/runner.py#L58) | [`runner.py:119`][nb-l2-result] | Simplified: `final_content`, `messages`, `tools_used`, `usage`, `stop_reason`, `error` |
+| [`AgentRunner.run()`](../nanoclaw/agent/runner.py#L87) | [`runner.py:284`][nb-l2-run] `run` + [`:368`][nb-l2-core] `_run_core` | Simplified: the same loop and stop rules, ~75 lines instead of ~520 |
 | ↳ tool branch | [`runner.py:487`][nb-l2-toolbranch] | Simplified: sequential, no checkpoints or hooks |
 | ↳ ignore calls in cut-off replies | [`runner.py:579`][nb-l2-ignore] | Same |
-| [`_request_model()`](../nanoclaw/agent/runner.py#L179) | [`runner.py:852`][nb-l2-reqmodel] `_request_model` | Simplified: the malformed-call recovery only (retry with note, then no tools); no streaming, governance or compaction |
-| [`_drop_malformed_tool_calls()`](../nanoclaw/agent/runner.py#L206) | [`runner.py:1068`][nb-l2-dropmal] | Same |
+| [`_request_model()`](../nanoclaw/agent/runner.py#L189) | [`runner.py:852`][nb-l2-reqmodel] `_request_model` | Simplified: the malformed-call recovery only (retry with note, then no tools); no streaming, governance or compaction |
+| [`_drop_malformed_tool_calls()`](../nanoclaw/agent/runner.py#L216) | [`runner.py:1068`][nb-l2-dropmal] | Same |
 | ↳ empty-reply retry + finalization | [`runner.py:592`][nb-l2-empty], [`:1126`][nb-l2-finretry] `_request_finalization_retry` | Same rule (`_MAX_EMPTY_RETRIES = 2`) |
 | ↳ model error | [`runner.py:714`][nb-l2-error] | Same, minus the arrearage message |
 | ↳ empty final response | [`runner.py:737`][nb-l2-emptyfinal] | Same |
-| [`_execute_tool_call()`](../nanoclaw/agent/runner.py#L223) | [`agent/tools/execution.py:57`][nb-l2-exec] `execute_tool_calls`, [`:115`][nb-l2-exec1] `_execute_tool_call` | Simplified: `prepare_call`, run, `Error: <Type>: <msg>` on exceptions, same as nanobot. No batching, throttling or violation classification |
-| ↳ empty-output marker + truncation | [`context_governance.py:716`][nb-l2-normalize] `normalize_tool_result` | Simplified: truncate in place; nanobot can offload huge results to files |
-| [`_finalize_after_max_iterations()`](../nanoclaw/agent/runner.py#L247) | [`runner.py:1154`][nb-l2-finmax], [`:1249`][nb-l2-maxfallback] `_max_iterations_fallback` | Same |
-| [`_append_model_error_placeholder()`](../nanoclaw/agent/runner.py#L262) | [`runner.py:1361`][nb-l2-placeholder] | Same |
-| [`_add_usage()`](../nanoclaw/agent/runner.py#L70) | `runner.py:1326` `_merge_usage` | Simplified |
+| [`_execute_tool_call()`](../nanoclaw/agent/runner.py#L233) | [`agent/tools/execution.py:57`][nb-l2-exec] `execute_tool_calls`, [`:115`][nb-l2-exec1] `_execute_tool_call` | Simplified: `prepare_call`, run, `Error: <Type>: <msg>` on exceptions, same as nanobot. No batching, throttling or violation classification |
+| ↳ empty-output marker + keeping results in budget | [`context_governance.py:716`][nb-l2-normalize] `normalize_tool_result` | Same since the layer 3 review: see [`normalize_tool_result`](../nanoclaw/agent/tool_results.py#L88) under Layer 3 |
+| [`_finalize_after_max_iterations()`](../nanoclaw/agent/runner.py#L254) | [`runner.py:1154`][nb-l2-finmax], [`:1249`][nb-l2-maxfallback] `_max_iterations_fallback` | Same |
+| [`_append_model_error_placeholder()`](../nanoclaw/agent/runner.py#L269) | [`runner.py:1361`][nb-l2-placeholder] | Same |
+| [`_add_usage()`](../nanoclaw/agent/runner.py#L73) | `runner.py:1326` `_merge_usage` | Simplified |
 
 ### Messages and fixed texts — `nanoclaw/agent/messages.py`
 
@@ -153,15 +153,17 @@ Note: [`notes/03-tools.md`](notes/03-tools.md)
 
 | NanoClaw | nanobot | How it compares |
 |---|---|---|
-| [`_FsTool`](../nanoclaw/agent/tools/filesystem.py#L21) | [`agent/tools/filesystem.py:34`][nb-l3-fstool] | Simplified: workspace-relative paths only; no allowed dirs or restriction (layer 9) |
-| [`ReadFileTool`](../nanoclaw/agent/tools/filesystem.py#L70) | [`filesystem.py:270`][nb-l3-read] | Simplified: text only (no PDF/Office/images), no unchanged-file check. Same numbering, footers, limits, errors |
-| [`_is_blocked_device`](../nanoclaw/agent/tools/filesystem.py#L55) | [`filesystem.py:210`][nb-l3-device] | Same |
-| [`WriteFileTool`](../nanoclaw/agent/tools/filesystem.py#L182) | [`filesystem.py:557`][nb-l3-write] | Same |
-| [`EditFileTool`](../nanoclaw/agent/tools/filesystem.py#L352) | [`filesystem.py:877`][nb-l3-edit] | Simplified: no `line_hint`, `expected_replacements`, re-indenting or curly-quote preservation |
-| [`_find_matches`](../nanoclaw/agent/tools/filesystem.py#L287) (+ `_find_exact_matches`, `_find_trim_matches`, `_find_quote_matches`) | [`filesystem.py:793`][nb-l3-match] | Same strategies, same order |
-| [`_best_window`](../nanoclaw/agent/tools/filesystem.py#L319), `_diagnose_near_match`, `_not_found_msg`, `_file_not_found_msg` | [`filesystem.py:827`][nb-l3-best], `:1073`, `:1059` | Same |
-| [`_count_changed_lines`](../nanoclaw/agent/tools/filesystem.py#L335) | `utils/file_edit_events.py:59` `FileDiff.from_text` | Simplified: `difflib` instead of `rapidfuzz` |
-| [`ListDirTool`](../nanoclaw/agent/tools/filesystem.py#L530) | [`filesystem.py:1115`][nb-l3-list] | Same, except ignore rules only look below the listed folder (difference #3 in the note) |
+| [`_FsTool`](../nanoclaw/agent/tools/filesystem.py#L22) | [`agent/tools/filesystem.py:34`][nb-l3-fstool] | Simplified: workspace-relative paths only; no allowed dirs or restriction (layer 9) |
+| [`ReadFileTool`](../nanoclaw/agent/tools/filesystem.py#L90) | [`filesystem.py:270`][nb-l3-read] | Simplified: text only (no PDF/Office/images), no unchanged-file check. Same numbering, footers, limits, errors, BOM and Latin-1 decoding |
+| [`_decode_bom_text`](../nanoclaw/agent/tools/filesystem.py#L78), `_TEXT_EXTENSIONS` | [`utils/document.py:607`][nb-l3-bom], `:643` `_is_text_extension` | Same |
+| [`_is_blocked_device`](../nanoclaw/agent/tools/filesystem.py#L56) | [`filesystem.py:210`][nb-l3-device] | Same |
+| [`WriteFileTool`](../nanoclaw/agent/tools/filesystem.py#L206) | [`filesystem.py:557`][nb-l3-write] | Same |
+| [`EditFileTool`](../nanoclaw/agent/tools/filesystem.py#L458) | [`filesystem.py:877`][nb-l3-edit] | Simplified: no `line_hint` or `expected_replacements` |
+| [`_reindent_like_match`](../nanoclaw/agent/tools/filesystem.py#L299), `_preserve_quote_style`, `_curly_double_quotes`, `_curly_single_quotes` | `filesystem.py` (same names) | Same (added in the layer 3 review) |
+| [`_find_matches`](../nanoclaw/agent/tools/filesystem.py#L393) (+ `_find_exact_matches`, `_find_trim_matches`, `_find_quote_matches`) | [`filesystem.py:793`][nb-l3-match] | Same strategies, same order |
+| [`_best_window`](../nanoclaw/agent/tools/filesystem.py#L425), `_diagnose_near_match`, `_not_found_msg`, `_file_not_found_msg` | [`filesystem.py:827`][nb-l3-best], `:1073`, `:1059` | Same |
+| [`_count_changed_lines`](../nanoclaw/agent/tools/filesystem.py#L441) | `utils/file_edit_events.py:59` `FileDiff.from_text` | Simplified: `difflib` instead of `rapidfuzz` |
+| [`ListDirTool`](../nanoclaw/agent/tools/filesystem.py#L639) | [`filesystem.py:1115`][nb-l3-list] | Same, except ignore rules only look below the listed folder (difference #3 in the note) |
 
 ### Shell — `nanoclaw/agent/tools/shell.py`
 
@@ -169,9 +171,10 @@ Note: [`notes/03-tools.md`](notes/03-tools.md)
 |---|---|---|
 | [`ExecTool`](../nanoclaw/agent/tools/shell.py#L39) | [`agent/tools/shell.py:162`][nb-l3-exec] | Simplified: bash only; no sessions, sandbox, shell choice, PATH config or Windows |
 | [`DEFAULT_DENY_PATTERNS`](../nanoclaw/agent/tools/shell.py#L26) | [`shell.py:215`][nb-l3-deny] | Same general patterns; memory-file patterns come in layer 6 |
-| [`_guard_command`](../nanoclaw/agent/tools/shell.py#L137) | [`shell.py:840`][nb-l3-guard], called at [`:446`][nb-l3-guardcall] | **Different: always applied.** nanobot only when `restrict_to_workspace` is on (off by default). Deny list only; no allowlist or internal-URL check |
-| [`_build_env`](../nanoclaw/agent/tools/shell.py#L152) | [`shell.py:791`][nb-l3-env] | Same (Unix) |
-| [`_kill_process_tree`](../nanoclaw/agent/tools/shell.py#L167) | [`shell.py:730`][nb-l3-kill] | Simplified: `killpg` on the process group |
+| [`_guard_command`](../nanoclaw/agent/tools/shell.py#L149) | [`shell.py:840`][nb-l3-guard], called at [`:446`][nb-l3-guardcall] | **Different: always applied.** nanobot only when `restrict_to_workspace` is on (off by default). Deny list only; no allowlist or internal-URL check |
+| [`_build_env`](../nanoclaw/agent/tools/shell.py#L164) | [`shell.py:791`][nb-l3-env] | Same (Unix) |
+| [`_kill_process_tree`](../nanoclaw/agent/tools/shell.py#L179) | [`shell.py:730`][nb-l3-kill] | Simplified: `killpg` on the process group, then `process.kill()` |
+| [`_resolve_timeout`](../nanoclaw/agent/tools/shell.py#L137) | [`shell.py:386`][nb-l3-timeout] | Same: model's choice capped at 600 s; configured default may be higher; 0 = no limit |
 
 ### Web — `nanoclaw/agent/tools/web.py`
 
@@ -184,6 +187,15 @@ Note: [`notes/03-tools.md`](notes/03-tools.md)
 | [`WebSearchTool`](../nanoclaw/agent/tools/web.py#L201) | [`web.py:365`][nb-l3-search] | Simplified: DuckDuckGo only (nanobot's default of ~10 providers) |
 | [`_format_results`](../nanoclaw/agent/tools/web.py#L179), `_duckduckgo_search` | [`web.py:306`][nb-l3-format], `:1024` | Same |
 
+### Large tool results — `nanoclaw/agent/tool_results.py`
+
+| NanoClaw | nanobot | How it compares |
+|---|---|---|
+| [`normalize_tool_result`](../nanoclaw/agent/tool_results.py#L88) | [`agent/context_governance.py:716`][nb-l2-normalize] `ContextGovernor.normalize_tool_result` | Same order: empty marker → `read_file` exempt → truncate (no workspace) or save |
+| [`OFFLOAD_EXEMPT_TOOLS`](../nanoclaw/agent/tool_results.py#L22) | [`context_governance.py:68`][nb-l3-exempt] `TOOL_RESULT_OFFLOAD_EXEMPT_TOOLS` | Same: `{"read_file"}` |
+| [`maybe_persist_tool_result`](../nanoclaw/agent/tool_results.py#L56) | [`utils/helpers.py:624`][nb-l3-persist] | Simplified: one `default` folder, overwrites, no clean-up (difference #5 in the note) |
+| [`render_tool_result_reference`](../nanoclaw/agent/tool_results.py#L36), `safe_filename`, `ensure_nonempty_tool_result` | `utils/helpers.py:511`, `:372`; `utils/runtime.py:48` | Same text |
+
 ### Default tool set — `nanoclaw/agent/tools/__init__.py`
 
 | NanoClaw | nanobot | How it compares |
@@ -194,7 +206,7 @@ Note: [`notes/03-tools.md`](notes/03-tools.md)
 
 | NanoClaw | nanobot | How it compares |
 |---|---|---|
-| [`main()`](../nanoclaw/__main__.py#L36) `nanoclaw ask "..." [-w DIR]` | [`cli/agent.py:55`][nb-cli] `nanobot agent -m "..."` | Simplified: one `AgentRunner` turn with the default tools in the workspace (default `~/.nanoclaw/workspace`). Switches to `AgentLoop` in layer 5 and a chat REPL in layer 10 |
+| [`main()`](../nanoclaw/__main__.py#L37) `nanoclaw ask "..." [-w DIR]` | [`cli/agent.py:55`][nb-cli] `nanobot agent -m "..."` | Simplified: one `AgentRunner` turn with the default tools in the workspace (default `~/.nanoclaw/workspace`). Switches to `AgentLoop` in layer 5 and a chat REPL in layer 10 |
 
 ## Tests
 
@@ -209,6 +221,7 @@ Note: [`notes/03-tools.md`](notes/03-tools.md)
 | `tests/test_filesystem_tools.py` | the four file tools on real files |
 | `tests/test_shell_tool.py` | `exec` with real bash: output, timeout, secrets hidden, deny list |
 | `tests/test_web_tools.py` | `web_fetch` over mocked HTTP; `web_search` with a fake search |
+| `tests/test_tool_results.py` | large results saved with preview; `read_file` never cut; truncation without a workspace |
 | `tests/test_tools_end_to_end.py` | runner + default tools with a scripted model |
 | `tests/test_runner.py` | the loop end to end with `FakeProvider`: exact history, requests sent, tool failures, truncation, cut-off replies, empty-reply handling, model errors, iteration limit, usage, no mutation, one result per call |
 | `tests/test_cli_version.py` | `--version` |
@@ -301,3 +314,7 @@ Note: [`notes/03-tools.md`](notes/03-tools.md)
 [nb-l3-search]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/tools/web.py#L365
 [nb-l3-format]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/tools/web.py#L306
 [nb-l3-loader]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/tools/loader.py#L26
+[nb-l3-bom]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/utils/document.py#L607
+[nb-l3-timeout]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/tools/shell.py#L386
+[nb-l3-exempt]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/context_governance.py#L68
+[nb-l3-persist]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/utils/helpers.py#L624
