@@ -49,8 +49,10 @@ def sync_workspace_templates(workspace: Path) -> list[str]:
     """Create any missing starting files in ``workspace``. Never overwrites.
 
     Returns the names of the files created. nanobot also creates
-    ``memory/MEMORY.md``, ``memory/history.jsonl`` and ``skills/``; those come
-    with layers 6 and 7.
+    ``memory/MEMORY.md``, ``memory/history.jsonl`` and ``skills/`` (those come
+    with layers 6 and 7), ``HEARTBEAT.md`` and ``prompts/README.md`` (for
+    features NanoClaw doesn't have), and a git repository tracking
+    ``SOUL.md``/``USER.md``/``MEMORY.md``.
     """
     workspace.mkdir(parents=True, exist_ok=True)
     added: list[str] = []

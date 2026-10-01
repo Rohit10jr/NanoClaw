@@ -101,7 +101,9 @@ do change (here, the time) are attached to the **user's message** inside
 | Skills named in the message | `build_explicit_skill_runtime_context` | Auto-load a skill the user mentions (**layer 7**) |
 | Images in the user message | `build_user_content` | Vision models |
 | Legacy `SOUL.md` upgrade | `_load_bootstrap_files` | Migrating old installs |
-| Git-backed profile files | `sync_workspace_templates` → `GitStore` | History of `SOUL.md`/`USER.md`/`MEMORY.md` edits |
+| Git-backed profile files | `sync_workspace_templates` → `GitStore` | History of `SOUL.md`/`USER.md`/`MEMORY.md` edits (nanobot creates `.git` and `.gitignore` in the workspace) |
+| `HEARTBEAT.md` | `templates/HEARTBEAT.md`, gateway heartbeat job | Periodic background task list |
+| `prompts/` overrides | `templates/prompts/README.md`, `utils/workspace_prompts.py` | Editable prompts for Dream (memory) and the heartbeat evaluator; not part of the system prompt |
 | Runtime-context detach/reattach | `runtime_context.py` | Hiding the blocks when showing history in UIs |
 | Other runtime-context providers | tools, web UI | Session messages, goals, CLI apps, quotes |
 
@@ -126,3 +128,21 @@ About 260 lines of code plus the templates, versus about 640 in nanobot's
 - **Runtime context:** tags, appending to text and to content parts, the time line in three timezones, local time by default.
 - **Messages:** `[system, *history, user]`; a trailing user message merged (text and list content); input history untouched.
 - **CLI:** `nanoclaw prompt` prints the prompt and creates the files; `nanoclaw ask` sends an edited `SOUL.md`, the terminal hint, and the time only in the user message.
+
+## Review against nanobot (before layer 5)
+
+After building layer 4 we checked it against nanobot by **running both**, not
+only by reading the code (nanobot installed from `d3d70f2` in a separate
+environment):
+
+| Check | How | Result |
+|---|---|---|
+| Whole system prompt | Fresh workspace, each project's own `sync_workspace_templates`, then `ContextBuilder(ws).build_system_prompt(channel="cli")` in both; `diff` of the output | Identical except the recorded differences (name, "Dream" wording, image line) and nanobot's `# Skills` section, which arrives in layer 7 |
+| Message building | The same 5 cases through both `build_messages`: empty history with a runtime block; history ending with the assistant; trailing user message as text, as a list of parts, and empty | Identical output in all 5 cases |
+| Copied templates | `diff` of `platform_policy.md`, `tool_contract.md`, `USER.md` | Identical apart from the name |
+| When workspace files are created | Where nanobot calls `sync_workspace_templates` | Also on startup of its `agent` command (`cli/agent.py:154`), as ours does on `ask`/`prompt` |
+
+No code changes were needed. Two gaps in the notes were fixed: the files nanobot
+creates that we don't (`HEARTBEAT.md`, `prompts/`, the workspace git repository)
+are now listed under "What we left out", and the matching code comment in
+`sync_workspace_templates` was completed.
