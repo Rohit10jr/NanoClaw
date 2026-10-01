@@ -71,13 +71,16 @@ async def test_empty_tool_name_is_rejected(registry):
 async def test_arguments_must_be_an_object(registry, args):
     result = await registry.execute("echo", args)
     assert is_tool_error(result)
-    assert f"parameters must be a JSON object, got {type(args).__name__}" in result
+    assert result.startswith(
+        f"Error: Tool 'echo' parameters must be a JSON object, got {type(args).__name__}. "
+        'Use named parameters like tool_name(param1="value1", param2="value2") matching the tool schema.'
+    )
 
 
 async def test_missing_required_parameter(registry):
     result = await registry.execute("add", {"a": 1})
     assert is_tool_error(result)
-    assert "Invalid parameters for tool 'add': missing required 'b'" in result
+    assert "Invalid parameters for tool 'add': missing required b" in result
 
 
 async def test_raising_tool_becomes_error(registry):

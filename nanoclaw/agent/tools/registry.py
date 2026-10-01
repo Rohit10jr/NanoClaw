@@ -74,14 +74,15 @@ class ToolRegistry:
         if not isinstance(params, dict):
             return tool, params, (
                 f"Error: Tool '{name}' parameters must be a JSON object, got "
-                f"{type(params).__name__}. Use named parameters matching the tool schema."
+                f"{type(params).__name__}. Use named parameters like "
+                'tool_name(param1="value1", param2="value2") matching the tool schema.'
             )
 
         # Layer 2 checks only required keys; full JSON Schema validation is layer 3.
         required = (tool.parameters or {}).get("required") or []
         missing = [key for key in required if key not in params]
         if missing:
-            details = "; ".join(f"missing required '{key}'" for key in missing)
+            details = "; ".join(f"missing required {key}" for key in missing)
             return tool, params, f"Error: Invalid parameters for tool '{name}': {details}"
 
         return tool, params, None

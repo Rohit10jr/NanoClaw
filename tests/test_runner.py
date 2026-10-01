@@ -8,6 +8,7 @@ from nanoclaw.agent.messages import (
     BUDGET_EXHAUSTED_FINALIZATION_PROMPT,
     EMPTY_FINAL_RESPONSE_MESSAGE,
     FINALIZATION_RETRY_PROMPT,
+    MALFORMED_TOOL_CALL_NOTE,
     MODEL_ERROR_PLACEHOLDER,
     TRUNCATED_SUFFIX,
 )
@@ -137,9 +138,8 @@ async def test_no_tools_sent_when_registry_is_empty():
     [
         (call("nope", {}), "Error: Tool 'nope' not found."),
         (call("echo", '{"text": "unterminated'), "Error: Tool 'echo' parameters must be a JSON object"),
-        (call("add", {"a": 1}), "Error: Invalid parameters for tool 'add': missing required 'b'"),
-        (call("boom", {}), "Error executing boom: kaboom"),
-        (call("", {}), "Error: Tool '' not found."),
+        (call("add", {"a": 1}), "Error: Invalid parameters for tool 'add': missing required b"),
+        (call("boom", {}), "Error: RuntimeError: kaboom"),
     ],
 )
 async def test_tool_failures_are_reported_and_the_model_recovers(bad_call, expected_start):
@@ -153,6 +153,95 @@ async def test_tool_failures_are_reported_and_the_model_recovers(bad_call, expec
     assert result.tools_used == []
     assert result.stop_reason == "completed"
     assert fake.calls[1].messages[-1] == tool_msg  # the model saw the error
+
+
+async def test_tool_error_result_is_reported_with_hint():
+    from toy_tools import FailTool
+
+    fake = FakeProvider([wants_tools(call("fail", {})), "ok"])
+    result = await run(fake, FailTool())
+    assert result.messages[2]["content"] == "Error: file not found" + RETRY_HINT
+    assert result.tools_used == []
+
+
+# --- malformed (nameless) tool calls -----------------------------------------
+
+
+async def test_nameless_call_is_dropped_and_valid_ones_still_run():
+    fake = FakeProvider([wants_tools(call("", {}, "bad"), call("echo", {"text": "x"}, "good")), "done"])
+    result = await run(fake)
+
+    assistant = result.messages[1]
+    assert [tc["id"] for tc in assistant["tool_calls"]] == ["good"]
+    assert [m["tool_call_id"] for m in result.messages if m["role"] == "tool"] == ["good"]
+    assert len(fake.calls) == 2  # no malformed retry needed
+
+
+async def test_all_nameless_calls_trigger_one_retry_with_note():
+    fake = FakeProvider(
+        [
+            wants_tools(call("", {}), content="I'll check."),
+            wants_tools(call("echo", {"text": "x"})),
+            "done",
+        ]
+    )
+    result = await run(fake)
+
+    retry = fake.calls[1]
+    assert retry.tools is not None
+    assert retry.messages[-1]["role"] == "user"
+    assert retry.messages[-1]["content"].startswith(MALFORMED_TOOL_CALL_NOTE)
+    assert retry.messages[-1]["content"].endswith("I'll check.")
+    assert result.final_content == "done"
+    # Neither the nameless call nor the note is saved.
+    saved_ids = [tc["id"] for m in result.messages for tc in m.get("tool_calls", [])]
+    assert saved_ids == ["c1"]
+    assert all(not str(m.get("content", "")).startswith(MALFORMED_TOOL_CALL_NOTE) for m in result.messages)
+
+
+async def test_nameless_calls_twice_fall_back_to_no_tools_request():
+    fake = FakeProvider([wants_tools(call("", {})), wants_tools(call("", {})), "Plain answer."])
+    result = await run(fake)
+
+    assert fake.calls[2].tools is None
+    assert result.final_content == "Plain answer."
+    assert result.stop_reason == "completed"
+    assert len(fake.calls) == 3
+
+
+async def test_usage_includes_malformed_retries():
+    fake = FakeProvider(
+        [
+            wants_tools(call("", {}), usage=LLMUsage(5, 1)),
+            LLMResponse(content="ok", usage=LLMUsage(7, 2)),
+        ]
+    )
+    result = await run(fake)
+    assert result.usage == LLMUsage(12, 3)
+
+
+# --- inline reasoning --------------------------------------------------------
+
+
+async def test_inline_think_blocks_are_removed_from_answer():
+    fake = FakeProvider(["<think>Let me add 2 and 2.</think>\n\nIt's 4."])
+    result = await run(fake)
+    assert result.final_content == "It's 4."
+    assert result.messages[-1]["content"] == "It's 4."
+
+
+async def test_reply_that_is_only_thinking_counts_as_empty():
+    fake = FakeProvider(["<think>hmm", "Answer."])
+    result = await run(fake)
+    assert result.final_content == "Answer."
+    assert len(fake.calls) == 2
+
+
+async def test_refusal_is_not_retried_when_empty():
+    fake = FakeProvider([LLMResponse(content="", finish_reason="refusal")])
+    result = await run(fake)
+    assert result.stop_reason == "empty_final_response"
+    assert len(fake.calls) == 1
 
 
 # --- tool output handling ---------------------------------------------------

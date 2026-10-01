@@ -47,7 +47,7 @@ of the agent only ever sees this one shape.
 | `providers/factory.py` `provider_from_env` | `registry.py` + `factory.py` | three env vars instead of a registry |
 | `providers/fake.py` `FakeProvider` | — | scripted replies for tests |
 
-About 450 lines including docstrings and comments, versus about 5,400 for the same files in nanobot.
+About 520 lines including docstrings and comments, versus about 5,400 for the same files in nanobot.
 
 ## Design decisions worth knowing
 
@@ -78,6 +78,23 @@ generates a fresh 9-character ID when needed (nanobot's `_short_tool_id`).
 assistant message that only carries tool calls gets `None`; anything else gets
 `"(empty)"`.
 
+**Stored history is repaired before every request.** History is replayed on
+every call, so one bad message would break every later request.
+`OpenAICompatProvider._sanitize_messages` (nanobot
+`openai_compat_provider.py:701`) cleans a *copy* of the messages before sending:
+
+- drops keys the API doesn't know (anything outside `role`, `content`,
+  `tool_calls`, `tool_call_id`, `name`, `reasoning_content`)
+- rewrites each replayed tool call's `arguments` as a valid JSON object
+  (`tool_arguments_json_for_replay`, nanobot `base.py:169`). Malformed
+  arguments are kept *as-is* for the tool registry to reject when the call
+  first runs, but replaying them as invalid JSON could get the whole request
+  rejected, so on replay they become `"{}"`.
+- merges two user (or two assistant) messages in a row and drops a trailing
+  assistant message (`enforce_role_alternation`, nanobot `base.py:1144`).
+  vLLM, Ollama, Azure and others reject both. The runner itself creates
+  consecutive user messages when it adds a "please answer" prompt.
+
 **Lazy client.** Creating a provider never touches the network; the SDK client
 is built on the first call. nanobot does the same because client creation is
 slow on some systems.
@@ -93,6 +110,9 @@ slow on some systems.
 | OpenAI Responses API + native compaction | `_build_responses_body`, `openai_responses/` | Newer OpenAI endpoint; server-side history compression |
 | Tool calls written as text | `_extract_text_tool_calls` | Rescues weaker models that print JSON instead of calling tools |
 | Tool calls spread across several `choices` | `_parse` loop | A few gateways do this; we read `choices[0]` only |
+| Repairing malformed replayed arguments | `tool_arguments_object_for_replay` (uses `json_repair`) | Keeps what can be saved; we fall back to `{}` |
+| Tool-call ID normalization on replay | `_sanitize_messages` `map_id` / `unique_tool_id` | Providers with strict ID formats (Mistral) |
+| Role-alternation safety nets | `_enforce_role_alternation` | Synthetic user message for GLM-style providers; merging list (image) content |
 | Provider registry, presets, fallback, OAuth | `registry.py`, `factory.py`, `fallback_provider.py`, `*_oauth.py` | ~30 providers, named model setups, backup models, Copilot/Codex logins |
 | Anthropic / Bedrock / Azure adapters | `anthropic_provider.py`, … | Non-OpenAI wire formats |
 

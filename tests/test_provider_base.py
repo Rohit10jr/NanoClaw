@@ -4,7 +4,11 @@ import json
 import pytest
 
 from nanoclaw.providers import LLMProvider, LLMResponse, ToolCallRequest, parse_tool_arguments
-from nanoclaw.providers.base import sanitize_messages
+from nanoclaw.providers.base import (
+    enforce_role_alternation,
+    sanitize_messages,
+    tool_arguments_json_for_replay,
+)
 
 
 @pytest.mark.parametrize(
@@ -88,3 +92,55 @@ async def test_safe_chat_turns_exceptions_into_error_responses():
 async def test_safe_chat_lets_cancellation_through():
     with pytest.raises(asyncio.CancelledError):
         await _Raising(asyncio.CancelledError()).safe_chat(messages=[])
+
+
+# --- replaying history -------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ({"path": "a"}, '{"path": "a"}'),
+        ('{"path": "a"}', '{"path": "a"}'),
+        ('{"path": ', "{}"),  # malformed: replaced so the API accepts the history
+        ("[1, 2]", "{}"),
+        ("", "{}"),
+        (None, "{}"),
+    ],
+)
+def test_tool_arguments_json_for_replay(raw, expected):
+    assert tool_arguments_json_for_replay(raw) == expected
+
+
+def test_role_alternation_merges_consecutive_user_messages():
+    msgs = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "hi"},
+        {"role": "user", "content": "please answer"},
+    ]
+    out = enforce_role_alternation(msgs)
+    assert out == [{"role": "system", "content": "sys"}, {"role": "user", "content": "hi\n\nplease answer"}]
+    assert msgs[1]["content"] == "hi"  # input untouched
+
+
+def test_role_alternation_drops_trailing_assistant():
+    msgs = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
+    assert enforce_role_alternation(msgs) == [{"role": "user", "content": "hi"}]
+
+
+def test_role_alternation_keeps_tool_exchanges():
+    msgs = [
+        {"role": "user", "content": "x"},
+        {"role": "assistant", "content": None, "tool_calls": [{"id": "a"}]},
+        {"role": "tool", "tool_call_id": "a", "content": "1"},
+        {"role": "tool", "tool_call_id": "b", "content": "2"},
+        {"role": "user", "content": "y"},
+    ]
+    assert enforce_role_alternation(msgs) == msgs
+
+
+def test_role_alternation_prefers_assistant_with_tool_calls():
+    plain = {"role": "assistant", "content": "thinking"}
+    with_tools = {"role": "assistant", "content": None, "tool_calls": [{"id": "a"}]}
+    tool = {"role": "tool", "tool_call_id": "a", "content": "1"}
+    assert enforce_role_alternation([{"role": "user", "content": "x"}, plain, with_tools, tool])[1] == with_tools

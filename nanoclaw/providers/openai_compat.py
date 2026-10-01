@@ -18,11 +18,18 @@ from nanoclaw.providers.base import (
     LLMResponse,
     LLMUsage,
     ToolCallRequest,
+    enforce_role_alternation,
     parse_tool_arguments,
     sanitize_messages,
+    tool_arguments_json_for_replay,
 )
 
 _ALNUM = string.ascii_letters + string.digits
+
+# Message keys the Chat Completions API understands; anything else is dropped.
+_ALLOWED_MSG_KEYS = frozenset(
+    {"role", "content", "tool_calls", "tool_call_id", "name", "reasoning_content"}
+)
 
 
 def _short_tool_id() -> str:
@@ -90,7 +97,7 @@ class OpenAICompatProvider(LLMProvider):
         """Build the keyword arguments for ``chat.completions.create``."""
         kwargs: dict[str, Any] = {
             "model": model or self.default_model,
-            "messages": sanitize_messages(messages),
+            "messages": self._sanitize_messages(messages),
             "max_tokens": max(1, max_tokens),
             "temperature": temperature,
         }
@@ -98,6 +105,34 @@ class OpenAICompatProvider(LLMProvider):
             kwargs["tools"] = tools
             kwargs["tool_choice"] = tool_choice or "auto"
         return kwargs
+
+    @staticmethod
+    def _sanitize_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Make stored history safe to send (nanobot: _sanitize_messages).
+
+        Drops unknown keys, rewrites replayed tool-call arguments as valid JSON
+        objects, fixes empty content, and enforces role alternation.
+        """
+        cleaned: list[dict[str, Any]] = []
+        for msg in sanitize_messages(messages):
+            clean = {k: v for k, v in msg.items() if k in _ALLOWED_MSG_KEYS}
+            if clean.get("role") == "assistant" and "content" not in clean:
+                clean["content"] = None
+            if clean.get("tool_calls"):
+                clean["tool_calls"] = [
+                    {
+                        **tc,
+                        "function": {
+                            **tc.get("function", {}),
+                            "arguments": tool_arguments_json_for_replay(
+                                tc.get("function", {}).get("arguments")
+                            ),
+                        },
+                    }
+                    for tc in clean["tool_calls"]
+                ]
+            cleaned.append(clean)
+        return enforce_role_alternation(cleaned)
 
     async def chat(
         self,

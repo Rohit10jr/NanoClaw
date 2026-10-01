@@ -106,6 +106,57 @@ class LLMResponse:
         return self.finish_reason == "error"
 
 
+def tool_arguments_json_for_replay(arguments: Any) -> str:
+    """JSON object string for a tool call being *replayed* from history.
+
+    Unlike :func:`parse_tool_arguments` (used for calls about to run), this may
+    replace bad arguments: malformed JSON or a non-object becomes ``"{}"`` so
+    the request isn't rejected. nanobot first tries ``json_repair``.
+    """
+    if isinstance(arguments, dict):
+        return json.dumps(arguments, ensure_ascii=False)
+    if isinstance(arguments, str) and arguments.strip():
+        try:
+            parsed = json.loads(arguments)
+        except json.JSONDecodeError:
+            return "{}"
+        if isinstance(parsed, dict):
+            return json.dumps(parsed, ensure_ascii=False)
+    return "{}"
+
+
+def enforce_role_alternation(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge consecutive user (or assistant) messages; drop trailing assistant messages.
+
+    Many OpenAI-compatible servers (vLLM, Ollama, Azure, ...) reject two user
+    messages in a row or a request ending with an assistant message. This
+    happens, for example, when the runner adds a "please answer" prompt right
+    after the user's message. Input messages are not mutated.
+    """
+    merged: list[dict[str, Any]] = []
+    for msg in messages:
+        role = msg.get("role")
+        if merged and role in ("user", "assistant") and merged[-1].get("role") == role:
+            prev = merged[-1]
+            if role == "assistant":
+                if msg.get("tool_calls"):
+                    merged[-1] = dict(msg)
+                    continue
+                if prev.get("tool_calls"):
+                    continue
+            prev_content = prev.get("content") or ""
+            curr_content = msg.get("content") or ""
+            if isinstance(prev_content, str) and isinstance(curr_content, str):
+                prev["content"] = (prev_content + "\n\n" + curr_content).strip()
+            else:
+                merged[-1] = dict(msg)
+        else:
+            merged.append(dict(msg))
+    while merged and merged[-1].get("role") == "assistant":
+        merged.pop()
+    return merged
+
+
 def sanitize_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Replace empty string content, which most chat APIs reject.
 

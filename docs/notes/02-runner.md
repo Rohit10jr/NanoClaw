@@ -54,28 +54,45 @@ would otherwise break the conversation.
 | `nanoclaw/agent/runner.py` | `AgentRunSpec`, `AgentRunResult`, `AgentRunner` |
 | `nanoclaw/agent/messages.py` | message builders, truncation, and the fixed texts copied from nanobot |
 
-About 430 lines. nanobot's equivalent (`runner.py`, `tools/base.py`,
+About 540 lines. nanobot's equivalent (`runner.py`, `tools/base.py`,
 `tools/registry.py`, `tools/execution.py`) is about 2,250 lines.
 
 Symbol-by-symbol mapping: [`../CODE_MAP.md`](../CODE_MAP.md#layer-2--runner).
 
 ## Design decisions worth knowing
 
-**Tools never crash the run.** `ToolRegistry.execute` turns every failure into
-an error *result*, which the model reads:
+**Tools never crash the run.** Every failure becomes an error *result*, which
+the model reads. The runner runs calls the way nanobot's runner does
+(`tools/execution.py` `_execute_tool_call`): `ToolRegistry.prepare_call` checks
+the call, then the runner runs the tool itself and catches any exception.
 
 | Situation | What the model sees |
 |---|---|
 | Unknown tool | `Error: Tool 'x' not found. Available: add, echo` |
 | Name differs only in case/punctuation | `... Did you mean 'echo'? Tool names must match exactly.` (the call still does **not** run) |
 | Arguments not a JSON object (e.g. malformed JSON from layer 1) | `Error: Tool 'echo' parameters must be a JSON object, got str. ...` |
-| Missing required parameter | `Error: Invalid parameters for tool 'add': missing required 'b'` |
-| Tool raised | `Error executing boom: kaboom` |
+| Missing required parameter | `Error: Invalid parameters for tool 'add': missing required b` |
+| Tool raised | `Error: RuntimeError: kaboom` (`ToolRegistry.execute`, used outside the runner, says `Error executing boom: kaboom`, as in nanobot) |
 | Tool returned `ToolResult.error(...)` | its own message |
 
 Each one ends with nanobot's hint
 `[Analyze the error above and try a different approach.]` (added once). In
 practice models usually fix their call on the next iteration.
+
+**Tool calls without a name are dropped, never run or saved.** Some models
+emit a tool call with an empty name. It can't run, and if it were saved the API
+would reject every later request in the conversation. So it is removed from the
+response before anything else happens (nanobot `runner.py:1068`). If that
+leaves no calls, the request is retried once with nanobot's note *"The previous
+model response attempted to call tools, but every tool call was malformed..."*;
+if the retry is malformed too, one last request is made with tools off. Neither
+the note nor the bad calls end up in history.
+
+**Inline thinking is removed from answers.** Local reasoning models often reply
+`<think>...</think>The answer.`. `strip_think` removes those blocks (and an
+unclosed block at the start), so a reply that is *only* thinking counts as
+empty. nanobot does this in `extract_reasoning` (`utils/helpers.py:291`) and
+also handles malformed and streaming-split tags.
 
 **Tools return `ToolResult.error` for expected failures.** `ToolResult` is a
 `str` with an `is_error` flag. A tool like `read_file` can say "file not found"
@@ -88,7 +105,7 @@ treated as text. This uses `LLMResponse.should_execute_tools` from layer 1
 (nanobot `runner.py:487` / `:579`).
 
 **Empty replies get two more chances.** Some models occasionally return
-nothing. First the same request is retried. If it is empty again, one request
+nothing (unless the reply was cut off, refused or filtered, which counts as final). First the same request is retried. If it is empty again, one request
 is sent with tools turned off and an extra user message, *"Please provide your
 response to the user based on the conversation above."* If that is also empty,
 the run stops with `empty_final_response` and nanobot's message *"I completed
@@ -132,7 +149,7 @@ hung.
 | SSRF / workspace violation classification | `execution.py` `_classify_violation` | Treat security blocks specially (layer 9 territory) |
 | Argument casting + full schema validation | `Tool.cast_params`, `validate_params`, `tools/schema.py` | `"5"` → `5`, type checks; **comes in layer 3** |
 | Context governance + compaction | `agent/context_governance.py` | Keep requests inside the context window; offload huge tool results to files (**layer 6**) |
-| Streaming, reasoning events | hooks, `extract_reasoning` | Live output in UIs |
+| Streaming, reasoning events | hooks, `IncrementalThinkExtractor` | Live output in UIs |
 | Provider-state continuation | `ProviderConversationStateController` | OpenAI Responses API server-side state |
 | Usage estimation + per-round usage | `_usage_or_estimate`, `round_usages` | Cost tracking when providers don't report usage |
 | Arrearage message | `is_arrearage_response` | Friendly "out of credit" message |
@@ -163,3 +180,20 @@ uv run nanoclaw ask "hello"
   - model errors, before and after tools
   - iteration limit: finalization success, and the fallback for three kinds of failure
   - usage summed; `initial_messages` unchanged; every call answered exactly once
+
+## Review against nanobot (before layer 3)
+
+After layer 2 we re-read nanobot's `runner.py` (including `_request_model`),
+`tools/execution.py`, `tools/registry.py`, `tools/base.py`,
+`providers/base.py` and `providers/openai_compat_provider.py` line by line
+against our code. These differences were fixed:
+
+| # | Difference | Risk if left | Fix | nanobot |
+|---|---|---|---|---|
+| 1 | Nameless tool calls were run as "unknown tool" and **saved to history** | The API rejects the saved call, breaking every later request in the conversation | Drop them; retry once with a note; then a no-tools request | `runner.py:1012–1124` |
+| 2 | Malformed tool-call arguments were **replayed** as invalid JSON | Strict providers reject the request | Rewrite replayed arguments as a JSON object (`{}` if unparseable) | `providers/openai_compat_provider.py:701`, `providers/base.py:169` |
+| 3 | Two user messages in a row were sent (e.g. the "please answer" prompt) | vLLM, Ollama, Azure and others reject them | `enforce_role_alternation`, plus dropping unknown message keys | `providers/base.py:929`, `:1144` |
+| 4 | `<think>` blocks from local models stayed in the answer | The user sees the model's internal reasoning; a thinking-only reply wasn't treated as empty | `strip_think` on every response | `utils/helpers.py:167`, `:291` |
+| 5 | Exception text differed from what nanobot's runner sends; empty `refusal` replies were retried; two message texts differed slightly | The model saw different wording than nanobot | `Error: RuntimeError: ...`, `refusal` treated as final, exact nanobot texts | `tools/execution.py:185`, `runner.py:589`, `tools/base.py:99`, `tools/registry.py:135` |
+
+Each fix has tests, and removing any one of them makes tests fail.

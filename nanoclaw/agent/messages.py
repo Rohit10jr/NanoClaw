@@ -6,6 +6,7 @@ templates/agent/max_iterations_message.md) so behaviour matches.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 TRUNCATED_SUFFIX = "\n... (truncated)"
@@ -37,6 +38,22 @@ MAX_ITERATIONS_MESSAGE = (
 )
 
 
+MALFORMED_TOOL_CALL_NOTE = (
+    "The previous model response attempted to call tools, but every tool call "
+    "was malformed: the tool_use blocks had missing or non-string tool names. "
+    "Do not answer with a promise to use tools. Either call the required tools again "
+    "using valid tool names from the provided tool list and JSON object inputs, or give "
+    "a final answer only if no tool is required."
+)
+
+
+def build_malformed_tool_call_note(assistant_text: str | None) -> dict[str, str]:
+    note = MALFORMED_TOOL_CALL_NOTE
+    if assistant_text:
+        note += f"\n\nPrevious assistant text before the malformed calls:\n{assistant_text}"
+    return {"role": "user", "content": note}
+
+
 def build_assistant_message(
     content: str | None,
     tool_calls: list[dict[str, Any]] | None = None,
@@ -62,3 +79,21 @@ def truncate_text(text: str, max_chars: int) -> str:
 
 def is_blank(text: str | None) -> bool:
     return text is None or not text.strip()
+
+
+_THINKING_TAG = r"(?:think|thinking|thought)"
+
+
+def strip_think(text: str) -> str:
+    """Remove inline reasoning blocks some models put in their answer text.
+
+    Local reasoning models (DeepSeek-R1, Qwen3 via Ollama, ...) often reply
+    with ``<think>...</think>answer``. Removes closed blocks and an unclosed
+    block at the start. nanobot's version (utils/helpers.py strip_think) also
+    cleans up malformed tags and streaming fragments.
+    """
+    if "<" not in text:
+        return text.strip()
+    text = re.sub(rf"<(?P<tag>{_THINKING_TAG})>[\s\S]*?</(?P=tag)>", "", text)
+    text = re.sub(rf"^\s*<{_THINKING_TAG}>[\s\S]*$", "", text)
+    return text.strip()

@@ -151,6 +151,28 @@ async def test_round_trip_of_tool_history():
     assert sent[2] == history[2]
 
 
+async def test_history_is_repaired_before_sending():
+    api = MockAPI(body=completion({"content": "ok"}))
+    history = [
+        {"role": "user", "content": "go", "timestamp": "2026-10-01"},  # unknown key
+        {"role": "assistant", "content": "", "tool_calls": [tool_call("c1", "read_file", '{"path": ')]},
+        {"role": "tool", "tool_call_id": "c1", "name": "read_file", "content": "Error: ..."},
+        {"role": "user", "content": "try again"},
+        {"role": "user", "content": "please"},  # consecutive user messages
+    ]
+    await api.provider().chat(messages=history, tools=TOOLS)
+    sent = api.requests[0]["messages"]
+
+    assert sent[0] == {"role": "user", "content": "go"}
+    assert sent[1]["tool_calls"][0]["function"]["arguments"] == "{}"
+    assert sent[1]["content"] is None
+    assert sent[3] == {"role": "user", "content": "try again\n\nplease"}
+    assert len(sent) == 4
+    # The caller's history is untouched.
+    assert history[1]["tool_calls"][0]["function"]["arguments"] == '{"path": '
+    assert history[0]["timestamp"] == "2026-10-01"
+
+
 async def test_http_error_becomes_error_response():
     api = MockAPI(status=401, body={"error": {"message": "Invalid API key", "type": "invalid_request_error"}})
     resp = await api.provider().chat(messages=[{"role": "user", "content": "x"}])

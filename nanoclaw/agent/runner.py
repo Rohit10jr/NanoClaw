@@ -20,15 +20,21 @@ from nanoclaw.agent.messages import (
     MAX_ITERATIONS_MESSAGE,
     MODEL_ERROR_PLACEHOLDER,
     build_assistant_message,
+    build_malformed_tool_call_note,
     build_tool_message,
     is_blank,
+    strip_think,
     truncate_text,
 )
 from nanoclaw.agent.tools import ToolRegistry, is_tool_error
+from nanoclaw.agent.tools.registry import with_retry_hint
 from nanoclaw.providers import LLMProvider, LLMResponse, LLMUsage, ToolCallRequest
 
 # After this many empty replies in a row, ask once more with tools off.
 _MAX_EMPTY_RETRIES = 2
+
+# finish_reasons after which an empty reply is final rather than retried.
+_NO_RETRY_FINISH_REASONS = frozenset({"error", "length", "refusal", "content_filter"})
 
 
 @dataclass
@@ -83,8 +89,8 @@ class AgentRunner:
         empty_retries = 0
 
         for _iteration in range(spec.max_iterations):
-            response = await self._request(spec, messages, with_tools=True)
-            usage = _add_usage(usage, response.usage)
+            response, request_usage = await self._request_model(spec, messages)
+            usage = _add_usage(usage, request_usage)
 
             # 1. The model wants tools: run them and go round again.
             if response.should_execute_tools:
@@ -108,8 +114,7 @@ class AgentRunner:
             content = response.content
 
             # 2. Empty reply: retry, then ask once more with tools off.
-            cut_off = response.finish_reason in ("length", "content_filter")
-            if not response.is_error and not cut_off and is_blank(content):
+            if response.finish_reason not in _NO_RETRY_FINISH_REASONS and is_blank(content):
                 empty_retries += 1
                 if empty_retries < _MAX_EMPTY_RETRIES:
                     continue
@@ -158,27 +163,86 @@ class AgentRunner:
         *,
         with_tools: bool,
     ) -> LLMResponse:
+        """One provider call. Inline <think> blocks are removed from the answer."""
         tools = spec.tools.get_definitions() if with_tools else []
-        return await spec.provider.safe_chat(
+        response = await spec.provider.safe_chat(
             messages=messages,
             tools=tools or None,
             model=spec.model,
             max_tokens=spec.max_tokens,
             temperature=spec.temperature,
         )
+        if response.content and not response.is_error:
+            response.content = strip_think(response.content)
+        return response
+
+    async def _request_model(
+        self,
+        spec: AgentRunSpec,
+        messages: list[dict[str, Any]],
+        *,
+        malformed_retry: bool = False,
+    ) -> tuple[LLMResponse, LLMUsage | None]:
+        """Request with tools, recovering from tool calls that have no name.
+
+        Mirrors nanobot runner.py _request_model: nameless calls are dropped.
+        If that leaves none, the request is retried once with a note; if the
+        retry is malformed too, one final request is made with tools off.
+        """
+        response = await self._request(spec, messages, with_tools=True)
+        usage = response.usage
+        all_dropped, original_finish = self._drop_malformed_tool_calls(response)
+        if not all_dropped or original_finish not in ("tool_calls", "function_call"):
+            return response, usage
+
+        retry_messages = messages + [build_malformed_tool_call_note(response.content)]
+        if not malformed_retry:
+            retry, retry_usage = await self._request_model(spec, retry_messages, malformed_retry=True)
+            return retry, _add_usage(usage, retry_usage)
+        fallback = await self._request(spec, retry_messages, with_tools=False)
+        return fallback, _add_usage(usage, fallback.usage)
+
+    @staticmethod
+    def _drop_malformed_tool_calls(response: LLMResponse) -> tuple[bool, str]:
+        """Remove tool calls with an empty name. Returns (all_dropped, original_finish_reason).
+
+        A nameless call can't run, and if saved to history the API would reject
+        every later request in the conversation. (nanobot runner.py:1068)
+        """
+        original_finish = response.finish_reason
+        if not response.tool_calls:
+            return False, original_finish
+        valid = [tc for tc in response.tool_calls if tc.has_valid_name()]
+        if len(valid) == len(response.tool_calls):
+            return False, original_finish
+        response.tool_calls = valid
+        if not valid:
+            response.finish_reason = "stop"
+        return not valid, original_finish
 
     async def _execute_tool_call(
         self,
         spec: AgentRunSpec,
         call: ToolCallRequest,
     ) -> tuple[str, bool]:
-        """Run one call; return the text for the tool message and whether it succeeded."""
-        result = await spec.tools.execute(call.name, call.arguments)
-        ok = not is_tool_error(result)
+        """Run one call; return the text for the tool message and whether it succeeded.
+
+        Mirrors nanobot agent/tools/execution.py _execute_tool_call.
+        """
+        tool, params, error = spec.tools.prepare_call(call.name, call.arguments)
+        if error:
+            return with_retry_hint(error), False
+        assert tool is not None
+        try:
+            result = await tool.execute(**params)
+        except Exception as exc:
+            return with_retry_hint(f"Error: {type(exc).__name__}: {exc}"), False
+        if is_tool_error(result):
+            return with_retry_hint(str(result)), False
         text = "" if result is None else str(result)
         if is_blank(text):
             text = f"({call.name} completed with no output)"
-        return truncate_text(text, spec.max_tool_result_chars), ok
+        return truncate_text(text, spec.max_tool_result_chars), True
 
     async def _finalize_after_max_iterations(
         self,
