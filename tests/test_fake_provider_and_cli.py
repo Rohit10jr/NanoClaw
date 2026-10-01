@@ -18,16 +18,40 @@ async def test_fake_provider_replays_script_and_records_calls():
     assert fake.calls[1].model == "m2"
 
 
-def test_cli_ask_prints_reply(capsys):
+def test_cli_ask_prints_reply(capsys, tmp_path):
     fake = FakeProvider(["Hello from the model"])
-    assert main(["ask", "hello"], provider=fake) == 0
+    assert main(["ask", "hello", "-w", str(tmp_path)], provider=fake) == 0
     assert capsys.readouterr().out.strip() == "Hello from the model"
     assert fake.calls[0].messages == [{"role": "user", "content": "hello"}]
 
 
-def test_cli_ask_reports_errors_on_stderr(capsys):
+def test_cli_ask_reports_errors_on_stderr(capsys, tmp_path):
     fake = FakeProvider([LLMResponse(content="Error calling LLM: HTTP 401: bad key", finish_reason="error")])
-    assert main(["ask", "hello"], provider=fake) == 1
+    assert main(["ask", "hello", "-w", str(tmp_path)], provider=fake) == 1
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "401" in captured.err
+
+
+def test_cli_ask_gives_the_model_the_default_tools_in_the_workspace(capsys, tmp_path):
+    from nanoclaw.providers import ToolCallRequest
+
+    workspace = tmp_path / "ws"
+    fake = FakeProvider(
+        [
+            LLMResponse(
+                content=None,
+                tool_calls=[ToolCallRequest("c1", "write_file", {"path": "note.txt", "content": "hi"})],
+                finish_reason="tool_calls",
+            ),
+            "Saved.",
+        ]
+    )
+    assert main(["ask", "save a note", "-w", str(workspace)], provider=fake) == 0
+
+    names = sorted(d["function"]["name"] for d in fake.calls[0].tools)
+    assert names == ["edit_file", "exec", "list_dir", "read_file", "web_fetch", "web_search", "write_file"]
+    assert (workspace / "note.txt").read_text() == "hi"  # relative path landed in the workspace
+    captured = capsys.readouterr()
+    assert captured.out.strip() == "Saved."
+    assert "[tools used: write_file]" in captured.err

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from nanoclaw.agent.tools.base import Tool, ToolResult, is_tool_error
@@ -71,6 +72,7 @@ class ToolRegistry:
             available = ", ".join(self.tool_names) or "(none)"
             return None, params, f"Error: Tool '{name}' not found.{hint} Available: {available}"
 
+        params = self._coerce_params(tool, params)
         if not isinstance(params, dict):
             return tool, params, (
                 f"Error: Tool '{name}' parameters must be a JSON object, got "
@@ -78,14 +80,41 @@ class ToolRegistry:
                 'tool_name(param1="value1", param2="value2") matching the tool schema.'
             )
 
-        # Layer 2 checks only required keys; full JSON Schema validation is layer 3.
-        required = (tool.parameters or {}).get("required") or []
-        missing = [key for key in required if key not in params]
-        if missing:
-            details = "; ".join(f"missing required {key}" for key in missing)
-            return tool, params, f"Error: Invalid parameters for tool '{name}': {details}"
-
+        params = tool.cast_params(params)
+        errors = tool.validate_params(params)
+        if errors:
+            return tool, params, f"Error: Invalid parameters for tool '{name}': " + "; ".join(errors)
         return tool, params, None
+
+    @staticmethod
+    def _coerce_argument_value(value: Any) -> Any:
+        """Parse a JSON object/array string; leave anything else unchanged."""
+        if value is None:
+            return {}
+        if not isinstance(value, str):
+            return value
+        stripped = value.strip()
+        if not stripped:
+            return {}
+        if not stripped.startswith(("{", "[")):
+            return value
+        try:
+            return json.loads(stripped)
+        except json.JSONDecodeError:
+            return value
+
+    @classmethod
+    def _coerce_params(cls, tool: Tool, params: Any) -> Any:
+        """Unwrap ``{"arguments": {...}}``, which some models send instead of the arguments.
+
+        Not unwrapped when the tool really has a parameter called ``arguments``.
+        """
+        params = cls._coerce_argument_value(params)
+        if not isinstance(params, dict) or set(params) != {"arguments"}:
+            return params
+        if "arguments" in (tool.parameters or {}).get("properties", {}):
+            return params
+        return cls._coerce_argument_value(params["arguments"])
 
     async def execute(self, name: str, params: Any) -> str | ToolResult:
         """Run a tool by name. Never raises: every failure becomes an error result."""

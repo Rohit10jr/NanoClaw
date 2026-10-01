@@ -5,6 +5,8 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any
 
+from nanoclaw.agent.tools import schema as _schema
+
 
 class ToolResult(str):
     """A tool's output: a plain string that can also be marked as an error.
@@ -51,6 +53,14 @@ class Tool(ABC):
     @abstractmethod
     async def execute(self, **kwargs: Any) -> str | ToolResult:
         """Run the tool. Return text, or ``ToolResult.error(...)`` on failure."""
+
+    def cast_params(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Safe casts before validation (``"5"`` -> ``5``). nanobot: Tool.cast_params."""
+        return _schema.cast_params(params, self.parameters or {})
+
+    def validate_params(self, params: dict[str, Any]) -> list[str]:
+        """Check arguments against ``parameters``; empty list means valid."""
+        return _schema.validate_params(params, self.parameters or {})
 
     def to_schema(self) -> dict[str, Any]:
         """OpenAI function-tool definition sent to the model."""
