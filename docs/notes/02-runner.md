@@ -1,0 +1,165 @@
+# 02 — Runner
+
+Reference: nanobot at commit `d3d70f2`. Paths are relative to its `nanobot/` package.
+
+## The concept
+
+Layer 1 gave us a model we can ask one question. Layer 2 makes it an
+**agent**: the model can ask for tools, see their results, and keep going until
+it has an answer.
+
+```
+messages = copy of initial_messages
+for iteration in range(max_iterations):
+    response = provider.safe_chat(messages, tools)
+    if response.should_execute_tools:
+        append assistant message (with tool_calls)
+        for each call: append {"role": "tool", ...} with its result
+        continue
+    if empty   → retry; then one no-tools "please answer" call; then give up
+    if error   → stop ("error")
+    otherwise  → append final answer, stop ("completed")
+else:
+    one no-tools "budget exhausted, summarize" call → stop ("max_iterations")
+```
+
+That loop is the whole agent. Everything later in the roadmap either feeds it
+better input (context, sessions, memory, skills) or is just another tool
+(files, shell, web, subagents).
+
+### What the history looks like
+
+A run where the model adds two numbers with a tool:
+
+```python
+{"role": "user",      "content": "What is 2 + 3?"}
+{"role": "assistant", "content": "",
+ "tool_calls": [{"id": "c1", "type": "function",
+                 "function": {"name": "add", "arguments": "{\"a\": 2, \"b\": 3}"}}]}
+{"role": "tool",      "tool_call_id": "c1", "name": "add", "content": "5"}
+{"role": "assistant", "content": "The sum is 5."}
+```
+
+The rule that keeps this valid: **every `tool_call` id gets exactly one `tool`
+message**, even when the tool is unknown, the arguments are broken or the tool
+crashes. APIs reject histories that break this rule, so a single bad tool call
+would otherwise break the conversation.
+
+## What we built
+
+| File | Contents |
+|---|---|
+| `nanoclaw/agent/tools/base.py` | `Tool` (name, description, parameters, `execute`, `to_schema`), `ToolResult`, `is_tool_error` |
+| `nanoclaw/agent/tools/registry.py` | `ToolRegistry`: register, look up, sorted definitions, `prepare_call`, `execute` |
+| `nanoclaw/agent/runner.py` | `AgentRunSpec`, `AgentRunResult`, `AgentRunner` |
+| `nanoclaw/agent/messages.py` | message builders, truncation, and the fixed texts copied from nanobot |
+
+About 430 lines. nanobot's equivalent (`runner.py`, `tools/base.py`,
+`tools/registry.py`, `tools/execution.py`) is about 2,250 lines.
+
+Symbol-by-symbol mapping: [`../CODE_MAP.md`](../CODE_MAP.md#layer-2--runner).
+
+## Design decisions worth knowing
+
+**Tools never crash the run.** `ToolRegistry.execute` turns every failure into
+an error *result*, which the model reads:
+
+| Situation | What the model sees |
+|---|---|
+| Unknown tool | `Error: Tool 'x' not found. Available: add, echo` |
+| Name differs only in case/punctuation | `... Did you mean 'echo'? Tool names must match exactly.` (the call still does **not** run) |
+| Arguments not a JSON object (e.g. malformed JSON from layer 1) | `Error: Tool 'echo' parameters must be a JSON object, got str. ...` |
+| Missing required parameter | `Error: Invalid parameters for tool 'add': missing required 'b'` |
+| Tool raised | `Error executing boom: kaboom` |
+| Tool returned `ToolResult.error(...)` | its own message |
+
+Each one ends with nanobot's hint
+`[Analyze the error above and try a different approach.]` (added once). In
+practice models usually fix their call on the next iteration.
+
+**Tools return `ToolResult.error` for expected failures.** `ToolResult` is a
+`str` with an `is_error` flag. A tool like `read_file` can say "file not found"
+without raising, and the runner still knows it failed (it is left out of
+`tools_used`).
+
+**Only run tools after a normal stop.** If the reply was cut off (`length`) or
+filtered (`content_filter`), any tool calls in it are ignored and the reply is
+treated as text. This uses `LLMResponse.should_execute_tools` from layer 1
+(nanobot `runner.py:487` / `:579`).
+
+**Empty replies get two more chances.** Some models occasionally return
+nothing. First the same request is retried. If it is empty again, one request
+is sent with tools turned off and an extra user message, *"Please provide your
+response to the user based on the conversation above."* If that is also empty,
+the run stops with `empty_final_response` and nanobot's message *"I completed
+the tool steps but couldn't produce a final answer..."*. (`runner.py:592`)
+
+**Running out of iterations still produces an answer.** After
+`max_iterations` (20 for us, 200 in nanobot) the runner sends one request with
+tools off and nanobot's *"The tool-call budget for this turn is exhausted..."*
+prompt, so the user gets a summary of what was done. If that fails, the fixed
+message *"I reached the maximum number of tool call iterations (N)..."* is used.
+(`runner.py:792`, `:1154`)
+
+**Helper prompts are never saved.** The two extra user messages above are added
+to that one request only, not to `messages`. The saved history contains only
+what the user and model actually said.
+
+**A model error leaves history usable.** The run stops with `stop_reason =
+"error"` and the error text as `final_content`, and the placeholder
+`[Assistant reply unavailable due to model error.]` is appended so the next
+turn doesn't start right after a dangling `user` or `tool` message.
+(`runner.py:714`, `:1361`)
+
+**Tool output is bounded.** Results longer than `max_tool_result_chars`
+(16,000, nanobot's default) are cut with `\n... (truncated)`. Empty results
+become `(<tool> completed with no output)` so the model doesn't think the tool
+hung.
+
+**The caller's messages are never changed.** The runner deep-copies
+`initial_messages`; the full new history is returned in `result.messages`.
+
+## What we left out
+
+| nanobot feature | Where | Why it exists |
+|---|---|---|
+| Hooks (`before_iteration`, `before_execute_tool`, `on_stream`, ...) | `agent/hook.py`, used throughout `_run_core` | Plugins and UIs observe or change each step |
+| Mid-turn injections | `_try_drain_injections` | Fold a user's follow-up message into the running turn |
+| Checkpoints | `_emit_checkpoint` | Resume after a crash mid-turn |
+| Length recovery | `build_length_recovery_message`, `_MAX_LENGTH_RECOVERIES` | Ask the model to continue a reply cut off by `max_tokens`, then join the parts |
+| Parallel tools | `execution.py` `_partition_tool_batches`, `Tool.concurrency_safe` | Run read-only tools at the same time |
+| Repeated-call throttling | `repeated_external_lookup_error`, workspace-violation counting | Stop the model hammering the same URL or forbidden path |
+| SSRF / workspace violation classification | `execution.py` `_classify_violation` | Treat security blocks specially (layer 9 territory) |
+| Argument casting + full schema validation | `Tool.cast_params`, `validate_params`, `tools/schema.py` | `"5"` → `5`, type checks; **comes in layer 3** |
+| Context governance + compaction | `agent/context_governance.py` | Keep requests inside the context window; offload huge tool results to files (**layer 6**) |
+| Streaming, reasoning events | hooks, `extract_reasoning` | Live output in UIs |
+| Provider-state continuation | `ProviderConversationStateController` | OpenAI Responses API server-side state |
+| Usage estimation + per-round usage | `_usage_or_estimate`, `round_usages` | Cost tracking when providers don't report usage |
+| Arrearage message | `is_arrearage_response` | Friendly "out of credit" message |
+
+## Try it
+
+`nanoclaw ask` now runs through the runner. It has no tools until layer 3, so
+it behaves like before, but every reply goes through the full loop:
+
+```bash
+uv run nanoclaw ask "hello"
+```
+
+## Tests
+
+- `tests/toy_tools.py`: `echo`, `add`, `boom` (raises), `fail` (returns an
+  error), `silent` (empty output), `big` (long output).
+- `tests/test_tools_registry.py`: definitions sorted, lookup, every error
+  message above, the retry hint added once.
+- `tests/test_runner.py`, with the scripted `FakeProvider`:
+  - plain answer; one tool then an answer, with the exact history; several
+    calls in one reply in order; several iterations
+  - what the provider is sent on each request (messages and tool definitions)
+  - each kind of tool failure reported back, and the model recovering
+  - truncation and the empty-output marker
+  - tool calls ignored in cut-off replies
+  - empty-reply retry, finalization, fallback, and the counter resetting after tools
+  - model errors, before and after tools
+  - iteration limit: finalization success, and the fallback for three kinds of failure
+  - usage summed; `initial_messages` unchanged; every call answered exactly once

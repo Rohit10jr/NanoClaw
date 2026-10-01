@@ -7,15 +7,24 @@ import asyncio
 import sys
 
 from nanoclaw import __version__
+from nanoclaw.agent.runner import AgentRunner, AgentRunSpec
+from nanoclaw.agent.tools import ToolRegistry
 from nanoclaw.providers import LLMProvider, provider_from_env
 
 
 async def _ask(provider: LLMProvider, prompt: str) -> int:
-    response = await provider.safe_chat(messages=[{"role": "user", "content": prompt}])
-    if response.is_error:
-        print(response.content, file=sys.stderr)
+    # No tools are registered until layer 3, but the full agent loop runs.
+    result = await AgentRunner().run(
+        AgentRunSpec(
+            initial_messages=[{"role": "user", "content": prompt}],
+            tools=ToolRegistry(),
+            provider=provider,
+        )
+    )
+    if result.stop_reason == "error":
+        print(result.final_content, file=sys.stderr)
         return 1
-    print(response.content or "")
+    print(result.final_content or "")
     return 0
 
 
@@ -23,7 +32,7 @@ def main(argv: list[str] | None = None, provider: LLMProvider | None = None) -> 
     parser = argparse.ArgumentParser(prog="nanoclaw", description="A minimal personal AI agent.")
     parser.add_argument("-V", "--version", action="version", version=f"nanoclaw {__version__}")
     commands = parser.add_subparsers(dest="command")
-    ask = commands.add_parser("ask", help="send one message to the model (no tools yet)")
+    ask = commands.add_parser("ask", help="run one agent turn (no tools until layer 3)")
     ask.add_argument("prompt")
 
     args = parser.parse_args(argv)

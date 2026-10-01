@@ -16,7 +16,7 @@ codebases can be read side by side, and leaves the production features
 |---|---|---|
 | 0 | Architecture recon + project skeleton | done |
 | 1 | Provider interface (OpenAI-compatible) | done |
-| 2 | Agent loop (runner) | planned |
+| 2 | Agent loop (runner) | done |
 | 3 | Tools (files, shell, web) | planned |
 | 4 | Context / system prompt | planned |
 | 5 | Sessions | planned |
