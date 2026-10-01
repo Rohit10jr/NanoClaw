@@ -18,7 +18,7 @@ codebases can be read side by side, and leaves the production features
 | 1 | Provider interface (OpenAI-compatible) | done |
 | 2 | Agent loop (runner) | done |
 | 3 | Tools (files, shell, web) | done |
-| 4 | Context / system prompt | planned |
+| 4 | Context / system prompt | done |
 | 5 | Sessions | planned |
 | 6 | Memory + compaction | planned |
 | 7 | Skills | planned |
@@ -51,4 +51,10 @@ export NANOCLAW_API_KEY=sk-...
 export NANOCLAW_MODEL=gpt-4o-mini                  # default
 export NANOCLAW_API_BASE=https://openrouter.ai/api/v1   # omit for OpenAI
 uv run nanoclaw ask "hello"
+uv run nanoclaw prompt        # show the system prompt (no key needed)
 ```
+
+The agent's personality and instructions live in editable Markdown files in
+the workspace (`~/.nanoclaw/workspace` by default, change with `-w`):
+`SOUL.md` (personality), `USER.md` (about you), `AGENTS.md` (workspace rules).
+They are created on first run and never overwritten.

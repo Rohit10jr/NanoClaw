@@ -23,6 +23,7 @@ so line numbers stay correct even as nanobot changes.
 | 1 Provider | `nanoclaw/providers/` (4 modules) | ~520 | `providers/base.py`, `openai_compat_provider.py`, `registry.py`, `factory.py` | ~5,400 |
 | 2 Runner | `nanoclaw/agent/runner.py`, `messages.py`, `tools/base.py`, `tools/registry.py` | ~540 | `agent/runner.py`, `agent/tools/base.py`, `registry.py`, `execution.py` | ~2,250 |
 | 3 Tools | `nanoclaw/agent/tools/schema.py`, `filesystem.py`, `shell.py`, `web.py`, `agent/tool_results.py` | ~1,420 | `agent/tools/filesystem.py`, `shell.py`, `web.py`, `schema.py`, `loader.py` | ~4,170 |
+| 4 Context | `nanoclaw/agent/context.py`, `runtime_context.py`, `utils/templates.py` + `templates/` | ~260 | `agent/context.py`, `runtime_context.py`, `utils/prompt_templates.py` + `templates/` | ~640 |
 | CLI (`ask`) | `nanoclaw/__main__.py` | ~45 | `cli/agent.py`, `cli/commands.py` | ~1,180 |
 
 ## Layer 1 — Provider
@@ -202,11 +203,51 @@ Note: [`notes/03-tools.md`](notes/03-tools.md)
 |---|---|---|
 | [`build_default_tools`](../nanoclaw/agent/tools/__init__.py#L11) | [`agent/tools/loader.py:26`][nb-l3-loader] `ToolLoader` + `agent/loop.py:608` | Replaced: an explicit list instead of package scanning and plugins |
 
+## Layer 4 — Context
+
+Note: [`notes/04-context.md`](notes/04-context.md)
+
+### System prompt and messages — `nanoclaw/agent/context.py`
+
+| NanoClaw | nanobot | How it compares |
+|---|---|---|
+| [`ContextBuilder`](../nanoclaw/agent/context.py#L22) | [`agent/context.py:89`][nb-l4-cb] | Simplified: one workspace folder; no memory, skills or summary yet (layers 6–7) |
+| ↳ `BOOTSTRAP_FILES`, `_SKIPPABLE_DEFAULTS` | [`context.py:92`][nb-l4-boot] | Same |
+| ↳ [`build_system_prompt()`](../nanoclaw/agent/context.py#L36) | [`context.py:101`][nb-l4-bsp] | Same order and separator for the sections we have |
+| ↳ [`_get_identity()`](../nanoclaw/agent/context.py#L45) | [`context.py:154`][nb-l4-id] | Same; agent and project path are the same folder |
+| ↳ [`_load_bootstrap_files()`](../nanoclaw/agent/context.py#L63) | [`context.py:194`][nb-l4-load] | Same rules, minus the legacy `SOUL.md` upgrade |
+| ↳ [`_is_template_content()`](../nanoclaw/agent/context.py#L78) | [`context.py:224`][nb-l4-istpl] | Same |
+| ↳ [`build_messages()`](../nanoclaw/agent/context.py#L95) | [`context.py:231`][nb-l4-bm] (+ `build_transcript`) | Simplified: merges a trailing user message; no media or `_meta` |
+| ↳ [`build_current_message()`](../nanoclaw/agent/context.py#L85) | [`context.py:310`][nb-l4-bcm] | Simplified: text + runtime blocks; no images or skill context |
+| ↳ [`_merge_message_content()`](../nanoclaw/agent/context.py#L121) | [`context.py:172`][nb-l4-merge] | Same |
+
+### Runtime context — `nanoclaw/runtime_context.py`
+
+| NanoClaw | nanobot | How it compares |
+|---|---|---|
+| [`RuntimeContextBlock`](../nanoclaw/runtime_context.py#L21) | [`runtime_context.py:25`][nb-l4-rcb] | Same |
+| [`RUNTIME_CONTEXT_TAG`](../nanoclaw/runtime_context.py#L16), `RUNTIME_CONTEXT_END` | `runtime_context.py:17` | Same text |
+| [`wrap_runtime_context_lines`](../nanoclaw/runtime_context.py#L31) | [`runtime_context.py:55`][nb-l4-wrap] | Same |
+| [`append_runtime_context`](../nanoclaw/runtime_context.py#L39) | [`runtime_context.py:120`][nb-l4-append] | Simplified: no marker returned for later removal |
+| [`current_time_block`](../nanoclaw/runtime_context.py#L51) | — | **New:** nanobot gives the model no date/time (difference #1 in the note) |
+
+### Templates — `nanoclaw/utils/templates.py`, `nanoclaw/templates/`
+
+| NanoClaw | nanobot | How it compares |
+|---|---|---|
+| [`render_template`](../nanoclaw/utils/templates.py#L36), `_environment` | [`utils/prompt_templates.py:28`][nb-l4-render], `:18` | Same Jinja2 settings |
+| [`load_bundled_template`](../nanoclaw/utils/templates.py#L42) | [`utils/helpers.py:1010`][nb-l4-loadtpl] | Same (reads from the package folder) |
+| [`sync_workspace_templates`](../nanoclaw/utils/templates.py#L48) | [`utils/helpers.py:956`][nb-l4-sync] | Simplified: `AGENTS.md`, `SOUL.md`, `USER.md` only; memory/skills files come in layers 6–7; no git store |
+| `templates/agent/identity.md`, `platform_policy.md`, `tool_contract.md`, `_snippets/untrusted_content.md` | `templates/agent/` (same names) | Same text except: name, "Dream" made generic, image line removed |
+| `templates/SOUL.md`, `USER.md` | `templates/` (same names) | Same text, renamed |
+| `templates/AGENTS.md` | `templates/AGENTS.md` | Same opening; cron/heartbeat/`apply_patch` guidance replaced by `edit_file`/`write_file` guidance |
+
 ## CLI — `nanoclaw/__main__.py`
 
 | NanoClaw | nanobot | How it compares |
 |---|---|---|
-| [`main()`](../nanoclaw/__main__.py#L37) `nanoclaw ask "..." [-w DIR]` | [`cli/agent.py:55`][nb-cli] `nanobot agent -m "..."` | Simplified: one `AgentRunner` turn with the default tools in the workspace (default `~/.nanoclaw/workspace`). Switches to `AgentLoop` in layer 5 and a chat REPL in layer 10 |
+| [`main()`](../nanoclaw/__main__.py#L52) `nanoclaw ask "..." [-w DIR]` | [`cli/agent.py:55`][nb-cli] `nanobot agent -m "..."` | Simplified: creates missing workspace files, builds messages with `ContextBuilder` (channel `cli`, time block), runs one `AgentRunner` turn. Switches to `AgentLoop` in layer 5 and a chat REPL in layer 10 |
+| `nanoclaw prompt [-w DIR]` | — | **New:** prints the system prompt (no API key needed) |
 
 ## Tests
 
@@ -223,6 +264,7 @@ Note: [`notes/03-tools.md`](notes/03-tools.md)
 | `tests/test_web_tools.py` | `web_fetch` over mocked HTTP; `web_search` with a fake search |
 | `tests/test_tool_results.py` | large results saved with preview; `read_file` never cut; truncation without a workspace |
 | `tests/test_tools_end_to_end.py` | runner + default tools with a scripted model |
+| `tests/test_context.py` | system prompt order, bootstrap file rules, channel/platform hints, runtime context, time block, message merging, `prompt` command |
 | `tests/test_runner.py` | the loop end to end with `FakeProvider`: exact history, requests sent, tool failures, truncation, cut-off replies, empty-reply handling, model errors, iteration limit, usage, no mutation, one result per call |
 | `tests/test_cli_version.py` | `--version` |
 
@@ -318,3 +360,18 @@ Note: [`notes/03-tools.md`](notes/03-tools.md)
 [nb-l3-timeout]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/tools/shell.py#L386
 [nb-l3-exempt]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/context_governance.py#L68
 [nb-l3-persist]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/utils/helpers.py#L624
+[nb-l4-cb]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/context.py#L89
+[nb-l4-boot]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/context.py#L92
+[nb-l4-bsp]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/context.py#L101
+[nb-l4-id]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/context.py#L154
+[nb-l4-load]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/context.py#L194
+[nb-l4-istpl]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/context.py#L224
+[nb-l4-bm]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/context.py#L231
+[nb-l4-bcm]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/context.py#L310
+[nb-l4-merge]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/context.py#L172
+[nb-l4-rcb]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/runtime_context.py#L25
+[nb-l4-wrap]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/runtime_context.py#L55
+[nb-l4-append]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/runtime_context.py#L120
+[nb-l4-render]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/utils/prompt_templates.py#L28
+[nb-l4-loadtpl]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/utils/helpers.py#L1010
+[nb-l4-sync]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/utils/helpers.py#L956

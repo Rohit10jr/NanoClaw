@@ -26,8 +26,8 @@ with a note in [`notes/`](notes/).
 | 1 | Provider | One interface for calling a model | `providers/base.py`, `providers/openai_compat_provider.py` | `nanoclaw/providers/` | ✅ done |
 | 2 | Runner | The agent loop: call model → run tools → repeat | `agent/runner.py`, `agent/tools/execution.py`, `agent/tools/base.py`, `agent/tools/registry.py` | `nanoclaw/agent/runner.py`, `nanoclaw/agent/tools/` | ✅ done |
 | 3 | Tools | Real capabilities: files, shell, web | `agent/tools/filesystem.py`, `shell.py`, `web.py`, `schema.py` | `nanoclaw/agent/tools/` | ✅ done |
-| 4 | Context | Building the system prompt | `agent/context.py`, `templates/` | `nanoclaw/agent/context.py`, `nanoclaw/templates/` | ⏭ next |
-| 5 | Sessions + AgentLoop | Conversations saved and resumed; one turn = context → runner → save | `session/manager.py`, `agent/loop.py` (`process_direct`) | `nanoclaw/session/`, `nanoclaw/agent/loop.py` | planned |
+| 4 | Context | Building the system prompt | `agent/context.py`, `templates/` | `nanoclaw/agent/context.py`, `nanoclaw/templates/` | ✅ done |
+| 5 | Sessions + AgentLoop | Conversations saved and resumed; one turn = context → runner → save | `session/manager.py`, `agent/loop.py` (`process_direct`) | `nanoclaw/session/`, `nanoclaw/agent/loop.py` | ⏭ next |
 | 6 | Memory | Long-term memory; compacting old history | `agent/memory.py`, `agent/autocompact.py` | `nanoclaw/agent/memory.py` | planned |
 | 7 | Skills | Markdown procedures loaded on demand | `agent/skills.py`, `skills/` | `nanoclaw/agent/skills.py`, `nanoclaw/skills/` | planned |
 | 8 | Subagents | Hand a task to a child agent | `agent/subagent.py`, `agent/tools/spawn.py` | `nanoclaw/agent/subagent.py` | planned |
@@ -62,10 +62,14 @@ See `notes/03-tools.md`, "Differences from nanobot".
 *Skipped:* `apply_patch`, ripgrep search, MCP, cron, image generation,
 long-running shell sessions, PDF/Office/image reading.
 
-**4 — Context.** `ContextBuilder` assembles the system prompt from identity
-(`SOUL.md`, `USER.md`), project instructions (`AGENTS.md`), runtime info
-(time, OS, workspace) and the tool list; then appends history and the new user
-message.
+**4 — Context.** `ContextBuilder` assembles the system prompt from Jinja2
+templates (runtime, workspace, platform policy, channel format hint, untrusted
+content rule) and the editable workspace files (`AGENTS.md`, `SOUL.md`,
+`USER.md`; unedited forms skipped), then the tool usage notes; then appends
+history and the new user message. `nanoclaw prompt` prints it.
+**Decisions:** the current time is added as a runtime-context block on the user
+message (nanobot gives no date/time); one workspace folder for everything (the
+separate project folder is listed under phase 2). See `notes/04-context.md`.
 
 **5 — Sessions + AgentLoop.** `Session` / `SessionManager` stores each
 conversation as JSONL and replays recent messages. A small `AgentLoop` with
@@ -118,3 +122,4 @@ NanoClaw needs it, and build only the ones we pick.
 | Cron + heartbeat | `cron/`, `agent/tools/cron.py`, `templates/HEARTBEAT.md` | Scheduled and proactive tasks |
 | Usage accounting | `llm_usage/` | Token and cost tracking |
 | Web UI / TUI | `webui/`, `tui/` | Browser and full-screen terminal interfaces |
+| Separate project folder | `agent/context.py` (`workspace` vs project), `security/workspace_access.py` | Keep `SOUL.md`/`USER.md`/memory/skills in the agent's home while tools and `AGENTS.md` use a chosen project folder; would add a `--project` CLI option |
