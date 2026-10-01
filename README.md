@@ -32,6 +32,8 @@ codebases can be read side by side, and leaves the production features
   symbol by symbol to the nanobot code it comes from.
 - [`docs/notes/`](docs/notes/): one note per layer explaining the concept, how
   nanobot does it, what we built and what we left out.
+- [`docs/UPSTREAM_BUGS.md`](docs/UPSTREAM_BUGS.md): bugs found in nanobot while
+  porting it, with reproductions and suggested fixes, for issues/PRs upstream.
 
 ## Development
 
