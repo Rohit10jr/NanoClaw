@@ -292,3 +292,24 @@ async def test_dream_trims_the_journal_afterwards(ws, tmp_path):
         loop.memory.append_history(f"- fact {i}")
     await loop.run_dream()
     assert [e["cursor"] for e in loop.memory._read_entries()] == [3]
+
+
+async def test_oversized_ephemeral_turn_is_refused_like_nanobot(ws, tmp_path):
+    loop, fake = make_loop(ws, tmp_path, "unused", window=100 + 1024 + 3000)
+    with pytest.raises(ContextWindowExceededError):
+        await loop.process_direct("big " + "q" * 20000, session_key="dream:x", ephemeral=True)
+    assert fake.calls == [] and loop.memory.read_unprocessed_history(0) == []
+
+
+async def test_compaction_without_persist_journals_nothing(ws, tmp_path):
+    window = await two_big_turns(ws, tmp_path)
+    loop, _ = make_loop(ws, tmp_path, "- S", window=window)
+    session = loop.sessions.get_or_create("cli:direct")
+    history = session.get_history()
+    blocks = []
+    messages = loop.context.build_messages(history, THIRD, channel="cli")
+    compacted, summary = await loop._compact_if_needed(
+        session, messages, history, None, THIRD, "cli", blocks, loop.tools, persist=False
+    )
+    assert summary == "- S" and [m["role"] for m in compacted] == ["system", "user"]
+    assert loop.memory.read_unprocessed_history(0) == []

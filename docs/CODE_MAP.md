@@ -339,7 +339,7 @@ Note: [`notes/06-memory.md`](notes/06-memory.md)
 | ↳ [`new_session()`](../nanoclaw/agent/loop.py#L247) | [`command/builtin.py:314`][nb-l5-new] `cmd_new` | Same request and journal entry (checked); waits instead of running in the background |
 | ↳ [`compact_session()`](../nanoclaw/agent/loop.py#L273) | [`command/builtin.py:349`][nb-l6-compact] `cmd_compact` | Same |
 | ↳ [`run_dream()`](../nanoclaw/agent/loop.py#L281) | [`command/builtin.py:453`][nb-l6-dream] `cmd_dream` | Same flow and messages; file comparison instead of a git diff; no schedule |
-| ↳ `process_direct(ephemeral=, tools=)` | [`loop.py:2498`][nb-l5-pd] | Same idea: a temporary turn saves nothing and writes no spill files |
+| ↳ `process_direct(ephemeral=, tools=)` | [`loop.py:2498`][nb-l5-pd] | Same: a temporary turn saves nothing, writes no spill files, and is checked against the context window without journaling |
 
 ### Sessions, prompt and helpers
 

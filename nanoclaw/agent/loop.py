@@ -146,11 +146,10 @@ class AgentLoop:
             messages = self.context.build_messages(
                 history, content, channel=channel, runtime_context_blocks=blocks, session_summary=summary
             )
-            checkpoint: str | None = None
-            if not ephemeral:
-                messages, checkpoint = await self._compact_if_needed(
-                    session, messages, history, summary, content, channel, blocks, tools
-                )
+            # Temporary turns are checked too, but never journal or save a summary.
+            messages, checkpoint = await self._compact_if_needed(
+                session, messages, history, summary, content, channel, blocks, tools, persist=not ephemeral
+            )
 
             # Run.
             result = await self.runner.run(
@@ -199,6 +198,8 @@ class AgentLoop:
         channel: str,
         blocks: list[RuntimeContextBlock],
         tools: ToolRegistry,
+        *,
+        persist: bool = True,
     ) -> tuple[list[dict[str, Any]], str | None]:
         """Summarize the history if the request doesn't fit the context window.
 
@@ -225,6 +226,7 @@ class AgentLoop:
             runtime=self.runtime,
             session_key=session.key,
             tools=definitions,
+            persist=persist,
         )
         if not new_summary:
             raise ContextWindowExceededError(

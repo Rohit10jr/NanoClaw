@@ -130,6 +130,7 @@ The updated `MEMORY.md` appears in the system prompt of every later turn
 | 6 | Dream's instructions | Include a section on creating skills | Same text without the skills section and table row | Skills arrive in layer 7 | Layer 7 |
 | 7 | "No memory changes" in Dream's report | Read from a git diff of the memory files | Compares the three files before and after | No git store (see below) | — |
 | 8 | Token counter loading | Loaded in a background thread; byte counts until ready | Loaded on first use | Simpler; same counts once loaded | — |
+| 9 | Dream's "nothing to process" message | Points to nanobot settings (`idleCompactAfterMinutes`, `/dream-prompt`) | Points to `nanoclaw compact` and `nanoclaw ask --new` | Those are the ways a NanoClaw conversation reaches the journal | Phase 2 (idle auto-compact, prompt overrides) |
 
 ## What we left out (and when it could come)
 
@@ -171,7 +172,7 @@ The updated `MEMORY.md` appears in the system prompt of every later turn
   never summarizing only part of a stretch; summary checkpoints and the token
   limit in `get_history`; system prompt sections; token counting (bytes and
   tiktoken).
-- `tests/test_compaction.py` (19 tests): a turn that compacts (archive request,
+- `tests/test_compaction.py` (21 tests): a turn that compacts (archive request,
   turn request, saved session, journal); the next turn; no compaction under
   budget; window 0; a second compaction updating the first; a large overflow
   giving a raw checkpoint (as in nanobot); still too big after compacting; a
@@ -182,7 +183,10 @@ The updated `MEMORY.md` appears in the system prompt of every later turn
   nothing is downloaded (one test uses tiktoken when available).
 
 Every rule was checked by breaking it on purpose and confirming a test fails
-(26 rules; the 25 from layer 5 still hold).
+(26 rules; the 25 from layer 5 still hold). One more change, passing
+`persist=True` for temporary turns at the call site, cannot change behaviour
+(a temporary turn has no history to journal); the `persist` flag itself is
+tested directly.
 
 ## Review against nanobot
 
@@ -203,3 +207,32 @@ One correction came out of the review: nanobot trims whitespace from assistant
 replies (and removes a few internal markers) before replaying them
 (`_sanitize_assistant_replay_text`). Layer 5 had left that out; it is now
 ported, and the layer 5 comparisons still pass.
+
+### Second review (after the build)
+
+A second pass ran both projects side by side on paths the first review had not
+compared, with the same tool set (only `echo`) on both sides, comparing every
+request sent (body and summary section), the saved session, the session
+metadata and the journal:
+
+| Scenario | Result |
+|---|---|
+| Tool calls in the history, then a compacting turn | Same (12 checks) |
+| A second compaction updating the first summary | Same (14 checks) |
+| `/compact`, a turn, then `/new` (archiving on top of an existing summary), then a turn | Same (14 checks) |
+| A crashed turn, then an overflowing turn (crash closed, then compacted) | Same (10 checks) |
+| A model error, then a normal turn | Same (8 checks) |
+| An oversized temporary turn (as Dream uses) | **Different** before the fix: nanobot refuses it with `ContextWindowExceededError` before calling the model; NanoClaw skipped the check for temporary turns and sent it. Now both refuse it |
+
+Also checked: nanobot's other model-facing cleanups in `prepare_for_model`
+(removing `[Previous assistant message omitted.]` placeholders, nameless tool
+calls, orphan tool results; backfilling missing tool results; re-budgeting
+tool results). NanoClaw never writes such messages (the layer 2 and 5 save
+rules prevent them), so they change nothing here; they stay with the rest of
+context governance in phase 2.
+
+| # | Correction | nanobot | Fix |
+|---|---|---|---|
+| 1 | Temporary turns skipped the context-window check | Checks every turn; a temporary turn compacts without journaling, or is refused | Temporary turns go through the same check with `persist=False` (nothing journaled, no summary saved). Tests: `test_oversized_ephemeral_turn_is_refused_like_nanobot`, `test_compaction_without_persist_journals_nothing` |
+| 2 | Dream's "nothing to process" message differed without being recorded | — | Recorded as difference #9 |
+
