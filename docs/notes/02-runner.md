@@ -153,8 +153,8 @@ saved to a file with a preview instead, and `read_file` is never cut. See
 | Parallel tools | `execution.py` `_partition_tool_batches`, `Tool.concurrency_safe` | Run read-only tools at the same time |
 | Repeated-call throttling | `repeated_external_lookup_error`, workspace-violation counting | Stop the model hammering the same URL or forbidden path |
 | SSRF / workspace violation classification | `execution.py` `_classify_violation` | Treat security blocks specially (layer 9 territory) |
-| Argument casting + full schema validation | `Tool.cast_params`, `validate_params`, `tools/schema.py` | `"5"` → `5`, type checks; **comes in layer 3** |
-| Context governance + compaction | `agent/context_governance.py` | Keep requests inside the context window (**layer 6**). Its tool-result offloading was ported in layer 3 |
+| Argument casting + full schema validation | `Tool.cast_params`, `validate_params`, `tools/schema.py` | `"5"` → `5`, type checks; **comes in layer 3** (done) |
+| Context governance + compaction | `agent/context_governance.py` | Keep requests inside the context window (**layer 6**). Its tool-result offloading was ported in layer 3, the adjacent-user merge in layer 5, compaction before a turn in layer 6; the rest is phase 2 |
 | Streaming, reasoning events | hooks, `IncrementalThinkExtractor` | Live output in UIs |
 | Provider-state continuation | `ProviderConversationStateController` | OpenAI Responses API server-side state |
 | Usage estimation + per-round usage | `_usage_or_estimate`, `round_usages` | Cost tracking when providers don't report usage |
@@ -163,7 +163,8 @@ saved to a file with a preview instead, and `read_file` is never cut. See
 ## Try it
 
 `nanoclaw ask` now runs through the runner. It has no tools until layer 3, so
-it behaves like before, but every reply goes through the full loop:
+it behaves like before, but every reply goes through the full loop
+*(since layer 5 `ask` goes through `AgentLoop`, which calls the runner)*:
 
 ```bash
 uv run nanoclaw ask "hello"

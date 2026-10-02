@@ -164,6 +164,7 @@ class AgentLoop:
                     workspace=None if ephemeral else self.workspace,
                     max_tokens=self.max_tokens,
                     temperature=self.temperature,
+                    session_key=session.key,
                 )
             )
 

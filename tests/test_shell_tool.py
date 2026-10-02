@@ -125,3 +125,30 @@ async def test_extra_deny_patterns(tmp_path):
 
 async def test_missing_command(tool):
     assert await tool.execute(command="") == "Error: Missing command. Provide command."
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo x > memory/history.jsonl",
+        "echo x >> memory/history.jsonl",
+        "echo 5 > memory/.dream_cursor",
+        "echo x | tee -a memory/history.jsonl",
+        "cp other.jsonl memory/history.jsonl",
+        "mv a b memory/.dream_cursor",
+        "dd if=/dev/zero of=memory/history.jsonl",
+        "sed -i 's/a/b/' memory/history.jsonl",
+    ],
+)
+async def test_writes_to_memory_journal_are_blocked(tmp_path, command):
+    result = await ExecTool(working_dir=str(tmp_path)).execute(command=command)
+    assert result == "Error: Command blocked by deny pattern filter"
+
+
+@pytest.mark.parametrize("command", ["cat memory/history.jsonl", "grep fact memory/history.jsonl", "wc -l memory/.dream_cursor"])
+async def test_reading_the_memory_journal_is_allowed(tmp_path, command):
+    (tmp_path / "memory").mkdir()
+    (tmp_path / "memory" / "history.jsonl").write_text("{}\n")
+    (tmp_path / "memory" / ".dream_cursor").write_text("1")
+    result = await ExecTool(working_dir=str(tmp_path)).execute(command=command)
+    assert "blocked" not in result

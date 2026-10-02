@@ -97,13 +97,15 @@ nanobot's own guidance: problems with routing/sessions/delivery start in
 We rebuild the right-hand side of the diagram first and replace channels + bus
 with a direct call (`process_direct` in nanobot does the same for the CLI).
 
-| Layer | nanobot reference | NanoClaw module (planned) |
+Layers 0–6 are built; current status is in [`../ROADMAP.md`](../ROADMAP.md).
+
+| Layer | nanobot reference | NanoClaw module |
 |---|---|---|
 | 1 Provider | `providers/base.py`, `openai_compat_provider.py` | `nanoclaw/providers/` |
 | 2 Runner | `agent/runner.py` | `nanoclaw/agent/runner.py` |
 | 3 Tools | `agent/tools/base.py`, `registry.py`, `filesystem.py`, `shell.py`, `web.py` | `nanoclaw/agent/tools/` |
 | 4 Context | `agent/context.py`, `templates/` | `nanoclaw/agent/context.py` |
-| 5 Sessions | `session/manager.py` | `nanoclaw/session/` |
+| 5 Sessions | `session/manager.py`, `agent/loop.py` | `nanoclaw/session/`, `nanoclaw/agent/loop.py` |
 | 6 Memory | `agent/memory.py`, `autocompact.py` | `nanoclaw/agent/memory.py` |
 | 7 Skills | `agent/skills.py` | `nanoclaw/agent/skills.py` |
 | 8 Subagents | `agent/subagent.py`, `tools/spawn.py` | `nanoclaw/agent/subagent.py` |

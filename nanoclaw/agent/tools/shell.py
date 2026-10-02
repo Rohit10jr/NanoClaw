@@ -33,6 +33,13 @@ DEFAULT_DENY_PATTERNS = [
     r">\s*/dev/sd",  # write to a disk device
     r"\b(shutdown|reboot|poweroff)\b",  # system power
     r":\(\)\s*\{.*\};\s*:",  # fork bomb
+    # Writes to the memory journal and Dream cursor (layer 6) must go through
+    # MemoryStore; direct writes corrupt the cursor format (nanobot #2989).
+    r">>?\s*\S*(?:history\.jsonl|\.dream_cursor)",  # > / >> redirect
+    r"\btee\b[^|;&<>]*(?:history\.jsonl|\.dream_cursor)",  # tee / tee -a
+    r"\b(?:cp|mv)\b(?:\s+[^\s|;&<>]+)+\s+\S*(?:history\.jsonl|\.dream_cursor)",  # cp/mv target
+    r"\bdd\b[^|;&<>]*\bof=\S*(?:history\.jsonl|\.dream_cursor)",  # dd of=
+    r"\bsed\s+-i[^|;&<>]*(?:history\.jsonl|\.dream_cursor)",  # sed -i
 ]
 
 

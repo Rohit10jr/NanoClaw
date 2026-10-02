@@ -302,3 +302,16 @@ def test_cli_uses_nanobots_agent_defaults(ws):
     fake = FakeProvider(["ok"])
     main(["ask", "hi", "-w", str(ws)], provider=fake)
     assert (fake.calls[0].temperature, fake.calls[0].max_tokens) == (0.1, 8192)
+
+
+async def test_saved_tool_results_go_in_the_session_folder(ws, tmp_path):
+    from nanoclaw.agent.tools import ToolRegistry
+    from toy_tools import BigTool
+
+    tools = ToolRegistry()
+    tools.register(BigTool())
+    call = LLMResponse(content=None, tool_calls=[ToolCallRequest(id="b1", name="big", arguments={})], finish_reason="tool_calls")
+    loop = AgentLoop(FakeProvider([call, "done"]), ws, tools=tools, sessions=SessionManager(ws, sessions_root=tmp_path / "sessions"))
+    loop.max_tool_result_chars = 50
+    await loop.process_direct("go", session_key="cli:work")
+    assert [p.name for p in (ws / ".nanoclaw" / "tool-results").iterdir()] == ["cli_work"]

@@ -53,6 +53,8 @@ class AgentRunSpec:
     workspace: Path | None = None
     max_tokens: int = 4096
     temperature: float = 0.7
+    # Saved tool results go in a folder per session (nanobot: per session key).
+    session_key: str | None = None
 
 
 @dataclass
@@ -113,6 +115,7 @@ class AgentRunner:
                         raw,
                         workspace=spec.workspace,
                         max_chars=spec.max_tool_result_chars,
+                        bucket=spec.session_key or "default",
                     )
                     messages.append(build_tool_message(call.id, call.name, content))
                     if ok:

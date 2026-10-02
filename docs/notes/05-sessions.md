@@ -213,14 +213,14 @@ and `agent/loop.py` (most of which serve features we left out).
 
 ## Tests
 
-- `tests/test_session.py` (34 tests): replay rules (allowed keys, first user
+- `tests/test_session.py` (34 tests in layer 5; 35 with layer 6's reply-trimming test): replay rules (allowed keys, first user
   message, missing tool calls, blank assistant messages, archived messages, bad
   offsets), `clear`, save/load round trip, file format, safe file names, no temp
   files left, bad lines skipped, cache and eviction, default location outside the
   workspace, refusal inside it, workspace ID (created once, separate per
   workspace, follows a moved folder, invalid or symlinked ID refused), private
   folder.
-- `tests/test_loop.py` (21 tests): the second turn sees the first; history after
+- `tests/test_loop.py` (21 tests in layer 5; 22 with the per-session tool-result folder test added at the end of layer 6): the second turn sees the first; history after
   a restart; byte-identical replay; the saved marker; tool messages saved and
   replayed without bookkeeping keys; user message saved before a crash; a
   crashed turn closed with an error reply; the pending flag cleared; a user

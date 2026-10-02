@@ -41,11 +41,11 @@ of the agent only ever sees this one shape.
 | `providers/base.py` `parse_tool_arguments` | `base.py:118` | identical rules (see below) |
 | `providers/base.py` `LLMUsage` | `base.py:282` (~280 lines) | just input/output token counts |
 | `providers/base.py` `LLMResponse` | `base.py:567` | `content`, `tool_calls`, `finish_reason`, `usage`, `reasoning_content`; `should_execute_tools`, `is_error` |
-| `providers/base.py` `sanitize_messages` | `base.py:834` `_sanitize_empty_content` | empty-string content → `None` / `"(empty)"` |
+| `providers/base.py` `sanitize_messages` | `base.py:834` `_sanitize_empty_content` | empty-string content → `None` / `"(empty)"`; since layer 5 also drops the internal `_meta` field |
 | `providers/base.py` `LLMProvider` | `base.py:636` | abstract `chat()`; `safe_chat()` = nanobot's `_safe_chat` (`base.py:1281`) |
 | `providers/openai_compat.py` `OpenAICompatProvider` | `openai_compat_provider.py:510` | `build_kwargs` ↔ `_build_kwargs` (`:929`), `parse` ↔ `_parse` (`:1546`), `_error_response` ↔ `_handle_error` (`:1901`) |
 | `providers/factory.py` `provider_from_env` | `registry.py` + `factory.py` | three env vars instead of a registry |
-| `providers/fake.py` `FakeProvider` | — | scripted replies for tests |
+| `providers/fake.py` `FakeProvider` | — | scripted replies for tests; records each request (messages, tools, model, and since layer 5 `max_tokens` and `temperature`) |
 
 About 520 lines including docstrings and comments, versus about 5,400 for the same files in nanobot.
 

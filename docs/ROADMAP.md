@@ -16,7 +16,10 @@ with a note in [`notes/`](notes/).
 3. **Build.** Write the minimal version, keeping nanobot's names.
 4. **Test.** Use `FakeProvider` and toy tools, with no network.
 5. **Document.** Write `docs/notes/NN-<layer>.md` and update `CODE_MAP.md`.
-6. **Review.** Push, you review, then the next layer.
+6. **Compare.** Run nanobot and NanoClaw side by side on the same inputs; fix
+   any difference or record it as deliberate; record nanobot bugs in
+   `UPSTREAM_BUGS.md`. Break each rule on purpose to confirm a test catches it.
+7. **Review.** Push, you review, then the next layer.
 
 ## Phase 1 — the core agent
 
@@ -28,7 +31,7 @@ with a note in [`notes/`](notes/).
 | 3 | Tools | Real capabilities: files, shell, web | `agent/tools/filesystem.py`, `shell.py`, `web.py`, `schema.py` | `nanoclaw/agent/tools/` | ✅ done |
 | 4 | Context | Building the system prompt | `agent/context.py`, `templates/` | `nanoclaw/agent/context.py`, `nanoclaw/templates/` | ✅ done |
 | 5 | Sessions + AgentLoop | Conversations saved and resumed; one turn = context → runner → save | `session/manager.py`, `agent/loop.py` (`process_direct`) | `nanoclaw/session/`, `nanoclaw/agent/loop.py` | ✅ done |
-| 6 | Memory | Long-term memory; compacting old history | `agent/memory.py`, `agent/autocompact.py` | `nanoclaw/agent/memory.py` | ✅ done |
+| 6 | Memory | Long-term memory; compacting old history | `agent/memory.py`, `agent/autocompact.py`, `session/summary.py`, `agent/context_governance.py` (compaction) | `nanoclaw/agent/memory.py`, `nanoclaw/session/summary.py`, `nanoclaw/utils/tokens.py` | ✅ done |
 | 7 | Skills | Markdown procedures loaded on demand | `agent/skills.py`, `skills/` | `nanoclaw/agent/skills.py`, `nanoclaw/skills/` | ⏭ next |
 | 8 | Subagents | Hand a task to a child agent | `agent/subagent.py`, `agent/tools/spawn.py` | `nanoclaw/agent/subagent.py` | planned |
 | 9 | Safety | Keep tools inside the workspace; guard shell commands | `security/workspace_access.py`, `security/workspace_policy.py`, `security/network.py`, `agent/tools/sandbox.py` | `nanoclaw/security/` | planned |

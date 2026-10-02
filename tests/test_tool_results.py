@@ -117,3 +117,49 @@ async def test_runner_normalizes_error_results_too(tmp_path):
     # Error results (here: list_dir on a missing, very long path) are kept in budget too.
     result = await _run(tmp_path, "list_dir", {"path": "x" * 300}, workspace=None, max_chars=40)
     assert result.messages[2]["content"].endswith(TRUNCATED_SUFFIX)
+
+
+def test_each_session_gets_its_own_folder(tmp_path):
+    out = normalize_tool_result("exec", "c1", "x" * 500, workspace=tmp_path, max_chars=300, bucket="cli:direct")
+    assert "/.nanoclaw/tool-results/cli_direct/c1-" in out
+
+
+def test_old_session_folders_are_cleaned_up(tmp_path):
+    import os
+    import time
+
+    from nanoclaw.agent.tool_results import TOOL_RESULT_MAX_BUCKETS, TOOL_RESULT_RETENTION_SECS, TOOL_RESULTS_DIR
+
+    root = tmp_path / TOOL_RESULTS_DIR
+    now = time.time()
+    stale = root / "stale"
+    stale.mkdir(parents=True)
+    os.utime(stale, (now - TOOL_RESULT_RETENTION_SECS - 60,) * 2)
+    for i in range(TOOL_RESULT_MAX_BUCKETS + 3):  # recent folders, oldest first
+        folder = root / f"s{i:02d}"
+        folder.mkdir()
+        os.utime(folder, (now - 1000 + i,) * 2)
+    current = root / "current"
+    current.mkdir()
+    os.utime(current, (now - TOOL_RESULT_RETENTION_SECS - 60,) * 2)  # old, but in use
+
+    normalize_tool_result("exec", "c1", "x" * 500, workspace=tmp_path, max_chars=300, bucket="current")
+    left = sorted(p.name for p in root.iterdir())
+    assert "stale" not in left and "current" in left
+    # The current folder plus the 31 newest others.
+    assert len(left) == TOOL_RESULT_MAX_BUCKETS
+    assert "s00" not in left and f"s{TOOL_RESULT_MAX_BUCKETS + 2:02d}" in left
+
+
+def test_week_old_session_folders_are_removed_even_when_few(tmp_path):
+    import os
+    import time
+
+    from nanoclaw.agent.tool_results import TOOL_RESULT_RETENTION_SECS
+
+    root = tmp_path / TOOL_RESULTS_DIR
+    (root / "old").mkdir(parents=True)
+    (root / "recent").mkdir()
+    os.utime(root / "old", (time.time() - TOOL_RESULT_RETENTION_SECS - 60,) * 2)
+    normalize_tool_result("exec", "c1", "x" * 500, workspace=tmp_path, max_chars=300, bucket="now")
+    assert sorted(p.name for p in root.iterdir()) == ["now", "recent"]

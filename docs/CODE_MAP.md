@@ -108,22 +108,22 @@ Note: [`notes/02-runner.md`](notes/02-runner.md)
 
 | NanoClaw | nanobot | How it compares |
 |---|---|---|
-| [`AgentRunSpec`](../nanoclaw/agent/runner.py#L43) | [`agent/runner.py:89`][nb-l2-spec] | Simplified: 8 fields instead of ~25 (no hooks, callbacks, checkpoints, workspace) |
-| [`AgentRunResult`](../nanoclaw/agent/runner.py#L59) | [`runner.py:119`][nb-l2-result] | Simplified: `final_content`, `messages`, `tools_used`, `usage`, `stop_reason`, `error` |
-| [`AgentRunner.run()`](../nanoclaw/agent/runner.py#L88) | [`runner.py:284`][nb-l2-run] `run` + [`:368`][nb-l2-core] `_run_core` | Simplified: the same loop and stop rules, ~75 lines instead of ~520 |
+| [`AgentRunSpec`](../nanoclaw/agent/runner.py#L43) | [`agent/runner.py:89`][nb-l2-spec] | Simplified: 10 fields instead of ~25 (no hooks, callbacks or checkpoints). `workspace` (layer 3), `max_tokens`/`temperature` and `session_key` (for the tool-result folder) added since |
+| [`AgentRunResult`](../nanoclaw/agent/runner.py#L61) | [`runner.py:119`][nb-l2-result] | Simplified: `final_content`, `messages`, `tools_used`, `usage`, `stop_reason`, `error` |
+| [`AgentRunner.run()`](../nanoclaw/agent/runner.py#L90) | [`runner.py:284`][nb-l2-run] `run` + [`:368`][nb-l2-core] `_run_core` | Simplified: the same loop and stop rules, ~75 lines instead of ~520 |
 | ↳ tool branch | [`runner.py:487`][nb-l2-toolbranch] | Simplified: sequential, no checkpoints or hooks |
 | ↳ ignore calls in cut-off replies | [`runner.py:579`][nb-l2-ignore] | Same |
-| [`_request_model()`](../nanoclaw/agent/runner.py#L190) | [`runner.py:852`][nb-l2-reqmodel] `_request_model` | Simplified: the malformed-call recovery only (retry with note, then no tools); no streaming, governance or compaction |
-| [`_request()`](../nanoclaw/agent/runner.py#L170) | [`runner.py:864`][nb-l5-prepreq], [`:1214`][nb-l5-prepreq2] (`context_governor.prepare_request`) | Simplified: one provider call; since layer 5 adjacent user messages are merged first, as in nanobot; no token budgets |
-| [`_drop_malformed_tool_calls()`](../nanoclaw/agent/runner.py#L217) | [`runner.py:1068`][nb-l2-dropmal] | Same |
+| [`_request_model()`](../nanoclaw/agent/runner.py#L193) | [`runner.py:852`][nb-l2-reqmodel] `_request_model` | Simplified: the malformed-call recovery only (retry with note, then no tools); no streaming, governance or compaction |
+| [`_request()`](../nanoclaw/agent/runner.py#L173) | [`runner.py:864`][nb-l5-prepreq], [`:1214`][nb-l5-prepreq2] (`context_governor.prepare_request`) | Simplified: one provider call; since layer 5 adjacent user messages are merged first, as in nanobot; no token budgets |
+| [`_drop_malformed_tool_calls()`](../nanoclaw/agent/runner.py#L220) | [`runner.py:1068`][nb-l2-dropmal] | Same |
 | ↳ empty-reply retry + finalization | [`runner.py:592`][nb-l2-empty], [`:1126`][nb-l2-finretry] `_request_finalization_retry` | Same rule (`_MAX_EMPTY_RETRIES = 2`) |
 | ↳ model error | [`runner.py:714`][nb-l2-error] | Same, minus the arrearage message |
 | ↳ empty final response | [`runner.py:737`][nb-l2-emptyfinal] | Same |
-| [`_execute_tool_call()`](../nanoclaw/agent/runner.py#L234) | [`agent/tools/execution.py:57`][nb-l2-exec] `execute_tool_calls`, [`:115`][nb-l2-exec1] `_execute_tool_call` | Simplified: `prepare_call`, run, `Error: <Type>: <msg>` on exceptions, same as nanobot. No batching, throttling or violation classification |
-| ↳ empty-output marker + keeping results in budget | [`context_governance.py:716`][nb-l2-normalize] `normalize_tool_result` | Same since the layer 3 review: see [`normalize_tool_result`](../nanoclaw/agent/tool_results.py#L96) under Layer 3 |
-| [`_finalize_after_max_iterations()`](../nanoclaw/agent/runner.py#L255) | [`runner.py:1154`][nb-l2-finmax], [`:1249`][nb-l2-maxfallback] `_max_iterations_fallback` | Same |
-| [`_append_model_error_placeholder()`](../nanoclaw/agent/runner.py#L270) | [`runner.py:1361`][nb-l2-placeholder] | Same |
-| [`_add_usage()`](../nanoclaw/agent/runner.py#L74) | `runner.py:1326` `_merge_usage` | Simplified |
+| [`_execute_tool_call()`](../nanoclaw/agent/runner.py#L237) | [`agent/tools/execution.py:57`][nb-l2-exec] `execute_tool_calls`, [`:115`][nb-l2-exec1] `_execute_tool_call` | Simplified: `prepare_call`, run, `Error: <Type>: <msg>` on exceptions, same as nanobot. No batching, throttling or violation classification |
+| ↳ empty-output marker + keeping results in budget | [`context_governance.py:716`][nb-l2-normalize] `normalize_tool_result` | Same since the layer 3 review: see [`normalize_tool_result`](../nanoclaw/agent/tool_results.py#L132) under Layer 3 |
+| [`_finalize_after_max_iterations()`](../nanoclaw/agent/runner.py#L258) | [`runner.py:1154`][nb-l2-finmax], [`:1249`][nb-l2-maxfallback] `_max_iterations_fallback` | Same |
+| [`_append_model_error_placeholder()`](../nanoclaw/agent/runner.py#L273) | [`runner.py:1361`][nb-l2-placeholder] | Same |
+| [`_add_usage()`](../nanoclaw/agent/runner.py#L76) | `runner.py:1326` `_merge_usage` | Simplified |
 
 ### Messages and fixed texts — `nanoclaw/agent/messages.py`
 
@@ -173,12 +173,12 @@ Note: [`notes/03-tools.md`](notes/03-tools.md)
 
 | NanoClaw | nanobot | How it compares |
 |---|---|---|
-| [`ExecTool`](../nanoclaw/agent/tools/shell.py#L39) | [`agent/tools/shell.py:162`][nb-l3-exec] | Simplified: bash only; no sessions, sandbox, shell choice, PATH config or Windows |
-| [`DEFAULT_DENY_PATTERNS`](../nanoclaw/agent/tools/shell.py#L26) | [`shell.py:215`][nb-l3-deny] | Same general patterns; memory-file patterns come in layer 6 |
-| [`_guard_command`](../nanoclaw/agent/tools/shell.py#L149) | [`shell.py:840`][nb-l3-guard], called at [`:446`][nb-l3-guardcall] | **Different: always applied.** nanobot only when `restrict_to_workspace` is on (off by default). Deny list only; no allowlist or internal-URL check |
-| [`_build_env`](../nanoclaw/agent/tools/shell.py#L164) | [`shell.py:791`][nb-l3-env] | Same (Unix) |
-| [`_kill_process_tree`](../nanoclaw/agent/tools/shell.py#L179) | [`shell.py:730`][nb-l3-kill] | Simplified: `killpg` on the process group, then `process.kill()` |
-| [`_resolve_timeout`](../nanoclaw/agent/tools/shell.py#L137) | [`shell.py:386`][nb-l3-timeout] | Same: model's choice capped at 600 s; configured default may be higher; 0 = no limit |
+| [`ExecTool`](../nanoclaw/agent/tools/shell.py#L46) | [`agent/tools/shell.py:162`][nb-l3-exec] | Simplified: bash only; no sessions, sandbox, shell choice, PATH config or Windows |
+| [`DEFAULT_DENY_PATTERNS`](../nanoclaw/agent/tools/shell.py#L26) | [`shell.py:215`][nb-l3-deny] | Same list as nanobot, including the memory-file patterns (`history.jsonl`, `.dream_cursor`) added at the end of layer 6 (checked: identical) |
+| [`_guard_command`](../nanoclaw/agent/tools/shell.py#L156) | [`shell.py:840`][nb-l3-guard], called at [`:446`][nb-l3-guardcall] | **Different: always applied.** nanobot only when `restrict_to_workspace` is on (off by default). Deny list only; no allowlist or internal-URL check |
+| [`_build_env`](../nanoclaw/agent/tools/shell.py#L171) | [`shell.py:791`][nb-l3-env] | Same (Unix) |
+| [`_kill_process_tree`](../nanoclaw/agent/tools/shell.py#L186) | [`shell.py:730`][nb-l3-kill] | Simplified: `killpg` on the process group, then `process.kill()` |
+| [`_resolve_timeout`](../nanoclaw/agent/tools/shell.py#L144) | [`shell.py:386`][nb-l3-timeout] | Same: model's choice capped at 600 s; configured default may be higher; 0 = no limit |
 
 ### Web — `nanoclaw/agent/tools/web.py`
 
@@ -195,10 +195,11 @@ Note: [`notes/03-tools.md`](notes/03-tools.md)
 
 | NanoClaw | nanobot | How it compares |
 |---|---|---|
-| [`normalize_tool_result`](../nanoclaw/agent/tool_results.py#L96) | [`agent/context_governance.py:716`][nb-l2-normalize] `ContextGovernor.normalize_tool_result` | Same order: empty marker → `read_file` exempt → truncate (no workspace) or save |
-| [`OFFLOAD_EXEMPT_TOOLS`](../nanoclaw/agent/tool_results.py#L23) | [`context_governance.py:68`][nb-l3-exempt] `TOOL_RESULT_OFFLOAD_EXEMPT_TOOLS` | Same: `{"read_file"}` |
-| [`maybe_persist_tool_result`](../nanoclaw/agent/tool_results.py#L57) | [`utils/helpers.py:624`][nb-l3-persist] | Simplified: one `default` folder, no clean-up. **Different file name:** `<id>-<content hash>.txt`, fixing nanobot's stale-output bug ([`UPSTREAM_BUGS.md`](UPSTREAM_BUGS.md) #3) |
-| [`render_tool_result_reference`](../nanoclaw/agent/tool_results.py#L37), `safe_filename`, `ensure_nonempty_tool_result` | `utils/helpers.py:511`, `:372`; `utils/runtime.py:48` | Same text |
+| [`normalize_tool_result`](../nanoclaw/agent/tool_results.py#L132) | [`agent/context_governance.py:716`][nb-l2-normalize] `ContextGovernor.normalize_tool_result` | Same order: empty marker → `read_file` exempt → truncate (no workspace) or save |
+| [`OFFLOAD_EXEMPT_TOOLS`](../nanoclaw/agent/tool_results.py#L28) | [`context_governance.py:68`][nb-l3-exempt] `TOOL_RESULT_OFFLOAD_EXEMPT_TOOLS` | Same: `{"read_file"}` |
+| [`maybe_persist_tool_result`](../nanoclaw/agent/tool_results.py#L88) | [`utils/helpers.py:624`][nb-l3-persist] | Same folder per session and clean-up (since the end of layer 6). **Different file name:** `<id>-<content hash>.txt`, fixing nanobot's stale-output bug ([`UPSTREAM_BUGS.md`](UPSTREAM_BUGS.md) #3) |
+| [`cleanup_tool_result_buckets`](../nanoclaw/agent/tool_results.py#L69) | [`utils/helpers.py:540`][nb-l6-cleanup] `_cleanup_tool_result_buckets` | Same: other sessions' folders removed after 7 days and beyond 32 |
+| [`render_tool_result_reference`](../nanoclaw/agent/tool_results.py#L42), `safe_filename`, `ensure_nonempty_tool_result` | `utils/helpers.py:511`, `:372`; `utils/runtime.py:48` | Same text |
 
 ### Default tool set — `nanoclaw/agent/tools/__init__.py`
 
@@ -278,10 +279,10 @@ Note: [`notes/05-sessions.md`](notes/05-sessions.md)
 |---|---|---|
 | [`AgentLoop`](../nanoclaw/agent/loop.py#L69) | [`agent/loop.py`][nb-l5-loop] `AgentLoop` | Simplified: direct path only; no bus, channels, queues, hooks, cancellation or checkpoint recovery. Takes `temperature` and `max_tokens` |
 | ↳ [`process_direct()`](../nanoclaw/agent/loop.py#L114) | [`loop.py:2498`][nb-l5-pd] → `_build_turn` [`:2046`][nb-l5-build], `_run_turn` [`:2155`][nb-l5-run], `_persist_turn` [`:2195`][nb-l5-persist] | Same stages and order, including closing a crashed turn first and the `pending_user_turn` flag (set when the user message is saved, cleared after the turn); returns the `AgentRunResult` instead of an `OutboundMessage` |
-| ↳ [`_persist_user_message_early()`](../nanoclaw/agent/loop.py#L318) | [`loop.py:663`][nb-l5-early] | Same: saved with its runtime context and the `_runtime_context` marker |
-| ↳ [`_save_turn()`](../nanoclaw/agent/loop.py#L338) | [`loop.py:2320`][nb-l5-saveturn] | Same rules (empty assistant skipped, unknown/duplicate tool results dropped, timestamps); no latency, image redaction or summary checkpoints |
-| ↳ [`new_session()`](../nanoclaw/agent/loop.py#L247) | [`command/builtin.py:314`][nb-l5-new] `/new` | Since layer 6: archives the old messages to the journal first, then clears (see the layer 6 table) |
-| ↳ [`_get_session_lock()`](../nanoclaw/agent/loop.py#L315) | [`loop.py:2562`][nb-l5-lock] | Same: one `asyncio.Lock` per session key |
+| ↳ [`_persist_user_message_early()`](../nanoclaw/agent/loop.py#L321) | [`loop.py:663`][nb-l5-early] | Same: saved with its runtime context and the `_runtime_context` marker |
+| ↳ [`_save_turn()`](../nanoclaw/agent/loop.py#L341) | [`loop.py:2320`][nb-l5-saveturn] | Same rules (empty assistant skipped, unknown/duplicate tool results dropped, timestamps); no latency, image redaction or summary checkpoints |
+| ↳ [`new_session()`](../nanoclaw/agent/loop.py#L250) | [`command/builtin.py:314`][nb-l5-new] `/new` | Since layer 6: archives the old messages to the journal first, then clears (see the layer 6 table) |
+| ↳ [`_get_session_lock()`](../nanoclaw/agent/loop.py#L318) | [`loop.py:2562`][nb-l5-lock] | Same: one `asyncio.Lock` per session key |
 
 ### Closing a crashed turn — `nanoclaw/session/recovery.py`
 
@@ -336,9 +337,9 @@ Note: [`notes/06-memory.md`](notes/06-memory.md)
 | [`_input_budget()`](../nanoclaw/agent/loop.py#L185), `CONTEXT_SAFETY_BUFFER` | [`context_governance.py:700`][nb-l6-inputbudget], [`providers/base.py:39`][nb-l6-buffer] | Same |
 | [`ContextWindowExceededError`](../nanoclaw/agent/loop.py#L55) | [`context_governance.py:75`][nb-l6-cwee] | Same message |
 | `DEFAULT_CONTEXT_WINDOW_TOKENS` | [`config/schema.py:127`][nb-l6-window] | **Different:** 128,000 instead of 200,000 (difference #2) |
-| ↳ [`new_session()`](../nanoclaw/agent/loop.py#L247) | [`command/builtin.py:314`][nb-l5-new] `cmd_new` | Same request and journal entry (checked); waits instead of running in the background |
-| ↳ [`compact_session()`](../nanoclaw/agent/loop.py#L273) | [`command/builtin.py:349`][nb-l6-compact] `cmd_compact` | Same |
-| ↳ [`run_dream()`](../nanoclaw/agent/loop.py#L281) | [`command/builtin.py:453`][nb-l6-dream] `cmd_dream` | Same flow and messages; file comparison instead of a git diff; no schedule |
+| ↳ [`new_session()`](../nanoclaw/agent/loop.py#L250) | [`command/builtin.py:314`][nb-l5-new] `cmd_new` | Same request and journal entry (checked); waits instead of running in the background |
+| ↳ [`compact_session()`](../nanoclaw/agent/loop.py#L276) | [`command/builtin.py:349`][nb-l6-compact] `cmd_compact` | Same |
+| ↳ [`run_dream()`](../nanoclaw/agent/loop.py#L284) | [`command/builtin.py:453`][nb-l6-dream] `cmd_dream` | Same flow and messages; file comparison instead of a git diff; no schedule |
 | ↳ `process_direct(ephemeral=, tools=)` | [`loop.py:2498`][nb-l5-pd] | Same: a temporary turn saves nothing, writes no spill files, and is checked against the context window without journaling |
 
 ### Sessions, prompt and helpers
@@ -374,9 +375,9 @@ Note: [`notes/06-memory.md`](notes/06-memory.md)
 | `tests/test_tools_registry.py` | `ToolResult`, `to_schema`, sorted definitions, every registry error message, retry hint once |
 | `tests/test_schema.py` | validation messages, casting, unknown parameters, `arguments` unwrapping |
 | `tests/test_filesystem_tools.py` | the four file tools on real files |
-| `tests/test_shell_tool.py` | `exec` with real bash: output, timeout, secrets hidden, deny list |
+| `tests/test_shell_tool.py` | `exec` with real bash: output, timeout, secrets hidden, deny list (including writes to the memory journal) |
 | `tests/test_web_tools.py` | `web_fetch` over mocked HTTP; `web_search` with a fake search |
-| `tests/test_tool_results.py` | large results saved with preview; `read_file` never cut; truncation without a workspace |
+| `tests/test_tool_results.py` | large results saved with preview; `read_file` never cut; truncation without a workspace; a folder per session and clean-up of old folders |
 | `tests/test_tools_end_to_end.py` | runner + default tools with a scripted model |
 | `tests/test_context.py` | system prompt order, bootstrap file rules, channel/platform hints, runtime context, time block, message merging, `prompt` command |
 | `tests/test_session.py` | history replay rules, file format, safe file names, atomic save, corrupt lines, cache, storage location, workspace ID |
@@ -577,3 +578,4 @@ Note: [`notes/06-memory.md`](notes/06-memory.md)
 [nb-l6-enc]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/utils/token_encoding.py#L44
 [nb-l6-runtime]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/utils/llm_runtime.py#L15
 [nb-l6-public]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/runtime_context.py#L215
+[nb-l6-cleanup]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/utils/helpers.py#L540

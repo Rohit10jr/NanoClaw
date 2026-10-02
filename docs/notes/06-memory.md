@@ -236,3 +236,13 @@ context governance in phase 2.
 | 1 | Temporary turns skipped the context-window check | Checks every turn; a temporary turn compacts without journaling, or is refused | Temporary turns go through the same check with `persist=False` (nothing journaled, no summary saved). Tests: `test_oversized_ephemeral_turn_is_refused_like_nanobot`, `test_compaction_without_persist_journals_nothing` |
 | 2 | Dream's "nothing to process" message differed without being recorded | — | Recorded as difference #9 |
 
+### Completed in the end-of-layer docs check
+
+Checking every doc after layer 6 found two promises from earlier layers that
+had not been kept. Both are now built, as in nanobot:
+
+| Promise | Where it was made | Now |
+|---|---|---|
+| Deny patterns for writes to `history.jsonl` / `.dream_cursor` "come with memory in layer 6" | `03-tools.md`, difference #2 | nanobot's five patterns added to `DEFAULT_DENY_PATTERNS`; the list is identical to nanobot's (checked on 15 commands). Reading the journal stays allowed |
+| Saved tool results get "a folder per session and clean-up with sessions in layer 5" | `03-tools.md`, difference #5 | `.nanoclaw/tool-results/<session>/`; other sessions' folders removed after 7 days and beyond 32 (nanobot `_cleanup_tool_result_buckets`) |
+
