@@ -27,6 +27,7 @@ from nanoclaw.runtime_context import (
     current_time_block,
 )
 from nanoclaw.session import Session, SessionManager
+from nanoclaw.session.recovery import PENDING_USER_TURN_KEY, restore_pending_interruption
 
 
 class AgentLoop:
@@ -42,12 +43,16 @@ class AgentLoop:
         sessions: SessionManager | None = None,
         max_iterations: int = 20,
         max_tool_result_chars: int = 16_000,
+        max_tokens: int = 4096,
+        temperature: float = 0.7,
     ) -> None:
         self.provider = provider
         self.workspace = workspace
         self.model = model
         self.max_iterations = max_iterations
         self.max_tool_result_chars = max_tool_result_chars
+        self.max_tokens = max_tokens
+        self.temperature = temperature
         self.context = ContextBuilder(workspace)
         self.tools = tools if tools is not None else build_default_tools(workspace)
         self.sessions = sessions if sessions is not None else SessionManager(workspace)
@@ -68,6 +73,9 @@ class AgentLoop:
             # Build: history first, then save the user's message before running,
             # so it survives a crash or an error mid-turn.
             session = self.sessions.get_or_create(session_key)
+            # A turn that died before it was saved gets an error reply first.
+            if restore_pending_interruption(session):
+                self.sessions.save(session)
             history = session.get_history()
             blocks = [current_time_block()]
             persisted_early = self._persist_user_message_early(content, session, blocks)
@@ -85,12 +93,15 @@ class AgentLoop:
                     max_iterations=self.max_iterations,
                     max_tool_result_chars=self.max_tool_result_chars,
                     workspace=self.workspace,
+                    max_tokens=self.max_tokens,
+                    temperature=self.temperature,
                 )
             )
 
             # Persist: everything the runner added after the user's message.
             skip = len(messages) if persisted_early else len(messages) - 1
             self._save_turn(session, result.messages, skip)
+            session.metadata.pop(PENDING_USER_TURN_KEY, None)
             self.sessions.save(session)
 
         if is_blank(result.final_content):
@@ -121,6 +132,8 @@ class AgentLoop:
         text, marker = append_runtime_context(content, blocks)
         extra = {RUNTIME_CONTEXT_HISTORY_META: marker} if marker is not None else {}
         session.add_message("user", text, **extra)
+        # Cleared once the turn is saved; still set next time means it crashed.
+        session.metadata[PENDING_USER_TURN_KEY] = True
         self.sessions.save(session)
         return True
 

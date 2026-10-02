@@ -78,8 +78,10 @@ with `process_direct()` ties one turn together: load session → save the user
 message → build context → run runner → save new messages. `nanoclaw ask` now
 continues the conversation; `--new` starts over, `--session` picks another.
 See `notes/05-sessions.md`.
-*Skipped:* the message bus, channels, per-session queues, cancellation, crash
-recovery, cross-process file locks, workspace-ID migration.
+A turn that crashed is closed with an error reply on the next turn.
+*Skipped:* the message bus, channels, per-session queues, cancellation,
+resuming a crashed turn from a checkpoint, cross-process file locks,
+workspace-ID migration.
 
 **6 — Memory.** `MemoryStore` (`memory/MEMORY.md` + `history.jsonl`), a memory
 tool or prompt section, and compaction: when the session grows too large,
@@ -115,9 +117,9 @@ NanoClaw needs it, and build only the ones we pick.
 | Message bus + channels | `bus/`, `channels/` (Telegram, Slack, Discord, …) | Same agent from many chat apps |
 | Hooks | `agent/hook.py`, `agent/turn_hooks.py`, `agent/progress_hook.py` | Plugins and UIs observe or change each step |
 | Plugins | `agent/plugins.py` | Installable bundles of skills + MCP servers |
-| Recovery + checkpoints | `session/recovery.py`, runner checkpoint callbacks | Resume a turn after a crash |
+| Recovery + checkpoints | `session/recovery.py`, runner checkpoint callbacks | Resume a turn after a crash (closing a crashed turn is already ported, layer 5) |
 | Mid-turn injections | runner `injection_callback` | Fold new user messages into a running turn |
-| Context governance | `agent/context_governance.py` | Keep requests within the context window |
+| Context governance | `agent/context_governance.py` | Keep requests within the context window (the adjacent-user-message merge is already ported, layer 5) |
 | Provider retries | `providers/base.py` `chat_with_retry` | Rate limits, flaky gateways |
 | Streaming | `chat_stream`, `cli/stream.py` | Replies appear word by word |
 | Model presets + fallback | `agent/model_presets.py`, `providers/fallback_provider.py` | Named model setups, backup models |

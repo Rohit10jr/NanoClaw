@@ -190,7 +190,8 @@ async def test_all_nameless_calls_trigger_one_retry_with_note():
     retry = fake.calls[1]
     assert retry.tools is not None
     assert retry.messages[-1]["role"] == "user"
-    assert retry.messages[-1]["content"].startswith(MALFORMED_TOOL_CALL_NOTE)
+    # Adjacent user messages are merged before sending, as in nanobot.
+    assert retry.messages[-1]["content"].startswith("please help\n\n" + MALFORMED_TOOL_CALL_NOTE)
     assert retry.messages[-1]["content"].endswith("I'll check.")
     assert result.final_content == "done"
     # Neither the nameless call nor the note is saved.
@@ -294,7 +295,8 @@ async def test_second_empty_reply_triggers_finalization_without_tools():
     assert result.stop_reason == "completed"
     finalize = fake.calls[2]
     assert finalize.tools is None
-    assert finalize.messages[-1] == {"role": "user", "content": FINALIZATION_RETRY_PROMPT}
+    # Merged with the user's message before sending, as in nanobot.
+    assert finalize.messages[-1] == {"role": "user", "content": "please help\n\n" + FINALIZATION_RETRY_PROMPT}
     # The finalization prompt is not saved into history.
     assert result.messages == [USER, {"role": "assistant", "content": "Final answer."}]
 

@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from nanoclaw.agent.context_governance import merge_adjacent_user_messages_for_model
 from nanoclaw.agent.messages import (
     BUDGET_EXHAUSTED_FINALIZATION_PROMPT,
     DEFAULT_ERROR_MESSAGE,
@@ -176,7 +177,7 @@ class AgentRunner:
         """One provider call. Inline <think> blocks are removed from the answer."""
         tools = spec.tools.get_definitions() if with_tools else []
         response = await spec.provider.safe_chat(
-            messages=messages,
+            messages=merge_adjacent_user_messages_for_model(messages),
             tools=tools or None,
             model=spec.model,
             max_tokens=spec.max_tokens,

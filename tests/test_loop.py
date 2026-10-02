@@ -13,6 +13,7 @@ from nanoclaw.providers import FakeProvider, LLMResponse, ToolCallRequest
 from nanoclaw.providers.base import sanitize_messages
 from nanoclaw.runtime_context import RUNTIME_CONTEXT_TAG
 from nanoclaw.session import SessionManager
+from nanoclaw.session.recovery import INTERRUPTED_TURN_MESSAGE, restore_pending_interruption
 from toy_tools import EchoTool
 
 
@@ -234,3 +235,67 @@ def test_save_turn_moves_the_runtime_context_marker_onto_the_user_message(ws, tm
     loop._save_turn(session, [{"role": "user", "content": "q\n\n[T]", "_meta": {"runtime_context": marker}}], 0)
     assert session.messages[0]["_runtime_context"] == marker
     assert "_meta" not in session.messages[0]
+
+
+# --- interrupted turns (nanobot session/recovery.py) -----------------------------------------
+
+
+async def test_crashed_turn_gets_an_error_reply_before_the_next_turn(ws, tmp_path):
+    loop, _ = make_loop(ws, tmp_path)
+
+    async def boom(spec):
+        raise RuntimeError("process died")
+
+    loop.runner.run = boom
+    with pytest.raises(RuntimeError):
+        await loop.process_direct("first question")
+    session = SessionManager(ws, sessions_root=tmp_path / "sessions").get_or_create("cli:direct")
+    assert session.metadata["pending_user_turn"] is True
+
+    loop2, fake = make_loop(ws, tmp_path, "answer")
+    await loop2.process_direct("second question")
+    assert visible(fake.calls[0].messages) == [
+        ("user", "first question"),
+        ("assistant", INTERRUPTED_TURN_MESSAGE),
+        ("user", "second question"),
+    ]
+    saved = loop2.sessions.get_or_create("cli:direct")
+    assert [m["role"] for m in saved.messages] == ["user", "assistant", "user", "assistant"]
+    assert saved.messages[1]["_recovery_interrupted"] is True
+    assert "pending_user_turn" not in saved.metadata
+
+
+async def test_pending_flag_is_cleared_after_a_normal_turn(ws, tmp_path):
+    loop, _ = make_loop(ws, tmp_path, "ok")
+    await loop.process_direct("hi")
+    reloaded = SessionManager(ws, sessions_root=tmp_path / "sessions").get_or_create("cli:direct")
+    assert "pending_user_turn" not in reloaded.metadata
+
+
+def test_restore_pending_interruption_rules():
+    from nanoclaw.session import Session
+
+    s = Session("k", messages=[{"role": "user", "content": "q"}], metadata={"pending_user_turn": True})
+    assert restore_pending_interruption(s) is True
+    assert s.messages[-1]["content"] == INTERRUPTED_TURN_MESSAGE
+    assert restore_pending_interruption(s) is False  # flag gone
+    # Flag set but the last message is not a user message: only the flag is cleared.
+    s = Session("k", messages=[{"role": "assistant", "content": "a"}], metadata={"pending_user_turn": True})
+    assert restore_pending_interruption(s) is True
+    assert len(s.messages) == 1 and "pending_user_turn" not in s.metadata
+
+
+# --- generation settings ----------------------------------------------------------------------
+
+
+async def test_loop_passes_generation_settings(ws, tmp_path):
+    loop, fake = make_loop(ws, tmp_path, "ok")
+    loop.temperature, loop.max_tokens = 0.3, 1234
+    await loop.process_direct("hi")
+    assert (fake.calls[0].temperature, fake.calls[0].max_tokens) == (0.3, 1234)
+
+
+def test_cli_uses_nanobots_agent_defaults(ws):
+    fake = FakeProvider(["ok"])
+    main(["ask", "hi", "-w", str(ws)], provider=fake)
+    assert (fake.calls[0].temperature, fake.calls[0].max_tokens) == (0.1, 8192)

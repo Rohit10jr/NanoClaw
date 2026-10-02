@@ -8,6 +8,7 @@ between turns, so providers can cache it.
 
 from __future__ import annotations
 
+import copy
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -60,6 +61,51 @@ def append_runtime_context(
     suffix = "\n\n".join(rendered)
     merged = f"{text}\n\n{suffix}" if text else suffix
     return merged, {"version": 1, "sources": sources, "suffix": suffix}
+
+
+def detach_runtime_context(
+    content: Any, marker: dict[str, Any]
+) -> tuple[Any, list[str], list[dict[str, Any]]] | None:
+    """Split ``content`` into (what the user wrote, sources, appended blocks).
+
+    Uses the marker from ``append_runtime_context``; returns ``None`` if the
+    content no longer ends with what the marker describes.
+    """
+    if marker.get("version") != 1:
+        return None
+    raw_sources = marker.get("sources")
+    sources = [x for x in raw_sources if isinstance(x, str) and x] if isinstance(raw_sources, list) else []
+    suffix = marker.get("suffix")
+    if isinstance(content, str) and isinstance(suffix, str) and suffix:
+        if content == suffix:
+            clean = ""
+        elif content.endswith("\n\n" + suffix):
+            clean = content[: -(len(suffix) + 2)]
+        else:
+            return None
+        return clean, sources, [{"type": "text", "text": suffix}]
+    expected = marker.get("blocks")
+    if isinstance(content, list) and isinstance(expected, list) and expected:
+        count = len(expected)
+        if content[-count:] != expected:
+            return None
+        return content[:-count], sources, copy.deepcopy(expected)
+    return None
+
+
+def reattach_runtime_context(
+    content: Any, sources: Sequence[str], blocks: Sequence[dict[str, Any]]
+) -> tuple[Any, dict[str, Any]]:
+    """Append detached blocks again (after merging messages); returns a new marker."""
+    context_blocks = [copy.deepcopy(dict(block)) for block in blocks]
+    if isinstance(content, str) and all(
+        block.get("type") == "text" and isinstance(block.get("text"), str) for block in context_blocks
+    ):
+        suffix = "\n\n".join(block["text"] for block in context_blocks)
+        merged = f"{content}\n\n{suffix}" if content else suffix
+        return merged, {"version": 1, "sources": list(sources), "suffix": suffix}
+    visible = list(content) if isinstance(content, list) else ([] if content is None else [{"type": "text", "text": str(content)}])
+    return [*visible, *context_blocks], {"version": 1, "sources": list(sources), "blocks": context_blocks}
 
 
 def current_time_block(now: datetime | None = None) -> RuntimeContextBlock:

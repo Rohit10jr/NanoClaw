@@ -18,6 +18,10 @@ DEFAULT_WORKSPACE = Path("~/.nanoclaw/workspace")
 CHANNEL = "cli"
 # nanobot's terminal chat uses the same key.
 DEFAULT_SESSION = "cli:direct"
+# nanobot's out-of-the-box agent settings (config AgentDefaults). The provider's
+# own defaults (0.7, 4096) only apply when no configuration is given.
+DEFAULT_TEMPERATURE = 0.1
+DEFAULT_MAX_TOKENS = 8192
 
 
 def _prepare_workspace(path: Path) -> Path:
@@ -29,7 +33,7 @@ def _prepare_workspace(path: Path) -> Path:
 
 
 async def _ask(provider: LLMProvider, prompt: str, workspace: Path, session_key: str, new: bool) -> int:
-    loop = AgentLoop(provider, workspace)
+    loop = AgentLoop(provider, workspace, temperature=DEFAULT_TEMPERATURE, max_tokens=DEFAULT_MAX_TOKENS)
     if new:
         loop.new_session(session_key)
     result = await loop.process_direct(prompt, session_key=session_key, channel=CHANNEL)

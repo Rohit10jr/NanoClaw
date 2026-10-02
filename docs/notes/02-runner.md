@@ -120,7 +120,11 @@ message *"I reached the maximum number of tool call iterations (N)..."* is used.
 
 **Helper prompts are never saved.** The two extra user messages above are added
 to that one request only, not to `messages`. The saved history contains only
-what the user and model actually said.
+what the user and model actually said. *(Updated in layer 5: before each
+request, adjacent user messages are merged into one with the runtime-context
+block kept last, as nanobot's context governance does. So the "please answer"
+prompt reaches the model inside the user's message, not as a second one. See
+`05-sessions.md`.)*
 
 **A model error leaves history usable.** The run stops with `stop_reason =
 "error"` and the error text as `final_content`, and the placeholder
