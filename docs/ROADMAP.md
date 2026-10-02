@@ -28,8 +28,8 @@ with a note in [`notes/`](notes/).
 | 3 | Tools | Real capabilities: files, shell, web | `agent/tools/filesystem.py`, `shell.py`, `web.py`, `schema.py` | `nanoclaw/agent/tools/` | ✅ done |
 | 4 | Context | Building the system prompt | `agent/context.py`, `templates/` | `nanoclaw/agent/context.py`, `nanoclaw/templates/` | ✅ done |
 | 5 | Sessions + AgentLoop | Conversations saved and resumed; one turn = context → runner → save | `session/manager.py`, `agent/loop.py` (`process_direct`) | `nanoclaw/session/`, `nanoclaw/agent/loop.py` | ✅ done |
-| 6 | Memory | Long-term memory; compacting old history | `agent/memory.py`, `agent/autocompact.py` | `nanoclaw/agent/memory.py` | ⏭ next |
-| 7 | Skills | Markdown procedures loaded on demand | `agent/skills.py`, `skills/` | `nanoclaw/agent/skills.py`, `nanoclaw/skills/` | planned |
+| 6 | Memory | Long-term memory; compacting old history | `agent/memory.py`, `agent/autocompact.py` | `nanoclaw/agent/memory.py` | ✅ done |
+| 7 | Skills | Markdown procedures loaded on demand | `agent/skills.py`, `skills/` | `nanoclaw/agent/skills.py`, `nanoclaw/skills/` | ⏭ next |
 | 8 | Subagents | Hand a task to a child agent | `agent/subagent.py`, `agent/tools/spawn.py` | `nanoclaw/agent/subagent.py` | planned |
 | 9 | Safety | Keep tools inside the workspace; guard shell commands | `security/workspace_access.py`, `security/workspace_policy.py`, `security/network.py`, `agent/tools/sandbox.py` | `nanoclaw/security/` | planned |
 | 10 | Terminal chat | Interactive REPL using everything above | `cli/agent.py`, `cli/commands.py` | `nanoclaw/cli.py` | planned |
@@ -83,11 +83,23 @@ A turn that crashed is closed with an error reply on the next turn.
 resuming a crashed turn from a checkpoint, cross-process file locks,
 workspace-ID migration.
 
-**6 — Memory.** `MemoryStore` (`memory/MEMORY.md` + `history.jsonl`), a memory
-tool or prompt section, and compaction: when the session grows too large,
-summarize old turns (this sets `Session.last_archived`, which layer 5 already
-honours). Until then a session grows without limit; `ask --new` resets it.
-*Skipped:* "Dream" scheduled consolidation, provider-native compaction.
+**6 — Memory.** nanobot's three tiers. `MemoryStore`: `memory/MEMORY.md`
+(long-term facts, `# Memory` in the system prompt) and the journal
+`memory/history.jsonl`. Compaction (`Consolidator`, `MemoryArchiver`): when a
+request would not fit the context window, old messages are summarized by the
+model (or dumped raw if that fails) into `[Archived Context Summary]` and the
+journal. `nanoclaw compact`, `ask --new` (archives first) and `nanoclaw dream`
+(folds journal entries into `MEMORY.md`/`USER.md`/`SOUL.md` with restricted
+file tools). Token counting with tiktoken. See `notes/06-memory.md`.
+**Decisions:** context window default 128,000 (`NANOCLAW_CONTEXT_WINDOW`;
+nanobot: 200,000); tiktoken added; Dream included as a manual command.
+**Difference:** compaction is checked once before a turn; nanobot also checks
+between tool calls in a turn (phase 2, context governance).
+**Found:** compaction usually falls back to a raw dump in nanobot too
+(`UPSTREAM_BUGS.md`, bug 4; kept faithful, fix open).
+*Deferred (see phase 2):* mid-turn compaction, idle auto-compact, scheduled
+Dream, git history of memory files, provider-native compaction, Dream prompt
+override, Dream model override, compaction events.
 
 **7 — Skills.** `SkillsLoader` lists `skills/*/SKILL.md` (name + description
 in the prompt); the model reads the full skill with `read_file` when needed.
@@ -114,18 +126,22 @@ NanoClaw needs it, and build only the ones we pick.
 
 | Feature | nanobot reference | Why it exists |
 |---|---|---|
-| Message bus + channels | `bus/`, `channels/` (Telegram, Slack, Discord, …) | Same agent from many chat apps |
-| Hooks | `agent/hook.py`, `agent/turn_hooks.py`, `agent/progress_hook.py` | Plugins and UIs observe or change each step |
+| Message bus + channels | `bus/`, `channels/` (Telegram, Slack, Discord, …) | Same agent from many chat apps. A long-running process would also allow **idle auto-compact** (`agent/autocompact.py`: summarize a chat after 15 idle minutes; deferred from layer 6) |
+| Hooks | `agent/hook.py`, `agent/turn_hooks.py`, `agent/progress_hook.py` | Plugins and UIs observe or change each step; also **compaction events** (`ContextCompactionEvent`; deferred from layer 6) |
 | Plugins | `agent/plugins.py` | Installable bundles of skills + MCP servers |
 | Recovery + checkpoints | `session/recovery.py`, runner checkpoint callbacks | Resume a turn after a crash (closing a crashed turn is already ported, layer 5) |
 | Mid-turn injections | runner `injection_callback` | Fold new user messages into a running turn |
-| Context governance | `agent/context_governance.py` | Keep requests within the context window (the adjacent-user-message merge is already ported, layer 5) |
+| Context governance | `agent/context_governance.py` | Keep requests within the context window: token budgets, tool-result budgets, and **compaction in the middle of a turn** (between tool calls). Already ported: the adjacent-user-message merge (layer 5) and compaction before a turn (layer 6) |
 | Provider retries | `providers/base.py` `chat_with_retry` | Rate limits, flaky gateways |
 | Streaming | `chat_stream`, `cli/stream.py` | Replies appear word by word |
-| Model presets + fallback | `agent/model_presets.py`, `providers/fallback_provider.py` | Named model setups, backup models |
+| Model presets + fallback | `agent/model_presets.py`, `providers/fallback_provider.py` | Named model setups, backup models; also the **Dream model override** (run Dream on another model; deferred from layer 6) |
 | Anthropic adapter | `providers/anthropic_provider.py` | Non-OpenAI wire format |
 | MCP | `agent/tools/mcp.py` | Tools from external MCP servers |
-| Cron + heartbeat | `cron/`, `agent/tools/cron.py`, `templates/HEARTBEAT.md` | Scheduled and proactive tasks |
+| Cron + heartbeat | `cron/`, `agent/tools/cron.py`, `templates/HEARTBEAT.md` | Scheduled and proactive tasks, including **Dream every 2 hours** (`cli/gateway_runtime.py`, `DreamConfig`; deferred from layer 6, where Dream is the manual `nanoclaw dream`) |
 | Usage accounting | `llm_usage/` | Token and cost tracking |
 | Web UI / TUI | `webui/`, `tui/` | Browser and full-screen terminal interfaces |
+| Memory history (git) | `utils/gitstore.py`, `/dream-log`, `/dream-restore` | Commits `SOUL.md`/`USER.md`/`MEMORY.md` after each Dream so changes can be viewed and undone (deferred from layer 6) |
+| Provider conversation state | `providers/conversation_state.py`, `summarize_provider_compaction` | Server-side conversation state (e.g. OpenAI Responses API), including **provider-native compaction** (deferred from layer 6) |
+| Prompt overrides | `utils/workspace_prompts.py`, `templates/prompts/`, `/dream-prompt` | Replace Dream's (and the heartbeat's) instructions with a file in the workspace (deferred from layer 6) |
+| Logging | `loguru` throughout | Warnings for degraded archives, corrupt files, ... (NanoClaw has no logging yet) |
 | Separate project folder | `agent/context.py` (`workspace` vs project), `security/workspace_access.py` | Keep `SOUL.md`/`USER.md`/memory/skills in the agent's home while tools and `AGENTS.md` use a chosen project folder; would add a `--project` CLI option |

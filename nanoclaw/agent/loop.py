@@ -4,17 +4,24 @@ Mirrors nanobot/agent/loop.py (``AgentLoop.process_direct`` and the turn stages
 ``_build_turn``, ``_run_turn``, ``_persist_turn`` and ``_save_turn``). nanobot's
 loop also serves a message bus with many chat channels, queues, cancellation
 and crash recovery; here only the direct path is kept: text in, reply out.
+
+Since layer 6 a turn also compacts the conversation when it no longer fits the
+model's context window, and the loop runs nanobot's ``/compact``, ``/new``
+(with archiving) and ``/dream`` commands.
 """
 
 from __future__ import annotations
 
 import asyncio
 import dataclasses
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from nanoclaw.agent.context import ContextBuilder
+from nanoclaw.agent.context_governance import merge_adjacent_user_messages_for_model
+from nanoclaw.agent.memory import Consolidator, MemoryStore
 from nanoclaw.agent.messages import EMPTY_FINAL_RESPONSE_MESSAGE, is_blank
 from nanoclaw.agent.runner import AgentRunner, AgentRunResult, AgentRunSpec
 from nanoclaw.agent.tools import ToolRegistry, build_default_tools
@@ -28,6 +35,35 @@ from nanoclaw.runtime_context import (
 )
 from nanoclaw.session import Session, SessionManager
 from nanoclaw.session.recovery import PENDING_USER_TURN_KEY, restore_pending_interruption
+from nanoclaw.session.summary import SessionSummary, session_summary_from_metadata
+from nanoclaw.utils.llm_runtime import LLMRuntime
+from nanoclaw.utils.tokens import estimate_prompt_tokens
+
+DREAM_NO_INPUT_MESSAGE = "\n".join([
+    "Dream has no conversation history to process yet.",
+    "",
+    "Dream reads new entries from `memory/history.jsonl` after the current Dream cursor.",
+    "Conversations only reach that file when they are compacted (`nanoclaw compact`, or",
+    "automatically when they grow too long) or cleared with `nanoclaw ask --new`.",
+])
+# Headroom for token-estimate drift (nanobot providers/base.py).
+CONTEXT_SAFETY_BUFFER = 1024
+# nanobot's default is 200,000; NanoClaw's default model, gpt-4o-mini, has 128,000.
+DEFAULT_CONTEXT_WINDOW_TOKENS = 128_000
+
+
+class ContextWindowExceededError(RuntimeError):
+    """The request is still too big for the model after compacting."""
+
+    def __init__(self, *, session_key: str | None, estimated_tokens: int, input_budget: int, source: str) -> None:
+        self.session_key = session_key
+        self.estimated_tokens = estimated_tokens
+        self.input_budget = input_budget
+        self.source = source
+        super().__init__(
+            "Model input exceeds the local context budget "
+            f"for {session_key or 'default'}: {estimated_tokens}/{input_budget} via {source}"
+        )
 
 
 class AgentLoop:
@@ -45,6 +81,7 @@ class AgentLoop:
         max_tool_result_chars: int = 16_000,
         max_tokens: int = 4096,
         temperature: float = 0.7,
+        context_window_tokens: int = DEFAULT_CONTEXT_WINDOW_TOKENS,
     ) -> None:
         self.provider = provider
         self.workspace = workspace
@@ -53,67 +90,227 @@ class AgentLoop:
         self.max_tool_result_chars = max_tool_result_chars
         self.max_tokens = max_tokens
         self.temperature = temperature
+        self.context_window_tokens = context_window_tokens
         self.context = ContextBuilder(workspace)
+        self.memory: MemoryStore = self.context.memory
         self.tools = tools if tools is not None else build_default_tools(workspace)
         self.sessions = sessions if sessions is not None else SessionManager(workspace)
+        self.consolidator = Consolidator(
+            self.memory, self.sessions, self.context.build_messages, self.tools.get_definitions
+        )
         self.runner = AgentRunner()
         self._session_locks: dict[str, asyncio.Lock] = {}
+
+    @property
+    def runtime(self) -> LLMRuntime:
+        return LLMRuntime(
+            provider=self.provider,
+            model=self.model,
+            max_tokens=self.max_tokens,
+            temperature=self.temperature,
+            context_window_tokens=self.context_window_tokens,
+        )
 
     async def process_direct(
         self,
         content: str,
         session_key: str = "cli:direct",
         channel: str = "cli",
+        *,
+        ephemeral: bool = False,
+        tools: ToolRegistry | None = None,
     ) -> AgentRunResult:
         """Run one turn in the session and return the result.
 
-        Turns in the same session run one at a time.
+        Turns in the same session run one at a time. An ``ephemeral`` turn
+        starts from an empty session and saves nothing (used by Dream); ``tools``
+        replaces the default tool set for this turn.
         """
+        tools = tools if tools is not None else self.tools
         async with self._get_session_lock(session_key):
+            if ephemeral:
+                session = Session(key=session_key)
+            else:
+                session = self.sessions.get_or_create(session_key)
+                # A turn that died before it was saved gets an error reply first.
+                if restore_pending_interruption(session):
+                    self.sessions.save(session)
+
             # Build: history first, then save the user's message before running,
             # so it survives a crash or an error mid-turn.
-            session = self.sessions.get_or_create(session_key)
-            # A turn that died before it was saved gets an error reply first.
-            if restore_pending_interruption(session):
-                self.sessions.save(session)
+            summary = session_summary_from_metadata(session.metadata, fallback_last_active=session.updated_at)
             history = session.get_history()
             blocks = [current_time_block()]
-            persisted_early = self._persist_user_message_early(content, session, blocks)
+            boundary = len(session.messages)
+            persisted_early = not ephemeral and self._persist_user_message_early(content, session, blocks)
             messages = self.context.build_messages(
-                history, content, channel=channel, runtime_context_blocks=blocks
+                history, content, channel=channel, runtime_context_blocks=blocks, session_summary=summary
             )
+            checkpoint: str | None = None
+            if not ephemeral:
+                messages, checkpoint = await self._compact_if_needed(
+                    session, messages, history, summary, content, channel, blocks, tools
+                )
 
             # Run.
             result = await self.runner.run(
                 AgentRunSpec(
                     initial_messages=messages,
-                    tools=self.tools,
+                    tools=tools,
                     provider=self.provider,
                     model=self.model,
                     max_iterations=self.max_iterations,
                     max_tool_result_chars=self.max_tool_result_chars,
-                    workspace=self.workspace,
+                    # Temporary turns never write spill files.
+                    workspace=None if ephemeral else self.workspace,
                     max_tokens=self.max_tokens,
                     temperature=self.temperature,
                 )
             )
 
-            # Persist: everything the runner added after the user's message.
-            skip = len(messages) if persisted_early else len(messages) - 1
-            self._save_turn(session, result.messages, skip)
-            session.metadata.pop(PENDING_USER_TURN_KEY, None)
-            self.sessions.save(session)
+            # Persist: the summary boundary (if compacted), then everything the
+            # runner added after the user's message.
+            if not ephemeral:
+                if checkpoint is not None:
+                    session.commit_summary_checkpoint(checkpoint, insert_at=boundary)
+                skip = len(messages) if persisted_early else len(messages) - 1
+                self._save_turn(session, result.messages, skip)
+                session.metadata.pop(PENDING_USER_TURN_KEY, None)
+                self.sessions.save(session)
 
         if is_blank(result.final_content):
             result = dataclasses.replace(result, final_content=EMPTY_FINAL_RESPONSE_MESSAGE)
         return result
 
-    def new_session(self, session_key: str = "cli:direct") -> None:
-        """Start the conversation over (nanobot's ``/new`` command)."""
+    def _input_budget(self) -> int:
+        """Tokens the request may use: window minus the reply and a safety margin."""
+        if not self.context_window_tokens:
+            return 0
+        budget = self.context_window_tokens - self.max_tokens - CONTEXT_SAFETY_BUFFER
+        return budget if budget > 0 else 0
+
+    async def _compact_if_needed(
+        self,
+        session: Session,
+        messages: list[dict[str, Any]],
+        history: list[dict[str, Any]],
+        summary: SessionSummary | None,
+        content: str,
+        channel: str,
+        blocks: list[RuntimeContextBlock],
+        tools: ToolRegistry,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        """Summarize the history if the request doesn't fit the context window.
+
+        Returns the request to send and the new summary (``None`` if nothing
+        was compacted). Mirrors nanobot's compaction before a model request
+        (``ContextGovernor.prepare_request``) at the first request of a turn:
+        the history (everything before the new message) is replaced by a
+        summary in the system prompt, and the new message is kept. nanobot
+        checks before every request of a turn; NanoClaw only before the first
+        (see docs/notes/06-memory.md).
+        """
+        if not self.context_window_tokens:
+            return messages, None
+        definitions = tools.get_definitions()
+        budget = self._input_budget()
+        measured, source = estimate_prompt_tokens(merge_adjacent_user_messages_for_model(messages), definitions)
+        if budget > 0 and measured < budget:
+            return messages, None
+
+        accepted = merge_adjacent_user_messages_for_model(messages[: 1 + len(history)])
+        new_summary = await self.consolidator.summarize_transcript(
+            accepted,
+            summary["text"] if summary else None,
+            runtime=self.runtime,
+            session_key=session.key,
+            tools=definitions,
+        )
+        if not new_summary:
+            raise ContextWindowExceededError(
+                session_key=session.key, estimated_tokens=measured, input_budget=budget, source=source
+            )
+        compacted = self.context.build_messages(
+            [],
+            content,
+            channel=channel,
+            runtime_context_blocks=blocks,
+            session_summary={"text": new_summary, "last_active": datetime.now().astimezone().isoformat()},
+        )
+        measured, source = estimate_prompt_tokens(merge_adjacent_user_messages_for_model(compacted), definitions)
+        if budget <= 0 or measured >= budget:
+            raise ContextWindowExceededError(
+                session_key=session.key, estimated_tokens=measured, input_budget=budget, source=source
+            )
+        return compacted, new_summary
+
+    async def new_session(self, session_key: str = "cli:direct") -> None:
+        """Start the conversation over (nanobot's ``/new`` command).
+
+        Messages not yet archived are first summarized into the history journal,
+        so Dream can still learn from them. nanobot does that in the background
+        and ignores failures; NanoClaw waits for it and ignores failures.
+        """
         session = self.sessions.get_or_create(session_key)
+        snapshot = list(session.messages)
+        if session.last_archived < len(snapshot):
+            archived = Session(
+                key=session.key,
+                messages=snapshot,
+                created_at=session.created_at,
+                updated_at=session.updated_at,
+                metadata=dict(session.metadata),
+                last_archived=session.last_archived,
+            )
+            try:
+                await self.consolidator.archive_session(archived, archive_end=len(snapshot), runtime=self.runtime)
+            except Exception:
+                pass
         session.clear()
         self.sessions.save(session)
         self.sessions.invalidate(session_key)
+
+    async def compact_session(self, session_key: str = "cli:direct") -> str | None:
+        """Summarize the whole conversation now (nanobot's ``/compact`` command).
+
+        Returns the summary, ``""`` if there was nothing new, ``None`` on failure.
+        """
+        async with self._get_session_lock(session_key):
+            return await self.consolidator.compact_idle_session(session_key, runtime=self.runtime)
+
+    async def run_dream(self) -> str:
+        """Let Dream fold new journal entries into the memory files (nanobot ``/dream``).
+
+        Runs one temporary turn with Dream's instructions and restricted file
+        tools. The Dream cursor only moves forward if the run completed, so an
+        interrupted run sees the same entries next time.
+        """
+        start = time.monotonic()
+        result = self.memory.build_dream_prompt()
+        if result is None:
+            return DREAM_NO_INPUT_MESSAGE
+        prompt, last_cursor = result
+        # nanobot reads the change from its git store; NanoClaw compares the files.
+        files = (self.memory.memory_file, self.memory.soul_file, self.memory.user_file)
+        before = [MemoryStore.read_file(f) for f in files]
+        try:
+            response = await self.process_direct(
+                prompt, session_key=MemoryStore.dream_session_key(), ephemeral=True, tools=self.memory.build_dream_tools()
+            )
+            elapsed = time.monotonic() - start
+            if response.stop_reason == "completed":
+                self.memory.set_last_dream_cursor(last_cursor)
+                if [MemoryStore.read_file(f) for f in files] != before:
+                    return f"Dream completed in {elapsed:.1f}s."
+                return f"Dream completed in {elapsed:.1f}s; no memory changes."
+            return (
+                f"Dream did not complete after {elapsed:.1f}s (stop_reason: {response.stop_reason}); "
+                "memory cursor was not advanced."
+            )
+        except Exception as exc:
+            return f"Dream failed after {time.monotonic() - start:.1f}s: {exc}"
+        finally:
+            self.memory.compact_history()
 
     def _get_session_lock(self, session_key: str) -> asyncio.Lock:
         return self._session_locks.setdefault(session_key, asyncio.Lock())

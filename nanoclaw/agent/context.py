@@ -1,9 +1,10 @@
 """Building the system prompt and the message list for a turn.
 
 Mirrors nanobot/agent/context.py (``ContextBuilder``). The system prompt is
-assembled from Markdown: rendered templates plus the user-editable files in the
-workspace (``AGENTS.md``, ``SOUL.md``, ``USER.md``). Memory (layer 6) and
-skills (layer 7) will add more sections.
+assembled from Markdown: rendered templates, the user-editable files in the
+workspace (``AGENTS.md``, ``SOUL.md``, ``USER.md``), long-term memory
+(``memory/MEMORY.md``) and the summary of compacted conversation. Skills
+(layer 7) will add more sections.
 """
 
 from __future__ import annotations
@@ -18,6 +19,8 @@ from nanoclaw.runtime_context import (
     RuntimeContextBlock,
     append_runtime_context,
 )
+from nanoclaw.agent.memory import MemoryStore
+from nanoclaw.session.summary import SessionSummary
 from nanoclaw.utils.templates import load_bundled_template, render_template
 
 SECTION_SEPARATOR = "\n\n---\n\n"
@@ -34,16 +37,33 @@ class ContextBuilder:
 
     def __init__(self, workspace: Path) -> None:
         self.workspace = workspace
+        self.memory = MemoryStore(workspace)
 
     # --- system prompt -------------------------------------------------------
 
-    def build_system_prompt(self, *, channel: str | None = None) -> str:
-        """Identity, then the workspace files, then the tool usage notes."""
+    def build_system_prompt(
+        self,
+        *,
+        channel: str | None = None,
+        session_summary: SessionSummary | None = None,
+        include_memory: bool = True,
+    ) -> str:
+        """Identity, workspace files, tool usage notes, memory, then the conversation summary."""
         parts = [self._get_identity(channel=channel)]
         bootstrap = self._load_bootstrap_files()
         if bootstrap:
             parts.append(bootstrap)
         parts.append(render_template("agent/tool_contract.md"))
+        if include_memory:
+            memory = self.memory.read_memory()
+            if memory and not self._is_template_content(memory, "memory/MEMORY.md"):
+                parts.append(f"# Memory\n\n## Long-term Memory\n{memory}")
+        if session_summary and session_summary["text"] != "(nothing)":
+            parts.append(
+                "[Archived Context Summary]\n\n"
+                f"Previous conversation summary (last active {session_summary['last_active']}):\n"
+                f"{session_summary['text']}"
+            )
         return SECTION_SEPARATOR.join(parts)
 
     def _get_identity(self, channel: str | None = None) -> str:
@@ -103,21 +123,25 @@ class ContextBuilder:
     def build_messages(
         self,
         history: list[dict[str, Any]],
-        current_message: str,
+        current_message: str | None,
         *,
         channel: str | None = None,
         runtime_context_blocks: Sequence[RuntimeContextBlock] | None = None,
+        session_summary: SessionSummary | None = None,
     ) -> list[dict[str, Any]]:
         """``[system, *history, current user message]``.
 
         If the history already ends with a user message (for example, the
         previous turn failed before the model answered), the new message is
-        merged into it so two user messages are never sent in a row.
+        merged into it so two user messages are never sent in a row. With
+        ``current_message=None`` (used when archiving) there is no new message.
         """
         messages: list[dict[str, Any]] = [
-            {"role": "system", "content": self.build_system_prompt(channel=channel)},
+            {"role": "system", "content": self.build_system_prompt(channel=channel, session_summary=session_summary)},
             *history,
         ]
+        if current_message is None:
+            return messages
         current = self.build_current_message(current_message, runtime_context_blocks=runtime_context_blocks)
         if messages[-1].get("role") == "user":
             merged = dict(messages[-1])

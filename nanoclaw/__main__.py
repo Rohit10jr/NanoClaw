@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import sys
 from pathlib import Path
 
 from nanoclaw import __version__
 from nanoclaw.agent.context import ContextBuilder
-from nanoclaw.agent.loop import AgentLoop
+from nanoclaw.agent.loop import DEFAULT_CONTEXT_WINDOW_TOKENS, AgentLoop, ContextWindowExceededError
 from nanoclaw.providers import LLMProvider, provider_from_env
 from nanoclaw.utils.templates import sync_workspace_templates
 
@@ -32,17 +33,57 @@ def _prepare_workspace(path: Path) -> Path:
     return workspace
 
 
+def _context_window() -> int:
+    """``NANOCLAW_CONTEXT_WINDOW`` (tokens), else the default."""
+    value = os.environ.get("NANOCLAW_CONTEXT_WINDOW", "").strip()
+    try:
+        return int(value) if value else DEFAULT_CONTEXT_WINDOW_TOKENS
+    except ValueError:
+        raise SystemExit(f"NANOCLAW_CONTEXT_WINDOW must be a whole number of tokens, got {value!r}")
+
+
+def _make_loop(provider: LLMProvider, workspace: Path) -> AgentLoop:
+    return AgentLoop(
+        provider,
+        workspace,
+        temperature=DEFAULT_TEMPERATURE,
+        max_tokens=DEFAULT_MAX_TOKENS,
+        context_window_tokens=_context_window(),
+    )
+
+
 async def _ask(provider: LLMProvider, prompt: str, workspace: Path, session_key: str, new: bool) -> int:
-    loop = AgentLoop(provider, workspace, temperature=DEFAULT_TEMPERATURE, max_tokens=DEFAULT_MAX_TOKENS)
+    loop = _make_loop(provider, workspace)
     if new:
-        loop.new_session(session_key)
-    result = await loop.process_direct(prompt, session_key=session_key, channel=CHANNEL)
+        await loop.new_session(session_key)
+    try:
+        result = await loop.process_direct(prompt, session_key=session_key, channel=CHANNEL)
+    except ContextWindowExceededError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
     if result.tools_used:
         print(f"[tools used: {', '.join(result.tools_used)}]", file=sys.stderr)
     if result.stop_reason == "error":
         print(result.final_content, file=sys.stderr)
         return 1
     print(result.final_content or "")
+    return 0
+
+
+async def _compact(provider: LLMProvider, workspace: Path, session_key: str) -> int:
+    summary = await _make_loop(provider, workspace).compact_session(session_key)
+    if summary == "":
+        print("Nothing to compact.")
+    elif summary is None:
+        print("Compaction failed.", file=sys.stderr)
+        return 1
+    else:
+        print(f"Conversation compacted. Summary:\n{summary}")
+    return 0
+
+
+async def _dream(provider: LLMProvider, workspace: Path) -> int:
+    print(await _make_loop(provider, workspace).run_dream())
     return 0
 
 
@@ -59,6 +100,13 @@ def main(argv: list[str] | None = None, provider: LLMProvider | None = None) -> 
     )
     ask.add_argument("--new", action="store_true", help="forget the conversation and start over")
     ask.add_argument("-w", "--workspace", type=Path, default=DEFAULT_WORKSPACE, help=workspace_help)
+    compact = commands.add_parser("compact", help="summarize the conversation so far into a short checkpoint")
+    compact.add_argument(
+        "-s", "--session", default=DEFAULT_SESSION, help=f"conversation to compact (default: {DEFAULT_SESSION})"
+    )
+    compact.add_argument("-w", "--workspace", type=Path, default=DEFAULT_WORKSPACE, help=workspace_help)
+    dream = commands.add_parser("dream", help="update long-term memory (memory/MEMORY.md, USER.md, SOUL.md) from the history journal")
+    dream.add_argument("-w", "--workspace", type=Path, default=DEFAULT_WORKSPACE, help=workspace_help)
     show = commands.add_parser("prompt", help="print the system prompt the model receives (no API key needed)")
     show.add_argument("-w", "--workspace", type=Path, default=DEFAULT_WORKSPACE, help=workspace_help)
 
@@ -68,6 +116,12 @@ def main(argv: list[str] | None = None, provider: LLMProvider | None = None) -> 
         return asyncio.run(
             _ask(provider or provider_from_env(), args.prompt, workspace, args.session, args.new)
         )
+    if args.command == "compact":
+        workspace = _prepare_workspace(args.workspace)
+        return asyncio.run(_compact(provider or provider_from_env(), workspace, args.session))
+    if args.command == "dream":
+        workspace = _prepare_workspace(args.workspace)
+        return asyncio.run(_dream(provider or provider_from_env(), workspace))
     if args.command == "prompt":
         workspace = _prepare_workspace(args.workspace)
         print(ContextBuilder(workspace).build_system_prompt(channel=CHANNEL))

@@ -166,7 +166,7 @@ A session grows without limit: `get_history()` replays everything since
 `last_archived`, which nanobot also does at this commit. In nanobot, memory and
 compaction (summarizing old turns, then moving `last_archived` forward) keep
 the request small; that is layer 6. Until then, use `--new` when a
-conversation gets long.
+conversation gets long. *(Done in layer 6: see `06-memory.md`.)*
 
 ## Differences from nanobot (deliberate)
 
@@ -174,7 +174,7 @@ conversation gets long.
 |---|---|---|---|---|
 | 1 | Loading a damaged file | Strict read first; on error, a `repair` pass skips bad lines and logs a warning | Always skips bad lines, without logging | Same result, simpler; there is no logging yet |
 | 2 | Return value of `process_direct` | An `OutboundMessage` for the bus | The runner's `AgentRunResult` | No message bus yet; the CLI needs `tools_used` and `stop_reason` |
-| 3 | `/new` | Also archives the old messages into memory in the background | Only clears | Memory arrives in layer 6 |
+| 3 | `/new` | Also archives the old messages into memory in the background | Only clears | Memory arrives in layer 6 *(done in layer 6: `--new` now archives first, waiting for it)* |
 | 4 | Iteration limit | 200 | 20 | Chosen in layer 2 (cost and runaway protection); `AgentLoop(max_iterations=...)` changes it |
 
 ## What we left out
@@ -186,9 +186,9 @@ conversation gets long.
 | The rest of context governance | `agent/context_governance.py` | Token budgets, dropping placeholder messages, backfilling missing tool results (phase 2). The adjacent-user merge *is* ported |
 | Cross-process file locks | `FileLock` in `JsonlSessionStore` | Several nanobot processes on one session folder |
 | Workspace-ID recovery and migration | `_find_workspace_namespace`, `_claim_workspace_namespace`, legacy `~/.nanobot/sessions` | Old installs; copied workspaces |
-| Summary checkpoints, history limits | `commit_summary_checkpoint`, `get_history(max_messages, max_tokens)` | Compaction (**layer 6**) |
+| Summary checkpoints, history limits | `commit_summary_checkpoint`, `get_history(max_messages, max_tokens)` | Compaction (**layer 6**: `commit_summary_checkpoint` and `max_tokens` ported; `max_messages` is unused by nanobot's turns) |
 | Provider conversation state | `provider_state` | Provider-side conversation IDs |
-| Image and CLI-app breadcrumbs, replay-text cleanup | `get_history` | Features we don't have (images, CLI apps, `message` tool) |
+| Image and CLI-app breadcrumbs | `get_history` | Features we don't have (images, CLI apps). *The replay-text cleanup that was also listed here (trimming whitespace from assistant replies, removing copied internal markers) turned out to affect every reply; it was ported in layer 6.* |
 | `latency_ms`, `_last_usage` | `_save_turn`, `_persist_turn` | UI statistics |
 | Session listing, deleting, metadata-only updates | `list_sessions`, `delete_session`, `update_metadata` | Web UI and chat commands |
 | Session policy (transient sessions) | `SessionPolicy`, `get_or_create_transient` | Sessions that are never saved |
@@ -208,7 +208,7 @@ conversation gets long.
 | `nanoclaw/agent/runner.py` | Merges adjacent user messages before each request |
 | `nanoclaw/providers/fake.py` | Also records `max_tokens` and `temperature` |
 
-About 580 lines of code, versus about 4,400 in nanobot's `session/manager.py`
+About 580 lines of code at the end of layer 5, versus about 4,400 in nanobot's `session/manager.py`
 and `agent/loop.py` (most of which serve features we left out).
 
 ## Tests

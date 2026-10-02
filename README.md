@@ -20,7 +20,7 @@ codebases can be read side by side, and leaves the production features
 | 3 | Tools (files, shell, web) | done |
 | 4 | Context / system prompt | done |
 | 5 | Sessions + agent loop | done |
-| 6 | Memory + compaction | planned |
+| 6 | Memory + compaction | done |
 | 7 | Skills | planned |
 | 8 | Subagents | planned |
 | 9 | Safety (workspace limits, shell guards) | planned |
@@ -61,6 +61,18 @@ uv run nanoclaw prompt        # show the system prompt (no key needed)
 Conversations are saved in `~/.nanoclaw/sessions/`, outside the workspace, so
 the agent's file tools can't edit them. Use `--session NAME` to keep several
 separate conversations (default `cli:direct`).
+
+Memory, as in nanobot:
+
+```bash
+uv run nanoclaw compact     # summarize the conversation so far (also automatic when it gets too long)
+uv run nanoclaw dream       # fold the summaries into long-term memory (memory/MEMORY.md, USER.md, SOUL.md)
+export NANOCLAW_CONTEXT_WINDOW=128000   # your model's context window in tokens (default 128000)
+```
+
+Summaries are kept in a journal, `memory/history.jsonl` in the workspace;
+`nanoclaw dream` reads the new entries and updates the memory files, which the
+agent sees in every system prompt.
 
 The agent's personality and instructions live in editable Markdown files in
 the workspace (`~/.nanoclaw/workspace` by default, change with `-w`):

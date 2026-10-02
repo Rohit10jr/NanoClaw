@@ -182,12 +182,15 @@ async def test_sessions_are_separate(ws, tmp_path):
     assert visible(fake.calls[1].messages) == [("user", "in home")]
 
 
-async def test_new_session_forgets(ws, tmp_path):
-    loop, fake = make_loop(ws, tmp_path, "a", "b")
+async def test_new_session_forgets_after_archiving_to_the_journal(ws, tmp_path):
+    loop, fake = make_loop(ws, tmp_path, "a", "- [ephemeral] user said old", "b")
     await loop.process_direct("old")
-    loop.new_session()
+    await loop.new_session()
+    # The old conversation was summarized into the history journal first.
+    assert fake.calls[1].messages[-1]["content"].startswith("Create a compact replacement checkpoint")
+    assert [e["content"] for e in loop.memory.read_unprocessed_history(0)] == ["- [ephemeral] user said old"]
     await loop.process_direct("fresh")
-    assert visible(fake.calls[1].messages) == [("user", "fresh")]
+    assert visible(fake.calls[2].messages) == [("user", "fresh")]
     assert len(loop.sessions.get_or_create("cli:direct").messages) == 2
 
 
@@ -212,12 +215,12 @@ async def test_turns_in_one_session_run_one_at_a_time(ws, tmp_path):
 
 
 def test_cli_ask_continues_the_conversation(capsys, ws):
-    fake = FakeProvider(["hello Rohit", "you are Rohit", "who?"])
+    fake = FakeProvider(["hello Rohit", "you are Rohit", "- [permanent] user is Rohit", "who?"])
     assert main(["ask", "I am Rohit", "-w", str(ws)], provider=fake) == 0
     assert main(["ask", "who am I?", "-w", str(ws)], provider=fake) == 0
     assert ("user", "I am Rohit") in visible(fake.calls[1].messages)
     assert main(["ask", "who am I?", "--new", "-w", str(ws)], provider=fake) == 0
-    assert visible(fake.calls[2].messages) == [("user", "who am I?")]
+    assert visible(fake.calls[3].messages) == [("user", "who am I?")]  # call 2 archived the old chat
     assert "who?" in capsys.readouterr().out
 
 

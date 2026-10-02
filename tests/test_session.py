@@ -268,3 +268,12 @@ def test_symlinked_workspace_id_is_refused(ws, root, tmp_path):
 def test_sessions_root_is_private(ws, root):
     SessionManager(ws, sessions_root=root)
     assert (root.stat().st_mode & 0o777) == 0o700
+
+
+def test_assistant_replies_are_trimmed_and_cleaned_before_replay():
+    s = Session("k", messages=[
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "content": "[Message Time: 2026-10-01 10:00]\n  answer  \n[image: /tmp/a.png]\nmessage(text='hi')\n"},
+        {"role": "user", "content": "  user text keeps its spaces  "},
+    ])
+    assert [m["content"] for m in s.get_history()] == ["q", "answer", "  user text keeps its spaces  "]

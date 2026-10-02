@@ -22,6 +22,7 @@ the original project NanoClaw is based on.
 | 1 | `list_dir(recursive=true)` reports an empty directory when the workspace is inside a folder named `build`, `dist`, `venv`, ... | Confirmed | Medium | Fixed (layer 3) |
 | 2 | The configured timezone has no effect: no current date/time reaches the model, although the docs say it does | Confirmed | Medium | Added a current-time block (layer 4) |
 | 3 | A saved oversized tool result can point the model to stale content when a tool-call ID repeats in a session | Mechanism confirmed; real-world trigger not yet confirmed | Low–medium | Fixed with the suggested fix (content-hash file names) |
+| 4 | Compaction usually falls back to a raw dump: the model is only asked for a summary when the request overflows by less than ~600 tokens | Confirmed | Medium | Same as nanobot (kept faithful; fix not applied yet) |
 
 ---
 
@@ -207,6 +208,117 @@ file doesn't exist. Regression tests in `tests/test_tool_results.py`:
 their own content) and `test_identical_output_reuses_one_file`. Removing the
 hash from the name makes three tests fail. This doubles as a tested version of
 the upstream fix for the PR.
+
+---
+
+## 4. Compaction usually falls back to a raw dump
+
+**Where:** `nanobot/agent/memory.py`, `MemoryArchiver.archive` (input check
+around line 896), reached from `Consolidator.summarize_transcript` (line 1118)
+when `ContextGovernor.prepare_request` finds a request over budget
+(`agent/context_governance.py`, `request_pressure` line 414).
+
+**Problem:** compaction starts when a request reaches the input budget
+(`window − max_tokens − 1024`). The summary request then contains the same
+system prompt, history and tool definitions, plus the archive prompt
+(~400 tokens with tiktoken, ~1,650 by the byte fallback), and its budget is
+only `window − max_tokens`, i.e. 1,024 tokens more. So the model is asked for a
+summary only if the request overflowed by less than roughly
+`1024 − archive prompt + new message` tokens, about 600 in practice. Any larger
+overflow (for example one long message, or a big tool result) takes the
+"degraded" path: a raw transcript dump.
+
+The raw dump keeps the **start** of the archived conversation: it is cut to
+16,000 characters, then to a token limit, from the front. So after a large
+overflow the summary in the system prompt holds the oldest part of the
+conversation, and the most recent context before the new message is lost.
+
+**Reproduction** (two long turns, then a third request that overflows by a
+chosen amount; nanobot's own default tool set):
+
+```python
+import asyncio, copy, json, tempfile
+from pathlib import Path
+from nanobot.bus.queue import MessageBus
+from nanobot.agent.loop import AgentLoop
+from nanobot.agent.tools.registry import ToolRegistry
+from nanobot.providers.base import LLMProvider, LLMResponse, GenerationSettings
+from nanobot.utils.helpers import estimate_prompt_tokens_chain
+from nanobot.utils import token_encoding
+
+BIG = "x" * 40000
+calls = []
+class P(LLMProvider):
+    def __init__(self, replies):
+        super().__init__(provider_name="p"); self.r = replies
+        self.generation = GenerationSettings(max_tokens=100)
+    def get_default_model(self): return "m"
+    async def chat(self, messages, **kw):
+        calls.append(messages); return LLMResponse(content=self.r.pop(0), finish_reason="stop")
+    async def chat_stream(self, messages, **kw): return await self.chat(messages)
+
+async def run(overflow):
+    ws = Path(tempfile.mkdtemp())
+    loop = AgentLoop(bus=MessageBus(), provider=P([BIG, BIG]), workspace=ws, model="m",
+                     tool_registry=ToolRegistry(), context_window_tokens=10_000_000)
+    await loop.process_direct("first " + BIG, session_key="cli:direct")
+    await loop.process_direct("second " + BIG, session_key="cli:direct")
+    s = loop.sessions.get_or_create("cli:direct")
+    msgs = loop.context.build_messages(history=s.get_history(), current_message="third", channel="cli")
+    full, _ = estimate_prompt_tokens_chain(loop.provider, "m", msgs, loop.tools.get_definitions())
+    loop2 = AgentLoop(bus=MessageBus(), provider=P(["- SUMMARY", "answer"]), workspace=ws, model="m",
+                      tool_registry=ToolRegistry(), context_window_tokens=full - overflow + 100 + 1024)
+    calls.clear()
+    await loop2.process_direct("third", session_key="cli:direct")
+    journal = [json.loads(l)["content"][:16] for l in (ws / "memory/history.jsonl").read_text().splitlines()]
+    print(f"overflow {overflow}: model calls {len(calls)}, journal {sorted(set(journal))}")
+
+async def main():
+    token_encoding.warmup_token_encoding(); token_encoding._warmup_thread.join()
+    for overflow in (1, 300, 600, 900, 2000):
+        await run(overflow)
+asyncio.run(main())
+```
+
+Observed on `d3d70f2`:
+
+```
+overflow 1: model calls 2, journal ['- SUMMARY']
+overflow 300: model calls 2, journal ['- SUMMARY']
+overflow 600: model calls 2, journal ['- SUMMARY']
+overflow 900: model calls 1, journal ['[RAW] 4 messages']
+overflow 2000: model calls 1, journal ['[RAW] 4 messages']
+```
+
+From 900 tokens of overflow on, the model is never asked to summarize (one call:
+the turn itself), and the journal gets a raw dump. Logged as
+"Memory archive input does not fit ... using raw checkpoint" and "Memory
+consolidation degraded".
+
+**Impact:** the "smart" summary (facts marked `[permanent]`, `[durable]`, ...)
+that Dream and later turns rely on is skipped whenever a conversation crosses
+the budget by more than a few hundred tokens, which a single long message or
+tool result easily does. The conversation then continues with a truncated raw
+transcript of its oldest part.
+
+**Suggested fixes** (any one):
+
+1. **Compact earlier**: start compaction at a threshold below the budget (for
+   example 80–90 % of it), so the summary request still fits.
+2. **Summarize what fits**: when the archive request is too big, summarize the
+   most recent part that fits and raw-archive only the older remainder, or
+   summarize in chunks.
+3. **Keep the end, not the start, of the raw dump**, so at least the most recent
+   context survives.
+
+Regression test: a session whose next request overflows by a few thousand
+tokens should produce a model-written summary (a call with the archive prompt).
+
+**NanoClaw:** behaves exactly like nanobot (checked by running both with
+overflows of 1, 300 and 3,000 tokens; see `docs/notes/06-memory.md`, "The raw
+fallback"). The fix is not applied; deciding on one is open. The test
+`test_large_overflow_gets_a_raw_checkpoint_like_nanobot` in
+`tests/test_compaction.py` documents the current behaviour.
 
 ---
 

@@ -54,7 +54,8 @@ Sections are joined with `\n\n---\n\n`, in nanobot's order
 
 On first run (`ask` or `prompt`), `SOUL.md`, `USER.md` and `AGENTS.md` are
 copied into the workspace (`~/.nanoclaw/workspace` by default). They are
-**never overwritten** afterwards (nanobot `sync_workspace_templates`).
+**never overwritten** afterwards (nanobot `sync_workspace_templates`). Since
+layer 6, `memory/MEMORY.md` and an empty `memory/history.jsonl` are created too.
 
 **An unfilled form is left out.** While `USER.md` or `AGENTS.md` is still
 identical to the starting template (ignoring surrounding whitespace), it is not
@@ -68,7 +69,7 @@ The prompt pieces under `nanoclaw/templates/agent/` are Jinja2 templates, as in
 nanobot, with the same settings (`autoescape=False`, `trim_blocks`,
 `lstrip_blocks`). This keeps them diffable against nanobot's: the only
 differences are the name (nanobot → NanoClaw), "Dream" (nanobot's memory job,
-layer 6) written generically, and removed lines about features we don't have
+layer 6) written generically until layer 6 restored it, and removed lines about features we don't have
 (images, cron, heartbeat, `apply_patch`).
 
 ## Why per-turn data goes in the user message
@@ -89,15 +90,15 @@ do change (here, the time) are attached to the **user's message** inside
 |---|---|---|---|---|
 | 1 | **Current date and time** | Not given to the model at all at this commit; no default runtime-context provider adds it | A `Current Time` runtime-context block on every user message (`runtime_context.current_time_block`) | Without it the model can't know what "today", "this week" or "latest" means. Uses nanobot's own block mechanism, so the system prompt stays cacheable. Chosen with the user |
 | 2 | **Separate project folder** | Optional (mainly in the web UI): personal files (`SOUL.md`, `USER.md`, memory, skills) stay in the agent's home; `AGENTS.md`, file tools and shell use a chosen project folder; a "Current Project" section is added | One folder for everything (nanobot's default when no project is chosen) | Not needed yet; recorded in the roadmap to add together with a `--project` option |
-| 3 | `identity.md` wording | "Only Dream memory-consolidation tasks may edit ..." | "Only memory-consolidation tasks may edit ..." | Dream is nanobot's name for its memory job, which arrives in layer 6 |
+| 3 | `identity.md` wording | "Only Dream memory-consolidation tasks may edit ..." | "Only memory-consolidation tasks may edit ..." | Dream is nanobot's name for its memory job, which arrives in layer 6. *(Resolved in layer 6: nanobot's wording restored.)* |
 
 ## What we left out
 
 | nanobot feature | Where | Why it exists |
 |---|---|---|
-| Memory section | `build_system_prompt`, `MemoryStore` | Long-term facts (**layer 6**) |
+| Memory section | `build_system_prompt`, `MemoryStore` | Long-term facts (**layer 6**, done) |
 | Active skills + skills list | `SkillsLoader` | On-demand procedures (**layer 7**) |
-| Archived conversation summary | `session_summary` | Context after compaction (**layer 6**) |
+| Archived conversation summary | `session_summary` | Context after compaction (**layer 6**, done) |
 | Skills named in the message | `build_explicit_skill_runtime_context` | Auto-load a skill the user mentions (**layer 7**) |
 | Images in the user message | `build_user_content` | Vision models |
 | Legacy `SOUL.md` upgrade | `_load_bootstrap_files` | Migrating old installs |

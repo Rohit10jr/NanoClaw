@@ -25,6 +25,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from nanoclaw.session.summary import HIDDEN_HISTORY_META, SUMMARY_CONTINUATION_TEXT, is_summary_checkpoint
+from nanoclaw.utils.tokens import estimate_message_tokens
+
 # nanobot keeps sessions under its config directory (~/.nanobot/sessions).
 DEFAULT_SESSIONS_ROOT = Path("~/.nanoclaw/sessions")
 SESSION_CACHE_MAX_SIZE = 128
@@ -32,8 +35,29 @@ WORKSPACE_STATE_DIR = ".nanoclaw"
 WORKSPACE_ID_FILE = "workspace-id"
 
 _WORKSPACE_ID_RE = re.compile(r"[0-9a-f]{32}")
+# Internal markers a model may have copied into its own replies (nanobot).
+_MESSAGE_TIME_PREFIX_RE = re.compile(r"^\[Message Time: [^\]]+\]\n?")
+_LOCAL_IMAGE_BREADCRUMB_RE = re.compile(r"^\[image: (?:/|~)[^\]]+\]\s*$")
+_TOOL_CALL_ECHO_RE = re.compile(r"^\s*(?:generate_image|message)\([^)]*\)\s*$")
 # Keys replayed to the model besides role and content.
 _REPLAY_KEYS = ("tool_calls", "tool_call_id", "name", "reasoning_content", "thinking_blocks")
+
+
+def _sanitize_assistant_replay_text(content: str) -> str:
+    """Trim an assistant reply before replaying it.
+
+    Removes internal markers the model may have copied (a message-time prefix,
+    local image paths, echoed tool calls), which would otherwise become
+    examples for it to repeat, and surrounding whitespace.
+    (nanobot session/manager.py ``_sanitize_assistant_replay_text``)
+    """
+    content = _MESSAGE_TIME_PREFIX_RE.sub("", content, count=1)
+    lines = [
+        line
+        for line in content.splitlines()
+        if not _LOCAL_IMAGE_BREADCRUMB_RE.match(line) and not _TOOL_CALL_ECHO_RE.match(line)
+    ]
+    return "\n".join(lines).strip()
 
 
 def find_legal_message_start(messages: list[dict[str, Any]]) -> int:
@@ -67,8 +91,8 @@ class Session:
     created_at: datetime = field(default_factory=datetime.now)
     updated_at: datetime = field(default_factory=datetime.now)
     metadata: dict[str, Any] = field(default_factory=dict)
-    # Messages before this index were summarized into memory and are no longer
-    # replayed. Always 0 until memory arrives in layer 6.
+    # Messages before this index were summarized (compacted) and are no longer
+    # replayed; the summary goes into the system prompt instead.
     last_archived: int = 0
 
     def __post_init__(self) -> None:
@@ -86,12 +110,36 @@ class Session:
         )
         self.updated_at = datetime.now()
 
-    def get_history(self) -> list[dict[str, Any]]:
+    def commit_summary_checkpoint(
+        self, summary: str, *, insert_at: int | None = None, last_active: datetime | None = None
+    ) -> None:
+        """Replace everything before ``insert_at`` with ``summary`` in future replays.
+
+        The messages stay in the file; a hidden marker records where the summary
+        ends, ``last_archived`` moves to it, and the summary text is stored in
+        the metadata for the system prompt.
+        """
+        boundary = len(self.messages) if insert_at is None else insert_at
+        self.messages.insert(boundary, {
+            "role": "user",
+            "content": SUMMARY_CONTINUATION_TEXT,
+            HIDDEN_HISTORY_META: True,
+            "timestamp": datetime.now().isoformat(),
+        })
+        self.metadata["_last_summary"] = {
+            "text": summary,
+            "last_active": (last_active or self.updated_at).isoformat(),
+        }
+        self.last_archived = boundary
+
+    def get_history(self, *, max_tokens: int = 0) -> list[dict[str, Any]]:
         """The messages to replay to the model, in OpenAI chat format.
 
-        Starts at the first user message (never mid-turn), drops tool results
-        whose call is missing, skips empty assistant messages, and keeps only
-        the keys the model needs (no timestamps or internal markers).
+        Starts after the last summary and at the first user message (never
+        mid-turn), drops tool results whose call is missing, skips empty
+        assistant messages and the summary marker, and keeps only the keys the
+        model needs. A positive ``max_tokens`` keeps only the most recent
+        messages that fit.
         """
         sliced = self.messages[self.last_archived:]
         for i, message in enumerate(sliced):
@@ -102,8 +150,12 @@ class Session:
 
         out: list[dict[str, Any]] = []
         for message in sliced:
+            if message.get("_command") or is_summary_checkpoint(message):
+                continue
             role = message.get("role")
             content = message.get("content", "")
+            if role == "assistant" and isinstance(content, str):
+                content = _sanitize_assistant_replay_text(content)
             if role == "assistant" and isinstance(content, str) and not content.strip():
                 if not any(key in message for key in ("tool_calls", "reasoning_content", "thinking_blocks")):
                     continue
@@ -112,6 +164,26 @@ class Session:
                 if key in message:
                     entry[key] = message[key]
             out.append(entry)
+
+        if max_tokens > 0 and out:
+            kept: list[dict[str, Any]] = []
+            used = 0
+            for message in reversed(out):
+                tokens = estimate_message_tokens(message)
+                if kept and used + tokens > max_tokens:
+                    break
+                kept.append(message)
+                used += tokens
+            kept.reverse()
+            # Start at a user message; if none fits, recover the nearest one.
+            first_user = next((i for i, m in enumerate(kept) if m.get("role") == "user"), None)
+            if first_user is not None:
+                kept = kept[first_user:]
+            else:
+                recovered = next((i for i in range(len(out) - 1, -1, -1) if out[i].get("role") == "user"), None)
+                if recovered is not None:
+                    kept = out[recovered:]
+            out = kept[find_legal_message_start(kept):]
         return out
 
     def clear(self) -> None:
@@ -119,6 +191,7 @@ class Session:
         self.messages = []
         self.last_archived = 0
         self.updated_at = datetime.now()
+        self.metadata.pop("_last_summary", None)
 
 
 class SessionManager:

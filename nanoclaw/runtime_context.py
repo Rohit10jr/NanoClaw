@@ -108,6 +108,31 @@ def reattach_runtime_context(
     return [*visible, *context_blocks], {"version": 1, "sources": list(sources), "blocks": context_blocks}
 
 
+def public_history_message(message: dict[str, Any]) -> dict[str, Any]:
+    """A copy of a saved message with its runtime context removed exactly.
+
+    Used where history is shown or summarized as what the user wrote, e.g.
+    the raw fallback of memory archiving. (nanobot ``public_history_message``)
+    """
+    cleaned = copy.deepcopy(dict(message))
+    marker = cleaned.pop(RUNTIME_CONTEXT_HISTORY_META, None)
+    if not isinstance(marker, dict) or marker.get("version") != 1:
+        return cleaned
+    content = cleaned.get("content")
+    suffix = marker.get("suffix")
+    if isinstance(content, str) and isinstance(suffix, str) and suffix:
+        if content == suffix:
+            cleaned["content"] = ""
+        elif content.endswith("\n\n" + suffix):
+            cleaned["content"] = content[: -(len(suffix) + 2)]
+        return cleaned
+    expected = marker.get("blocks")
+    if isinstance(content, list) and isinstance(expected, list) and expected:
+        if content[-len(expected):] == expected:
+            cleaned["content"] = content[: -len(expected)]
+    return cleaned
+
+
 def current_time_block(now: datetime | None = None) -> RuntimeContextBlock:
     """The current local date, time and timezone.
 
