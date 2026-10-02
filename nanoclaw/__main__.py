@@ -9,15 +9,15 @@ from pathlib import Path
 
 from nanoclaw import __version__
 from nanoclaw.agent.context import ContextBuilder
-from nanoclaw.agent.runner import AgentRunner, AgentRunSpec
-from nanoclaw.agent.tools import build_default_tools
+from nanoclaw.agent.loop import AgentLoop
 from nanoclaw.providers import LLMProvider, provider_from_env
-from nanoclaw.runtime_context import current_time_block
 from nanoclaw.utils.templates import sync_workspace_templates
 
 # nanobot's default is ~/.nanobot/workspace.
 DEFAULT_WORKSPACE = Path("~/.nanoclaw/workspace")
 CHANNEL = "cli"
+# nanobot's terminal chat uses the same key.
+DEFAULT_SESSION = "cli:direct"
 
 
 def _prepare_workspace(path: Path) -> Path:
@@ -28,18 +28,11 @@ def _prepare_workspace(path: Path) -> Path:
     return workspace
 
 
-async def _ask(provider: LLMProvider, prompt: str, workspace: Path) -> int:
-    messages = ContextBuilder(workspace).build_messages(
-        [], prompt, channel=CHANNEL, runtime_context_blocks=[current_time_block()]
-    )
-    result = await AgentRunner().run(
-        AgentRunSpec(
-            initial_messages=messages,
-            tools=build_default_tools(workspace),
-            provider=provider,
-            workspace=workspace,
-        )
-    )
+async def _ask(provider: LLMProvider, prompt: str, workspace: Path, session_key: str, new: bool) -> int:
+    loop = AgentLoop(provider, workspace)
+    if new:
+        loop.new_session(session_key)
+    result = await loop.process_direct(prompt, session_key=session_key, channel=CHANNEL)
     if result.tools_used:
         print(f"[tools used: {', '.join(result.tools_used)}]", file=sys.stderr)
     if result.stop_reason == "error":
@@ -55,8 +48,12 @@ def main(argv: list[str] | None = None, provider: LLMProvider | None = None) -> 
     commands = parser.add_subparsers(dest="command")
 
     workspace_help = "directory the agent works in (default: ~/.nanoclaw/workspace)"
-    ask = commands.add_parser("ask", help="run one agent turn with file, shell and web tools")
+    ask = commands.add_parser("ask", help="send a message; the conversation continues across calls")
     ask.add_argument("prompt")
+    ask.add_argument(
+        "-s", "--session", default=DEFAULT_SESSION, help=f"conversation to continue (default: {DEFAULT_SESSION})"
+    )
+    ask.add_argument("--new", action="store_true", help="forget the conversation and start over")
     ask.add_argument("-w", "--workspace", type=Path, default=DEFAULT_WORKSPACE, help=workspace_help)
     show = commands.add_parser("prompt", help="print the system prompt the model receives (no API key needed)")
     show.add_argument("-w", "--workspace", type=Path, default=DEFAULT_WORKSPACE, help=workspace_help)
@@ -64,7 +61,9 @@ def main(argv: list[str] | None = None, provider: LLMProvider | None = None) -> 
     args = parser.parse_args(argv)
     if args.command == "ask":
         workspace = _prepare_workspace(args.workspace)
-        return asyncio.run(_ask(provider or provider_from_env(), args.prompt, workspace))
+        return asyncio.run(
+            _ask(provider or provider_from_env(), args.prompt, workspace, args.session, args.new)
+        )
     if args.command == "prompt":
         workspace = _prepare_workspace(args.workspace)
         print(ContextBuilder(workspace).build_system_prompt(channel=CHANNEL))

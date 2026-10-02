@@ -158,13 +158,15 @@ def enforce_role_alternation(messages: list[dict[str, Any]]) -> list[dict[str, A
 
 
 def sanitize_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Replace empty string content, which most chat APIs reject.
+    """Drop internal ``_meta`` and replace empty string content, which most chat APIs reject.
 
     An assistant message that only carries tool calls gets ``None``; any other
     empty message gets a visible placeholder. Input messages are not mutated.
     """
     result: list[dict[str, Any]] = []
     for msg in messages:
+        if "_meta" in msg:  # internal bookkeeping, never sent
+            msg = {k: v for k, v in msg.items() if k != "_meta"}
         if msg.get("content") == "":
             msg = dict(msg)
             if msg.get("role") == "assistant" and msg.get("tool_calls"):

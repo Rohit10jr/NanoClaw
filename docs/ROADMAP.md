@@ -27,8 +27,8 @@ with a note in [`notes/`](notes/).
 | 2 | Runner | The agent loop: call model → run tools → repeat | `agent/runner.py`, `agent/tools/execution.py`, `agent/tools/base.py`, `agent/tools/registry.py` | `nanoclaw/agent/runner.py`, `nanoclaw/agent/tools/` | ✅ done |
 | 3 | Tools | Real capabilities: files, shell, web | `agent/tools/filesystem.py`, `shell.py`, `web.py`, `schema.py` | `nanoclaw/agent/tools/` | ✅ done |
 | 4 | Context | Building the system prompt | `agent/context.py`, `templates/` | `nanoclaw/agent/context.py`, `nanoclaw/templates/` | ✅ done |
-| 5 | Sessions + AgentLoop | Conversations saved and resumed; one turn = context → runner → save | `session/manager.py`, `agent/loop.py` (`process_direct`) | `nanoclaw/session/`, `nanoclaw/agent/loop.py` | ⏭ next |
-| 6 | Memory | Long-term memory; compacting old history | `agent/memory.py`, `agent/autocompact.py` | `nanoclaw/agent/memory.py` | planned |
+| 5 | Sessions + AgentLoop | Conversations saved and resumed; one turn = context → runner → save | `session/manager.py`, `agent/loop.py` (`process_direct`) | `nanoclaw/session/`, `nanoclaw/agent/loop.py` | ✅ done |
+| 6 | Memory | Long-term memory; compacting old history | `agent/memory.py`, `agent/autocompact.py` | `nanoclaw/agent/memory.py` | ⏭ next |
 | 7 | Skills | Markdown procedures loaded on demand | `agent/skills.py`, `skills/` | `nanoclaw/agent/skills.py`, `nanoclaw/skills/` | planned |
 | 8 | Subagents | Hand a task to a child agent | `agent/subagent.py`, `agent/tools/spawn.py` | `nanoclaw/agent/subagent.py` | planned |
 | 9 | Safety | Keep tools inside the workspace; guard shell commands | `security/workspace_access.py`, `security/workspace_policy.py`, `security/network.py`, `agent/tools/sandbox.py` | `nanoclaw/security/` | planned |
@@ -71,16 +71,20 @@ history and the new user message. `nanoclaw prompt` prints it.
 message (nanobot gives no date/time); one workspace folder for everything (the
 separate project folder is listed under phase 2). See `notes/04-context.md`.
 
-**5 — Sessions + AgentLoop.** `Session` / `SessionManager` stores each
-conversation as JSONL and replays recent messages. A small `AgentLoop` with
-`process_direct()` ties one turn together: load session → build context → run
-runner → save new messages.
-*Skipped:* the message bus, channels, per-session queues, cancellation, the
-workspace-ID scheme.
+**5 — Sessions + AgentLoop.** `Session` / `SessionManager` store each
+conversation as JSONL in `~/.nanoclaw/sessions/<workspace-id>/` (outside the
+workspace, as nanobot requires) and replay it on the next turn. `AgentLoop`
+with `process_direct()` ties one turn together: load session → save the user
+message → build context → run runner → save new messages. `nanoclaw ask` now
+continues the conversation; `--new` starts over, `--session` picks another.
+See `notes/05-sessions.md`.
+*Skipped:* the message bus, channels, per-session queues, cancellation, crash
+recovery, cross-process file locks, workspace-ID migration.
 
 **6 — Memory.** `MemoryStore` (`memory/MEMORY.md` + `history.jsonl`), a memory
 tool or prompt section, and compaction: when the session grows too large,
-summarize old turns.
+summarize old turns (this sets `Session.last_archived`, which layer 5 already
+honours). Until then a session grows without limit; `ask --new` resets it.
 *Skipped:* "Dream" scheduled consolidation, provider-native compaction.
 
 **7 — Skills.** `SkillsLoader` lists `skills/*/SKILL.md` (name + description

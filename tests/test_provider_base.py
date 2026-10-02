@@ -144,3 +144,9 @@ def test_role_alternation_prefers_assistant_with_tool_calls():
     with_tools = {"role": "assistant", "content": None, "tool_calls": [{"id": "a"}]}
     tool = {"role": "tool", "tool_call_id": "a", "content": "1"}
     assert enforce_role_alternation([{"role": "user", "content": "x"}, plain, with_tools, tool])[1] == with_tools
+
+
+def test_sanitize_messages_drops_internal_meta():
+    messages = [{"role": "user", "content": "hi", "_meta": {"runtime_context": {}}}]
+    assert sanitize_messages(messages) == [{"role": "user", "content": "hi"}]
+    assert "_meta" in messages[0]  # input untouched

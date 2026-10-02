@@ -19,7 +19,7 @@ codebases can be read side by side, and leaves the production features
 | 2 | Agent loop (runner) | done |
 | 3 | Tools (files, shell, web) | done |
 | 4 | Context / system prompt | done |
-| 5 | Sessions | planned |
+| 5 | Sessions + agent loop | done |
 | 6 | Memory + compaction | planned |
 | 7 | Skills | planned |
 | 8 | Subagents | planned |
@@ -52,9 +52,15 @@ Groq, Ollama, vLLM, ...):
 export NANOCLAW_API_KEY=sk-...
 export NANOCLAW_MODEL=gpt-4o-mini                  # default
 export NANOCLAW_API_BASE=https://openrouter.ai/api/v1   # omit for OpenAI
-uv run nanoclaw ask "hello"
+uv run nanoclaw ask "My name is Rohit"
+uv run nanoclaw ask "What's my name?"     # the conversation continues
+uv run nanoclaw ask --new "hello"         # forget it and start over
 uv run nanoclaw prompt        # show the system prompt (no key needed)
 ```
+
+Conversations are saved in `~/.nanoclaw/sessions/`, outside the workspace, so
+the agent's file tools can't edit them. Use `--session NAME` to keep several
+separate conversations (default `cli:direct`).
 
 The agent's personality and instructions live in editable Markdown files in
 the workspace (`~/.nanoclaw/workspace` by default, change with `-w`):

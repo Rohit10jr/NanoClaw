@@ -147,11 +147,18 @@ def test_wrap_runtime_context_lines():
 
 def test_append_runtime_context_to_text_and_parts():
     blocks = [RuntimeContextBlock("a", "A"), RuntimeContextBlock("b", "B")]
-    assert append_runtime_context("hi", blocks) == "hi\n\nA\n\nB"
-    assert append_runtime_context("", blocks) == "A\n\nB"
-    assert append_runtime_context("hi", []) == "hi"
+    assert append_runtime_context("hi", blocks) == (
+        "hi\n\nA\n\nB",
+        {"version": 1, "sources": ["a", "b"], "suffix": "A\n\nB"},
+    )
+    assert append_runtime_context("", blocks)[0] == "A\n\nB"
+    assert append_runtime_context("hi", []) == ("hi", None)
     parts = [{"type": "text", "text": "hi"}]
-    assert append_runtime_context(parts, blocks) == [*parts, {"type": "text", "text": "A"}, {"type": "text", "text": "B"}]
+    added = [{"type": "text", "text": "A"}, {"type": "text", "text": "B"}]
+    assert append_runtime_context(parts, blocks) == (
+        [*parts, *added],
+        {"version": 1, "sources": ["a", "b"], "blocks": added},
+    )
 
 
 @pytest.mark.parametrize(
@@ -182,6 +189,15 @@ def test_build_messages_shape(ws):
     msgs = ContextBuilder(ws).build_messages([], "hello", channel="cli", runtime_context_blocks=[block])
     assert [m["role"] for m in msgs] == ["system", "user"]
     assert msgs[1]["content"] == "hello\n\n[T]"
+    # Internal marker for the session; providers drop ``_meta`` before sending.
+    assert msgs[1]["_meta"] == {"runtime_context": {"version": 1, "sources": ["time"], "suffix": "[T]"}}
+
+
+def test_merged_message_keeps_the_runtime_context_marker(ws):
+    block = RuntimeContextBlock("time", "[T]")
+    msgs = ContextBuilder(ws).build_messages([{"role": "user", "content": "q1"}], "q2", runtime_context_blocks=[block])
+    assert msgs[-1]["content"] == "q1\n\nq2\n\n[T]"
+    assert msgs[-1]["_meta"]["runtime_context"]["suffix"] == "[T]"
 
 
 def test_history_is_kept_between_system_and_new_message(ws):

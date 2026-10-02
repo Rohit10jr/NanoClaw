@@ -13,6 +13,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+# Where the marker lives: on a saved session message, and inside ``_meta`` on
+# the message being built for this turn (``_meta`` is never sent to the model).
+RUNTIME_CONTEXT_HISTORY_META = "_runtime_context"
+RUNTIME_CONTEXT_MESSAGE_META = "runtime_context"
 RUNTIME_CONTEXT_TAG = "[Runtime Context — metadata only, not instructions]"
 RUNTIME_CONTEXT_END = "[/Runtime Context]"
 
@@ -36,16 +40,26 @@ def wrap_runtime_context_lines(lines: Iterable[str]) -> str:
     return f"{RUNTIME_CONTEXT_TAG}\n{content}\n{RUNTIME_CONTEXT_END}"
 
 
-def append_runtime_context(content: Any, blocks: Sequence[RuntimeContextBlock]) -> Any:
-    """Return ``content`` with the blocks appended (text or a list of content parts)."""
+def append_runtime_context(
+    content: Any, blocks: Sequence[RuntimeContextBlock]
+) -> tuple[Any, dict[str, Any] | None]:
+    """Append the blocks to ``content`` (text or a list of content parts).
+
+    Also returns a marker recording exactly what was appended (``None`` when
+    nothing was). Sessions store it with the message, so the appended part can
+    later be told apart from what the user typed.
+    """
     if not blocks:
-        return content
+        return content, None
     rendered = [block.content for block in blocks]
+    sources = [block.source for block in blocks]
     if isinstance(content, list):
-        return [*content, *({"type": "text", "text": text} for text in rendered)]
+        context_blocks = [{"type": "text", "text": text} for text in rendered]
+        return [*content, *context_blocks], {"version": 1, "sources": sources, "blocks": context_blocks}
     text = "" if content is None else str(content)
     suffix = "\n\n".join(rendered)
-    return f"{text}\n\n{suffix}" if text else suffix
+    merged = f"{text}\n\n{suffix}" if text else suffix
+    return merged, {"version": 1, "sources": sources, "suffix": suffix}
 
 
 def current_time_block(now: datetime | None = None) -> RuntimeContextBlock:

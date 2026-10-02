@@ -104,7 +104,7 @@ do change (here, the time) are attached to the **user's message** inside
 | Git-backed profile files | `sync_workspace_templates` → `GitStore` | History of `SOUL.md`/`USER.md`/`MEMORY.md` edits (nanobot creates `.git` and `.gitignore` in the workspace) |
 | `HEARTBEAT.md` | `templates/HEARTBEAT.md`, gateway heartbeat job | Periodic background task list |
 | `prompts/` overrides | `templates/prompts/README.md`, `utils/workspace_prompts.py` | Editable prompts for Dream (memory) and the heartbeat evaluator; not part of the system prompt |
-| Runtime-context detach/reattach | `runtime_context.py` | Hiding the blocks when showing history in UIs |
+| Runtime-context detach/reattach | `runtime_context.py` | Hiding the blocks when showing history in UIs. (Since layer 5 we do return and save nanobot's marker of what was appended, which these functions use.) |
 | Other runtime-context providers | tools, web UI | Session messages, goals, CLI apps, quotes |
 
 ## Files
@@ -121,11 +121,11 @@ About 260 lines of code plus the templates, versus about 640 in nanobot's
 
 ## Tests
 
-`tests/test_context.py` (28 tests):
+`tests/test_context.py` (29 tests):
 
 - **Templates:** file sync creates missing files and never overwrites; rendering leaves no Jinja syntax behind.
 - **System prompt:** sections in nanobot's order and separators; runtime, workspace and untrusted-content lines; channel hints (`cli`, `telegram`, `email`, none); Windows/macOS policy (simulated); unedited `USER.md`/`AGENTS.md` skipped, edited ones included; empty files skipped; prompt identical between calls.
-- **Runtime context:** tags, appending to text and to content parts, the time line in three timezones, local time by default.
+- **Runtime context:** tags, appending to text and to content parts (with the marker, added in layer 5), the time line in three timezones, local time by default.
 - **Messages:** `[system, *history, user]`; a trailing user message merged (text and list content); input history untouched.
 - **CLI:** `nanoclaw prompt` prints the prompt and creates the files; `nanoclaw ask` sends an edited `SOUL.md`, the terminal hint, and the time only in the user message.
 

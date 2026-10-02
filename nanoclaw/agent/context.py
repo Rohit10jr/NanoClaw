@@ -13,7 +13,11 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from nanoclaw.runtime_context import RuntimeContextBlock, append_runtime_context
+from nanoclaw.runtime_context import (
+    RUNTIME_CONTEXT_MESSAGE_META,
+    RuntimeContextBlock,
+    append_runtime_context,
+)
 from nanoclaw.utils.templates import load_bundled_template, render_template
 
 SECTION_SEPARATOR = "\n\n---\n\n"
@@ -89,8 +93,12 @@ class ContextBuilder:
         runtime_context_blocks: Sequence[RuntimeContextBlock] | None = None,
     ) -> dict[str, Any]:
         """The user's new message, with runtime context (e.g. the time) appended."""
-        content = append_runtime_context(current_message, list(runtime_context_blocks or ()))
-        return {"role": "user", "content": content}
+        content, marker = append_runtime_context(current_message, list(runtime_context_blocks or ()))
+        current: dict[str, Any] = {"role": "user", "content": content}
+        if marker is not None:
+            # Internal: the session saves it; providers drop ``_meta``.
+            current["_meta"] = {RUNTIME_CONTEXT_MESSAGE_META: marker}
+        return current
 
     def build_messages(
         self,
@@ -114,6 +122,8 @@ class ContextBuilder:
         if messages[-1].get("role") == "user":
             merged = dict(messages[-1])
             merged["content"] = self._merge_message_content(merged.get("content"), current["content"])
+            if isinstance(current.get("_meta"), dict):
+                merged["_meta"] = {**(merged.get("_meta") or {}), **current["_meta"]}
             return [*messages[:-1], merged]
         return [*messages, current]
 
