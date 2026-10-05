@@ -388,7 +388,7 @@ Note: [`notes/07-skills.md`](notes/07-skills.md)
 | [`MemoryStore.build_dream_tools()`](../nanoclaw/agent/memory.py#L244) | [`agent/memory.py:560`][nb-l6-dreamtools] | Same rules and error text (`WORKSPACE_BOUNDARY_NOTE`, [`security/workspace_policy.py:13`][nb-l7-note]); no `apply_patch` |
 | [`MemoryStore.default_dream_prompt()`](../nanoclaw/agent/memory.py#L279) | [`agent/memory.py:503`][nb-l7-dreamprompt] | Same (no `prompts/dream.md` override) |
 | `templates/agent/skills_section.md`, `templates/agent/dream.md` | same files | Same text |
-| `nanoclaw/skills/` (6 skills + README) | `nanobot/skills/` (11) | Same text with the name changed; 5 left out (difference #1) |
+| `nanoclaw/skills/` (6 skills + README) | `nanobot/skills/` (11) | Same text with the name changed, except two lines adapted to NanoClaw's tools (difference #4); 5 left out (difference #1) |
 | [`nanoclaw skills`](../nanoclaw/__main__.py#L85) | [`command/builtin.py:954`][nb-l7-cmdskill] `/skill` | Same output (checked) |
 | `sync_workspace_templates` creates `skills/` | [`utils/helpers.py:983`][nb-l7-syncskills] | Same |
 

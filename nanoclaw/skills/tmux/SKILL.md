@@ -6,7 +6,7 @@ metadata: {"nanobot":{"emoji":"🧵","os":["darwin","linux"],"requires":{"bins":
 
 # tmux Skill
 
-Use tmux only when you need an interactive TTY. Prefer exec background mode for long-running, non-interactive tasks.
+Use tmux only when you need an interactive TTY. Prefer plain exec for non-interactive tasks.
 
 ## Quickstart (isolated socket, exec tool)
 

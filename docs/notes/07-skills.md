@@ -114,6 +114,7 @@ uv run nanoclaw ask 'What is the $weather in Paris?'   # load a skill for this t
 | 1 | Built-in skills | 11 | 6 (see above) | The other 5 need features we don't have. Chosen with the user | Some with later layers / phase 2 |
 | 2 | Metadata key | Reads `nanobot`, else `openclaw` | Also reads `nanoclaw` first | Lets NanoClaw-specific skills say so; nanobot skills work unchanged | — |
 | 3 | Dream's tools | Also `apply_patch` | No `apply_patch` | Not ported in layer 3 | — |
+| 4 | Two lines in the bundled skills | `skill-creator` recommends nanobot's `grep` tool (`output_mode`, `head_limit`); `tmux` says "prefer exec background mode" | `skill-creator` suggests shell `grep -l` / `-c` / `-F` and `read_file` paging; `tmux` says "prefer plain exec" | NanoClaw has neither the `grep` tool nor background `exec` (layer 3); same approach as the templates in layer 4. Found in the second review | Phase 2 if those tools are added |
 
 Everything else matches nanobot exactly, including the order of skills (the
 order the folders are listed by the file system, unsorted, as in nanobot).
@@ -184,3 +185,16 @@ between two runs).
 
 No new nanobot bugs were found. (The built-in skills' `skills/` root looked
 like one until we found nanobot's `read_file` fallback, now ported.)
+
+### Second review (after the build)
+
+| Check | How | Result |
+|---|---|---|
+| Copied skill files | `diff -r` of each of the 6 skills against nanobot's | Only the intended renames (`nanobot` → `NanoClaw`, the tmux socket variable); script permissions kept |
+| Tools the skill texts mention | Searched the 6 `SKILL.md` files for tool names | Two lines named nanobot features NanoClaw lacks (`grep` tool, background `exec`); adapted and recorded as difference #4 |
+| Loader logic on random skill folders | 300 random trees (odd names, missing or broken headers, CRLF, `always` variants, metadata as mapping / JSON string / broken / wrong shapes, met and unmet requirements, workspace overrides, stray files), comparing the list, the unfiltered list, always-on skills, summary, full loading, 18 `$skill` messages, and the description and availability of every name | **0 differences** |
+| skill-creator scripts | Ran `init_skill.py`, `quick_validate.py` and `package_skill.py` | Work (the validator rightly rejects the template's unfilled `[TODO: ...]` description) |
+| A `$skill` turn, then `/compact` | Both projects, same built-in folder | Archive request, saved session and journal identical |
+| Dream with `$weather` in a journal entry | Both projects | Same request (the skill is loaded into Dream's turn in both) |
+
+Correction made: the two skill lines in difference #4. No code changes were needed.
