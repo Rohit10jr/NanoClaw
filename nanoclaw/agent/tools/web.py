@@ -43,19 +43,6 @@ def _normalize(text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
-def _validate_url(url: str) -> tuple[bool, str]:
-    """Scheme and domain check only (web_search's endpoint). Fetches use _validate_url_safe."""
-    try:
-        p = urlparse(url)
-    except ValueError as e:
-        return False, str(e)
-    if p.scheme not in ("http", "https"):
-        return False, f"Only http/https allowed, got '{p.scheme or 'none'}'"
-    if not p.netloc:
-        return False, "Missing domain"
-    return True, ""
-
-
 def _validate_url_safe(url: str) -> tuple[bool, str]:
     """Scheme, domain and resolved-address check: private/internal addresses are blocked."""
     return validate_url_target(url)

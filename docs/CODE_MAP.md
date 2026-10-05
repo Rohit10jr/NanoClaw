@@ -29,8 +29,8 @@ so line numbers stay correct even as nanobot changes.
 | 7 Skills | `nanoclaw/agent/skills.py` + 6 built-in skills, context/loop/read_file/Dream changes | ~290 + skills | `agent/skills.py`, `skills/`, parts of `context.py`, `filesystem.py`, `memory.py` | ~420 + skills |
 | 8 Subagents | `nanoclaw/agent/subagent.py`, `tools/spawn.py`, `tools/context.py` + runner/loop/CLI changes | ~470 | `agent/subagent.py`, `agent/tools/spawn.py`, parts of `tools/context.py`, `runner.py`, `loop.py` | ~800 |
 | 9 Safety | `nanoclaw/security/` (2 modules), `agent/tools/violations.py` + shell/file/web/runner changes | ~650 | `security/network.py`, `security/workspace_policy.py`, parts of `shell.py`, `filesystem.py`, `web.py`, `execution.py`, `utils/runtime.py` | ~1,100 |
-| 10 Terminal chat | `nanoclaw/cli/` (2 modules), `utils/tool_hints.py`, `utils/path.py` + runner/loop changes | ~700 | classic parts of `cli/agent.py`, `cli/terminal.py`, `cli/stream.py`, parts of `command/builtin.py`, `command/router.py`, `utils/tool_hints.py`, `utils/path.py` | ~1,500 |
-| CLI (`chat`, `ask`, `compact`, `dream`, `skills`, `prompt`) | `nanoclaw/__main__.py` | ~240 | `cli/agent.py`, `cli/commands.py` | ~1,180 |
+| 10 Terminal chat | `nanoclaw/cli/` (2 modules), `utils/tool_hints.py`, `utils/path.py` + runner/loop changes | ~950 | classic parts of `cli/agent.py`, `cli/terminal.py`, `cli/stream.py`, parts of `command/builtin.py`, `command/router.py`, `utils/tool_hints.py`, `utils/path.py` | ~1,500 |
+| CLI (`chat`, `ask`, `compact`, `dream`, `skills`, `prompt`) | `nanoclaw/__main__.py` | ~265 | `cli/agent.py`, `cli/commands.py` | ~1,180 |
 
 ## Layer 1 — Provider
 
@@ -179,7 +179,7 @@ Note: [`notes/03-tools.md`](notes/03-tools.md)
 |---|---|---|
 | [`ExecTool`](../nanoclaw/agent/tools/shell.py#L62) | [`agent/tools/shell.py:162`][nb-l3-exec] | Simplified: bash only; no sessions, sandbox, shell choice, PATH config or Windows |
 | [`DEFAULT_DENY_PATTERNS`](../nanoclaw/agent/tools/shell.py#L32) | [`shell.py:215`][nb-l3-deny] | Same list as nanobot, including the memory-file patterns (`history.jsonl`, `.dream_cursor`) added at the end of layer 6 (checked: identical) |
-| [`_guard_command`](../nanoclaw/agent/tools/shell.py#L197) | [`shell.py:840`][nb-l3-guard], called at [`:446`][nb-l3-guardcall] | **Different: always applied.** nanobot only when `restrict_to_workspace` is on (off by default). Deny list only; no allowlist or internal-URL check |
+| [`_guard_command`](../nanoclaw/agent/tools/shell.py#L197) | [`shell.py:840`][nb-l3-guard], called at [`:446`][nb-l3-guardcall] | **Different: deny list and internal-URL check always applied** (nanobot: only when `restrict_to_workspace` is on, off by default). Since layer 9 also nanobot's internal-URL and restricted-mode path checks (see the layer 9 section); no allowlist |
 | [`_build_env`](../nanoclaw/agent/tools/shell.py#L405) | [`shell.py:791`][nb-l3-env] | Same (Unix) |
 | [`_kill_process_tree`](../nanoclaw/agent/tools/shell.py#L420) | [`shell.py:730`][nb-l3-kill] | Simplified: `killpg` on the process group, then `process.kill()` |
 | [`_resolve_timeout`](../nanoclaw/agent/tools/shell.py#L185) | [`shell.py:386`][nb-l3-timeout] | Same: model's choice capped at 600 s; configured default may be higher; 0 = no limit |
@@ -188,12 +188,12 @@ Note: [`notes/03-tools.md`](notes/03-tools.md)
 
 | NanoClaw | nanobot | How it compares |
 |---|---|---|
-| [`WebFetchTool`](../nanoclaw/agent/tools/web.py#L80) | [`agent/tools/web.py:1118`][nb-l3-fetch] | Simplified: readability path only; no Jina Reader or image fetching. Private-network checks, DNS pinning and environment proxies added in layer 9 |
-| [`_get_with_redirects`](../nanoclaw/agent/tools/web.py#L159) | [`web.py:208`][nb-l3-redirects] `_get_with_safe_redirects` | Simplified: scheme check per hop (nanobot also checks resolved IPs) |
-| [`_validate_url`](../nanoclaw/agent/tools/web.py#L46) (now only for non-fetch use), `_strip_tags`, `_normalize`, `_to_markdown`, `_extract_readable_html` | [`web.py:100`][nb-l3-validate-url], `:86`, `:94`, `:1338`, `:1330` | Same |
+| [`WebFetchTool`](../nanoclaw/agent/tools/web.py#L67) | [`agent/tools/web.py:1118`][nb-l3-fetch] | Simplified: readability path only; no Jina Reader or image fetching. Private-network checks, DNS pinning and environment proxies added in layer 9 |
+| [`_get_with_redirects`](../nanoclaw/agent/tools/web.py#L146) | [`web.py:208`][nb-l3-redirects] `_get_with_safe_redirects` | Same checks on every hop since layer 9 (scheme, resolved addresses, pinned connection) |
+| `_strip_tags`, `_normalize`, `_to_markdown`, `_extract_readable_html` | `web.py:86`, `:94`, `:1338`, `:1330` | Same. (`_validate_url`, nanobot `web.py:100`, was replaced by `_validate_url_safe` in layer 9 and removed; nanobot keeps it for search providers) |
 | [`UNTRUSTED_BANNER`](../nanoclaw/agent/tools/web.py#L29) | `web.py:34` | Same text |
-| [`WebSearchTool`](../nanoclaw/agent/tools/web.py#L237) | [`web.py:365`][nb-l3-search] | Simplified: DuckDuckGo only (nanobot's default of ~10 providers) |
-| [`_format_results`](../nanoclaw/agent/tools/web.py#L215), `_duckduckgo_search` | [`web.py:306`][nb-l3-format], `:1024` | Same |
+| [`WebSearchTool`](../nanoclaw/agent/tools/web.py#L224) | [`web.py:365`][nb-l3-search] | Simplified: DuckDuckGo only (nanobot's default of ~10 providers) |
+| [`_format_results`](../nanoclaw/agent/tools/web.py#L202), `_duckduckgo_search` | [`web.py:306`][nb-l3-format], `:1024` | Same |
 
 ### Large tool results — `nanoclaw/agent/tool_results.py`
 
@@ -468,9 +468,9 @@ Note: [`notes/09-safety.md`](notes/09-safety.md)
 
 | NanoClaw | nanobot | How it compares |
 |---|---|---|
-| [`_validate_url_safe`](../nanoclaw/agent/tools/web.py#L59) | [`agent/tools/web.py:113`][nb-l9-safe] | Same |
-| [`_fetch_client_kwargs`](../nanoclaw/agent/tools/web.py#L64) | [`:133`][nb-l9-kwargs] | Same, without the configured `web.proxy` option |
-| [`WebFetchTool._get_with_redirects()`](../nanoclaw/agent/tools/web.py#L159) | [`:208`][nb-l9-redir] `_get_with_safe_redirects` | Same checks on every hop |
+| [`_validate_url_safe`](../nanoclaw/agent/tools/web.py#L46) | [`agent/tools/web.py:113`][nb-l9-safe] | Same |
+| [`_fetch_client_kwargs`](../nanoclaw/agent/tools/web.py#L51) | [`:133`][nb-l9-kwargs] | Same, without the configured `web.proxy` option |
+| [`WebFetchTool._get_with_redirects()`](../nanoclaw/agent/tools/web.py#L146) | [`:208`][nb-l9-redir] `_get_with_safe_redirects` | Same checks on every hop |
 
 ### Reporting blocked calls — `nanoclaw/agent/tools/violations.py`, runner
 
@@ -642,7 +642,6 @@ Note: [`notes/10-terminal-chat.md`](notes/10-terminal-chat.md)
 [nb-l3-kill]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/tools/shell.py#L730
 [nb-l3-fetch]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/tools/web.py#L1118
 [nb-l3-redirects]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/tools/web.py#L208
-[nb-l3-validate-url]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/tools/web.py#L100
 [nb-l3-search]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/tools/web.py#L365
 [nb-l3-format]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/tools/web.py#L306
 [nb-l3-loader]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/tools/loader.py#L26
