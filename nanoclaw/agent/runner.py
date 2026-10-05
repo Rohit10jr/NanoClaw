@@ -30,6 +30,7 @@ from nanoclaw.agent.messages import (
 from nanoclaw.agent.tool_results import normalize_tool_result
 from nanoclaw.agent.tools import ToolRegistry, is_tool_error
 from nanoclaw.agent.tools.registry import with_retry_hint
+from nanoclaw.agent.tools.violations import classify_violation
 from nanoclaw.providers import LLMProvider, LLMResponse, LLMUsage, ToolCallRequest
 
 # After this many empty replies in a row, ask once more with tools off.
@@ -98,6 +99,8 @@ class AgentRunner:
         tools_used: list[str] = []
         usage: LLMUsage | None = None
         empty_retries = 0
+        # Per-run throttle for repeated attempts at the same outside target.
+        workspace_violation_counts: dict[str, int] = {}
 
         for _iteration in range(spec.max_iterations):
             response, request_usage = await self._request_model(spec, messages)
@@ -113,7 +116,7 @@ class AgentRunner:
                     )
                 )
                 for call in response.tool_calls:
-                    raw, ok = await self._execute_tool_call(spec, call)
+                    raw, ok = await self._execute_tool_call(spec, call, workspace_violation_counts)
                     content = normalize_tool_result(
                         call.name,
                         call.id,
@@ -243,21 +246,36 @@ class AgentRunner:
         self,
         spec: AgentRunSpec,
         call: ToolCallRequest,
+        workspace_violation_counts: dict[str, int] | None = None,
     ) -> tuple[str, bool]:
         """Run one call; return the text for the tool message and whether it succeeded.
 
-        Mirrors nanobot agent/tools/execution.py _execute_tool_call.
+        Mirrors nanobot agent/tools/execution.py _execute_tool_call. Boundary
+        errors (private network, outside the workspace) are reported as nanobot
+        does (``classify_violation``).
         """
+        counts = workspace_violation_counts if workspace_violation_counts is not None else {}
+
+        def failed(raw_text: str, payload: str) -> tuple[str, bool]:
+            handled = classify_violation(
+                raw_text=raw_text,
+                soft_payload=payload,
+                tool_name=call.name,
+                arguments=call.arguments,
+                workspace_violation_counts=counts,
+            )
+            return (handled if handled is not None else payload), False
+
         tool, params, error = spec.tools.prepare_call(call.name, call.arguments)
         if error:
-            return with_retry_hint(error), False
+            return failed(error, with_retry_hint(error))
         assert tool is not None
         try:
             result = await tool.execute(**params)
         except Exception as exc:
-            return with_retry_hint(f"Error: {type(exc).__name__}: {exc}"), False
+            return failed(str(exc), with_retry_hint(f"Error: {type(exc).__name__}: {exc}"))
         if is_tool_error(result):
-            return with_retry_hint(str(result)), False
+            return failed(str(result), with_retry_hint(str(result)))
         return ("" if result is None else str(result)), True
 
     async def _finalize_after_max_iterations(

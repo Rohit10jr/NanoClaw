@@ -83,8 +83,10 @@ class SubagentManager:
         max_tool_result_chars: int = 16_000,
         max_iterations: int = 20,
         max_concurrent_subagents: int = DEFAULT_MAX_CONCURRENT_SUBAGENTS,
+        restrict_to_workspace: bool = False,
     ) -> None:
         self.workspace = workspace
+        self.restrict_to_workspace = restrict_to_workspace
         self.max_tool_result_chars = max_tool_result_chars
         self.max_iterations = max_iterations
         self.max_concurrent_subagents = max_concurrent_subagents
@@ -96,8 +98,9 @@ class SubagentManager:
         self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
 
     def _build_tools(self) -> ToolRegistry:
-        """The child's own tool set: the standard tools, without ``spawn``."""
-        return build_default_tools(self.workspace)
+        """The child's own tool set: the standard tools, without ``spawn``, with
+        the main agent's workspace restriction (nanobot ``_subagent_tools_config``)."""
+        return build_default_tools(self.workspace, restrict_to_workspace=self.restrict_to_workspace)
 
     @staticmethod
     def _display_label(task: str, label: str | None) -> str:

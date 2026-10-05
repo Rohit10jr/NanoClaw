@@ -18,6 +18,11 @@ and are valued for companionship and their ability to hunt vermin.</p>
 <script>alert('x')</script></body></html>"""
 
 
+@pytest.fixture(autouse=True)
+def _dns(fake_dns):
+    return fake_dns
+
+
 def site(routes):
     """A mock transport serving ``routes``: url -> (status, headers, body)."""
     seen: list[str] = []

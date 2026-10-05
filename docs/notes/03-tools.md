@@ -169,7 +169,7 @@ Result truncated. Read the saved file if you need the complete output.
 
 | # | Difference | nanobot | NanoClaw | Why |
 |---|---|---|---|---|
-| 1 | **When the deny list applies** | Only when `restrict_to_workspace` (or the sandbox) is on, `shell.py:446`. That is **off by default** (`config/schema.py:402`), so by default **nothing is blocked**. nanobot's reasoning: full access is an explicit trust decision. | Checked on **every** command (`ExecTool._guard_command`) | Layers 3–8 have no restriction mode, and we point the agent at real folders. A cheap safety net while learning. **Revisit in layer 9** when `restrict_to_workspace` arrives: switch to nanobot's behaviour or keep it. Chosen with the user before building. |
+| 1 | **When the deny list applies** | Only when `restrict_to_workspace` (or the sandbox) is on, `shell.py:446`. That is **off by default** (`config/schema.py:402`), so by default **nothing is blocked**. nanobot's reasoning: full access is an explicit trust decision. | Checked on **every** command (`ExecTool._guard_command`) | Layers 3–8 have no restriction mode, and we point the agent at real folders. A cheap safety net while learning. Chosen with the user before building. *(Revisited in layer 9: kept always on, chosen with the user; see `09-safety.md`, difference #1.)* |
 | 2 | Deny patterns for memory files | Also blocks shell writes to `history.jsonl` / `.dream_cursor` | Not yet | Those files arrive with memory in layer 6; the patterns come with them. *(Resolved at the end of layer 6: nanobot's five patterns added; the list is now identical to nanobot's.)* |
 | 3 | `list_dir` recursive ignore rule | Checks every part of the **absolute** path, so a workspace that itself sits under a folder named `build` or `dist` lists as empty | Checks only the parts **below** the listed folder | Avoids that surprise; tested |
 | 4 | Images, PDFs, Office files | `read_file` returns images and extracts PDF/DOCX/XLSX/PPTX | Text only; binary files get a clear error | Out of scope for the core |
@@ -182,17 +182,18 @@ It catches `rm -rf`, `rm -r`, `rm -r -f`, `RM -RF`, `mkfs`, `dd if=`,
 spellings, for example `rm --recursive --force`, `find dir -delete`, or a Python
 one-liner calling `shutil.rmtree`. (Earlier, in chat, I wrongly gave `rm -r -f`
 as an example that slips through; the tests showed it is blocked.) So the list
-prevents accidents, it is not a security boundary. Real protection (workspace
-restriction, sandboxing, private-network blocking) is layer 9. Both the
+prevents accidents, it is not a security boundary. Workspace restriction and
+private-network blocking arrived in layer 9 (`09-safety.md`); OS sandboxing is
+phase 2. Both the
 blocked and the slip-through cases are tested in `tests/test_shell_tool.py`.
 
 ## What we left out
 
 | nanobot feature | Where | Why it exists |
 |---|---|---|
-| Workspace restriction, extra allowed dirs | `_FsTool._resolve_*`, `security/workspace_*.py` | Keep tools inside the workspace (**layer 9**) |
-| Private-network (SSRF) blocking | `security/network.py`, `_validate_url_safe` | Stop `web_fetch` reaching `localhost` or cloud metadata (**layer 9**) |
-| Sandbox (bubblewrap / macOS seatbelt) | `tools/sandbox.py` | OS-level isolation for `exec` (**layer 9**) |
+| Workspace restriction, extra allowed dirs | `_FsTool._resolve_*`, `security/workspace_*.py` | Keep tools inside the workspace (**done in layer 9**; extra allowed dirs: phase 2) |
+| Private-network (SSRF) blocking | `security/network.py`, `_validate_url_safe` | Stop `web_fetch` reaching `localhost` or cloud metadata (**done in layer 9**) |
+| Sandbox (bubblewrap / macOS seatbelt) | `tools/sandbox.py` | OS-level isolation for `exec` (**phase 2**, decided in layer 9) |
 | "File unchanged since last read" | `file_state.py` | Saves tokens when the model rereads a file |
 | `edit_file` `line_hint`, `expected_replacements` | `filesystem.py` | Pick a match by line number; guard the number of replacements |
 | `apply_patch`, ripgrep `search` | `tools/apply_patch.py`, `tools/search.py` | Multi-file patches, fast code search |

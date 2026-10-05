@@ -12,6 +12,7 @@ from nanoclaw import __version__
 from nanoclaw.agent.context import ContextBuilder
 from nanoclaw.agent.loop import DEFAULT_CONTEXT_WINDOW_TOKENS, AgentLoop, ContextWindowExceededError
 from nanoclaw.providers import LLMProvider, provider_from_env
+from nanoclaw.security.network import configure_ssrf_whitelist_from_env
 from nanoclaw.utils.templates import sync_workspace_templates
 
 # nanobot's default is ~/.nanobot/workspace.
@@ -42,18 +43,29 @@ def _context_window() -> int:
         raise SystemExit(f"NANOCLAW_CONTEXT_WINDOW must be a whole number of tokens, got {value!r}")
 
 
-def _make_loop(provider: LLMProvider, workspace: Path) -> AgentLoop:
+_TRUE_VALUES = {"1", "true", "yes", "on"}
+
+
+def _restrict_from_env() -> bool:
+    """``NANOCLAW_RESTRICT_TO_WORKSPACE`` (nanobot config ``tools.restrictToWorkspace``)."""
+    return os.environ.get("NANOCLAW_RESTRICT_TO_WORKSPACE", "").strip().lower() in _TRUE_VALUES
+
+
+def _make_loop(provider: LLMProvider, workspace: Path, *, restrict: bool = False) -> AgentLoop:
     return AgentLoop(
         provider,
         workspace,
         temperature=DEFAULT_TEMPERATURE,
         max_tokens=DEFAULT_MAX_TOKENS,
         context_window_tokens=_context_window(),
+        restrict_to_workspace=restrict,
     )
 
 
-async def _ask(provider: LLMProvider, prompt: str, workspace: Path, session_key: str, new: bool) -> int:
-    loop = _make_loop(provider, workspace)
+async def _ask(
+    provider: LLMProvider, prompt: str, workspace: Path, session_key: str, new: bool, restrict: bool = False
+) -> int:
+    loop = _make_loop(provider, workspace, restrict=restrict)
     if new:
         await loop.new_session(session_key)
     try:
@@ -146,6 +158,11 @@ def main(argv: list[str] | None = None, provider: LLMProvider | None = None) -> 
     )
     ask.add_argument("--new", action="store_true", help="forget the conversation and start over")
     ask.add_argument("-w", "--workspace", type=Path, default=DEFAULT_WORKSPACE, help=workspace_help)
+    ask.add_argument(
+        "--restrict",
+        action="store_true",
+        help="keep file tools and shell commands inside the workspace (also NANOCLAW_RESTRICT_TO_WORKSPACE=1)",
+    )
     compact = commands.add_parser("compact", help="summarize the conversation so far into a short checkpoint")
     compact.add_argument(
         "-s", "--session", default=DEFAULT_SESSION, help=f"conversation to compact (default: {DEFAULT_SESSION})"
@@ -159,10 +176,13 @@ def main(argv: list[str] | None = None, provider: LLMProvider | None = None) -> 
     show.add_argument("-w", "--workspace", type=Path, default=DEFAULT_WORKSPACE, help=workspace_help)
 
     args = parser.parse_args(argv)
+    # Trusted private ranges web_fetch may reach (nanobot tools.ssrfWhitelist).
+    configure_ssrf_whitelist_from_env()
     if args.command == "ask":
         workspace = _prepare_workspace(args.workspace)
+        restrict = args.restrict or _restrict_from_env()
         return asyncio.run(
-            _ask(provider or provider_from_env(), args.prompt, workspace, args.session, args.new)
+            _ask(provider or provider_from_env(), args.prompt, workspace, args.session, args.new, restrict)
         )
     if args.command == "compact":
         workspace = _prepare_workspace(args.workspace)

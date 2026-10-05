@@ -34,8 +34,8 @@ with a note in [`notes/`](notes/).
 | 6 | Memory | Long-term memory; compacting old history | `agent/memory.py`, `agent/autocompact.py`, `session/summary.py`, `agent/context_governance.py` (compaction) | `nanoclaw/agent/memory.py`, `nanoclaw/session/summary.py`, `nanoclaw/utils/tokens.py` | ✅ done |
 | 7 | Skills | Markdown procedures loaded on demand | `agent/skills.py`, `skills/` | `nanoclaw/agent/skills.py`, `nanoclaw/skills/` | ✅ done |
 | 8 | Subagents | Hand a task to a child agent | `agent/subagent.py`, `agent/tools/spawn.py`, `agent/tools/context.py` | `nanoclaw/agent/subagent.py`, `nanoclaw/agent/tools/spawn.py` | ✅ done |
-| 9 | Safety | Keep tools inside the workspace; guard shell commands | `security/workspace_access.py`, `security/workspace_policy.py`, `security/network.py`, `agent/tools/sandbox.py` | `nanoclaw/security/` | ⏭ next |
-| 10 | Terminal chat | Interactive REPL using everything above | `cli/agent.py`, `cli/commands.py` | `nanoclaw/cli.py` | planned |
+| 9 | Safety | Keep tools inside the workspace; block private-network addresses | `security/workspace_policy.py`, `security/network.py`, `agent/tools/execution.py` (violations), `agent/tools/shell.py` (guard) | `nanoclaw/security/`, `nanoclaw/agent/tools/violations.py` | ✅ done |
+| 10 | Terminal chat | Interactive REPL using everything above | `cli/agent.py`, `cli/commands.py` | `nanoclaw/cli.py` | ⏭ next |
 
 ### Layer details
 
@@ -136,12 +136,20 @@ marker one message too early (`UPSTREAM_BUGS.md`, bug 5; correct in NanoClaw).
 compaction inside a child's run, project-folder scope, shared background
 shell sessions, usage attribution, stop commands (layer 10).
 
-**9 — Safety.** `restrict_to_workspace`: path checks so file tools and
-`exec` stay in the workspace; blocking private-network addresses in
-`web_fetch`. (The deny list and timeout already exist from layer 3.)
-**To revisit here:** keep the deny list always on, or switch to nanobot's
-behaviour of applying it only in restricted mode.
-*Skipped:* bubblewrap / macOS seatbelt sandboxing (maybe later).
+**9 — Safety.** Private-network (SSRF) guard, always on: `web_fetch` resolves
+every host and redirect target and refuses private/internal addresses, with
+DNS pinning and proxy support; `exec` refuses commands with internal URLs.
+Workspace restriction, opt-in (`--restrict`, `NANOCLAW_RESTRICT_TO_WORKSPACE`):
+file tools and `exec` paths stay inside the workspace (reads may also use the
+skills folders and the journal), for subagents too. Blocked calls are reported
+as nanobot does (a fixed note for private-network blocks; a firmer message after
+repeated attempts at the same outside path). See `notes/09-safety.md`.
+**Decisions:** deny list stays always on (layer 3 question settled); restriction
+off by default, as in nanobot; OS sandbox in phase 2.
+**Differences:** the `exec` internal-URL check also runs unrestricted (nanobot:
+restricted only); settings come from environment variables and `--restrict`.
+*Deferred (see phase 2):* OS sandbox, allow patterns, extra allowed folders,
+configured fetch proxy, Web UI loopback access, MCP SSRF checks.
 
 **10 — Terminal chat.** `nanoclaw chat`: REPL with session resume, `/new`,
 `/exit`, showing tool calls as they happen. `nanoclaw ask` stays for one-shot
@@ -173,6 +181,8 @@ NanoClaw needs it, and build only the ones we pick.
 | Provider conversation state | `providers/conversation_state.py`, `summarize_provider_compaction` | Server-side conversation state (e.g. OpenAI Responses API), including **provider-native compaction** (deferred from layer 6) and adding subagent reports to it (deferred from layer 8) |
 | Prompt overrides | `utils/workspace_prompts.py`, `templates/prompts/`, `/dream-prompt` | Replace Dream's (and the heartbeat's) instructions with a file in the workspace (deferred from layer 6) |
 | More skills features | `skills/clawhub`, `disabled_skills` config, `apps/cli` aliases, nanobot's `cron`/`image-generation`/`my`/`update-setup` skills | Install community skills (after layer 9), hide skills, CLI-app aliases, and the built-in skills that need features NanoClaw lacks (deferred from layer 7) |
+| OS sandbox for `exec` | `agent/tools/sandbox.py` (bubblewrap, macOS seatbelt) | Commands run in an isolated filesystem view with only the workspace writable; the text guards of layer 9 are not a security boundary (deferred from layer 9) |
+| Configuration file | `config/schema.py`, `config/loader.py` | One place for settings now spread over environment variables: SSRF whitelist, restriction, `exec` allow patterns, extra allowed folders, a fetch proxy (deferred from layer 9), disabled skills (layer 7) |
 | Logging | `loguru` throughout | Warnings for degraded archives, corrupt files, ... (NanoClaw has no logging yet) |
 | Separate project folder | `agent/context.py` (`workspace` vs project), `security/workspace_access.py` | Keep `SOUL.md`/`USER.md`/memory/skills in the agent's home while tools and `AGENTS.md` use a chosen project folder; would add a `--project` CLI option; subagents would then run in the project folder (`workspace_scope`; deferred from layer 8) |
 | Long-running shell sessions | `agent/tools/exec_session.py`, `ExecSessionManager` | Background shell commands the agent checks on later, shared with subagents (deferred from layers 3 and 8) |

@@ -23,7 +23,7 @@ codebases can be read side by side, and leaves the production features
 | 6 | Memory + compaction | done |
 | 7 | Skills | done |
 | 8 | Subagents | done |
-| 9 | Safety (workspace limits, shell guards) | planned |
+| 9 | Safety (workspace limits, shell guards) | done |
 | 10 | Terminal chat (CLI) | planned |
 
 - [`docs/ROADMAP.md`](docs/ROADMAP.md): every layer in build order, plus the
@@ -88,6 +88,19 @@ Subagents, as in nanobot: the agent can hand a task to a child agent with the
 `spawn` tool. With `wait=true` it waits for the answer; otherwise the child
 works in the background (up to 4 at once) and the agent tells you the result
 when it's done. `nanoclaw ask` waits for background children before exiting.
+
+Safety, as in nanobot: `web_fetch` and shell commands can't reach private or
+internal network addresses (`localhost`, `192.168.x.x`, cloud metadata, ...),
+and a short deny list blocks commands like `rm -rf`. With `--restrict` the file
+tools and shell commands also stay inside the workspace:
+
+```bash
+uv run nanoclaw ask --restrict "clean up the notes"   # or NANOCLAW_RESTRICT_TO_WORKSPACE=1
+export NANOCLAW_SSRF_WHITELIST=100.64.0.0/10          # private ranges you trust (e.g. Tailscale)
+```
+
+These are guards, not a sandbox: run the agent somewhere you don't mind it
+working.
 
 The agent's personality and instructions live in editable Markdown files in
 the workspace (`~/.nanoclaw/workspace` by default, change with `-w`):

@@ -1,8 +1,9 @@
 """File tools: read_file, write_file, edit_file, list_dir.
 
 Mirrors nanobot/agent/tools/filesystem.py. Relative paths resolve against the
-workspace. Keeping tools *inside* the workspace is layer 9; nanobot doesn't
-restrict by default either.
+workspace. With ``restrict_to_workspace`` (off by default, as in nanobot) every
+path must stay inside the workspace; reads may also use the skills folders and
+the history journal (layer 9).
 """
 
 from __future__ import annotations
@@ -17,19 +18,47 @@ from typing import Any
 
 from nanoclaw.agent.tools.base import Tool, ToolResult
 from nanoclaw.agent.tools.schema import object_schema
+from nanoclaw.security.workspace_policy import resolve_allowed_path
 
 
 class _FsTool(Tool):
-    """Shared base: workspace-relative path resolution."""
+    """Shared base: workspace-relative path resolution and the workspace boundary.
 
-    def __init__(self, workspace: Path | None = None) -> None:
+    Mirrors nanobot ``_FsTool`` (``create``, ``_resolve_read``,
+    ``_resolve_write``) and ``path_utils.resolve_workspace_path``. A path
+    outside the boundary raises ``WorkspaceBoundaryError`` (a
+    ``PermissionError``), which each tool returns as an error.
+    """
+
+    def __init__(self, workspace: Path | None = None, *, restrict_to_workspace: bool = False) -> None:
         self._workspace = workspace
+        self._allowed_dir = workspace if restrict_to_workspace and workspace is not None else None
+        if workspace is not None:
+            from nanoclaw.agent.skills import BUILTIN_SKILLS_DIR
+
+            resolved = workspace.expanduser().resolve(strict=False)
+            # Agent-owned skills stay readable; of memory/, only the journal.
+            self._extra_read_allowed_dirs = [BUILTIN_SKILLS_DIR, resolved / "skills"]
+            self._extra_read_allowed_files = [resolved / "memory" / "history.jsonl"]
+        else:
+            self._extra_read_allowed_dirs, self._extra_read_allowed_files = [], []
+
+    def _resolve_read(self, path: str) -> Path:
+        restricted = self._allowed_dir is not None
+        return resolve_allowed_path(
+            path,
+            workspace=self._workspace,
+            allowed_root=self._allowed_dir,
+            extra_allowed_roots=self._extra_read_allowed_dirs if restricted else None,
+            # The journal exception only matters when restricted.
+            extra_allowed_files=self._extra_read_allowed_files if restricted else None,
+        )
+
+    def _resolve_write(self, path: str) -> Path:
+        return resolve_allowed_path(path, workspace=self._workspace, allowed_root=self._allowed_dir)
 
     def _resolve(self, path: str) -> Path:
-        p = Path(path).expanduser()
-        if not p.is_absolute() and self._workspace is not None:
-            p = self._workspace / p
-        return p.resolve(strict=False)
+        return self._resolve_read(path)
 
     def _display(self, p: Path) -> str:
         """Path relative to the workspace when inside it (nanobot: display_file_edit_path)."""
@@ -142,7 +171,7 @@ class ReadFileTool(_FsTool):
                 return ToolResult.error(
                     f"Error: Reading {path} is blocked (device path that could hang or produce infinite output)."
                 )
-            fp = self._resolve(path)
+            fp = self._resolve_read(path)
             if not fp.exists():
                 fp = _builtin_skill_read_path(path) or fp
             if _is_blocked_device(fp):
@@ -254,7 +283,7 @@ class WriteFileTool(_FsTool):
                 raise ValueError("Unknown path")
             if content is None:
                 raise ValueError("Unknown content")
-            fp = self._resolve(path)
+            fp = self._resolve_write(path)
             fp.parent.mkdir(parents=True, exist_ok=True)
             fp.write_text(content, encoding="utf-8")
             return f"Successfully wrote {len(content)} characters to {fp}"
@@ -534,7 +563,7 @@ class EditFileTool(_FsTool):
                 raise ValueError("Unknown old_text")
             if new_text is None:
                 raise ValueError("Unknown new_text")
-            fp = self._resolve(path)
+            fp = self._resolve_write(path)
             file_exists = fp.exists()
             if file_exists and old_text == new_text:
                 return ToolResult.error("Error: new_text must be different from old_text.")

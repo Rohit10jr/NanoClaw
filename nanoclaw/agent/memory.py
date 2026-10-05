@@ -33,16 +33,11 @@ from nanoclaw.session.manager import Session, SessionManager
 from nanoclaw.session.summary import is_summary_checkpoint, session_summary_from_metadata
 from nanoclaw.utils.llm_runtime import LLMRuntime
 from nanoclaw.utils.templates import render_template
+from nanoclaw.security.workspace_policy import WORKSPACE_BOUNDARY_NOTE
 from nanoclaw.utils.tokens import estimate_prompt_tokens, truncate_text_to_tokens
 
 _RAW_ARCHIVE_MAX_CHARS = 16_000  # fallback dump (model failed)
 _HISTORY_ENTRY_HARD_CAP = 64_000  # emergency cap in append_history
-# nanobot security/workspace_policy.py: appended to path-boundary errors.
-WORKSPACE_BOUNDARY_NOTE = (
-    " (this is a hard policy boundary, not a transient failure; "
-    "do not retry with shell tricks or alternative tools, and ask "
-    "the user how to proceed if the resource is genuinely required)"
-)
 _ARCHIVE_TOOL_RESULT = (
     "Session archival does not execute tools. Use only the supplied conversation and "
     "return the requested compact checkpoint now; do not call another tool."

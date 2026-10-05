@@ -91,8 +91,10 @@ class AgentLoop:
         max_tokens: int = 4096,
         temperature: float = 0.7,
         context_window_tokens: int = DEFAULT_CONTEXT_WINDOW_TOKENS,
+        restrict_to_workspace: bool = False,
     ) -> None:
         self.provider = provider
+        self.restrict_to_workspace = restrict_to_workspace
         self.workspace = workspace
         self.model = model
         self.max_iterations = max_iterations
@@ -103,12 +105,15 @@ class AgentLoop:
         self.context = ContextBuilder(workspace)
         self.memory: MemoryStore = self.context.memory
         self.subagents = SubagentManager(
-            workspace, max_tool_result_chars=max_tool_result_chars, max_iterations=max_iterations
+            workspace,
+            max_tool_result_chars=max_tool_result_chars,
+            max_iterations=max_iterations,
+            restrict_to_workspace=restrict_to_workspace,
         )
         if tools is None:
             # The main agent's tools: the standard set plus spawn. Subagents and
             # Dream build their own sets without it.
-            tools = build_default_tools(workspace)
+            tools = build_default_tools(workspace, restrict_to_workspace=restrict_to_workspace)
             tools.register(SpawnTool(self.subagents))
         self.tools = tools
         self.sessions = sessions if sessions is not None else SessionManager(workspace)
