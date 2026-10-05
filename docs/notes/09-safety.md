@@ -125,7 +125,7 @@ The count starts again with each run. Dream's own boundary errors use the same w
 
 ## Tests
 
-`tests/test_safety.py` (52 tests), with a fake DNS resolver and no real network
+`tests/test_safety.py` (54 tests), with a fake DNS resolver and no real network
 (the `fake_dns` fixture in `tests/conftest.py`, which also clears proxy
 variables):
 
@@ -135,7 +135,8 @@ variables):
 - `exec`: internal URLs blocked even unrestricted; restricted `../`, absolute, `~`, `sh -c`, `file://` and assignment paths; allowed devices and workspace paths; `working_dir`;
 - restricted file tools: inside/outside, symlink escapes, the skills and journal exceptions, writes without exceptions;
 - the SSRF note, escalation after repeated attempts (across tools, reset each run);
-- wiring: loop, subagents, `--restrict`, the environment variables.
+- wiring: loop, subagents, `--restrict`, the environment variables;
+- (second review, ported from nanobot's tests) two fetches at the same time each pinned to their own addresses; a rebound name rejected before the connection.
 
 The web tests (`tests/test_web_tools.py`) now use the fake resolver too.
 
@@ -166,3 +167,21 @@ Checked by **running both projects' code** on the same inputs, with the same fak
 | `web_fetch` end to end: private target, redirects to `127.0.0.1` and to a private name, a normal redirect, a bad scheme, DNS changing between check and connection | Identical results; nanobot makes one extra request for the image check (difference #5) |
 
 No new nanobot bugs were found.
+
+### Second review (after the build)
+
+| Check | How | Result |
+|---|---|---|
+| Other places nanobot reacts to restriction | Searched nanobot for `restrict_to_workspace` / sandbox status | Only the file tools, `exec`, subagents and nanobot's `my` tool (self-inspection, not ported) use it. No prompt or tool-description changes. The Web UI loopback exception applies only to Web UI turns |
+| Order of checks in `read_file`, `write_file`, `edit_file` | Read side by side | Same (device check, then boundary, then built-in skill fallback) |
+| **nanobot's own tests run against NanoClaw** | Copied `tests/security/test_security_network.py`, `test_workspace_policy.py` and `tests/tools/test_exec_security.py`, pointed them at NanoClaw's modules (a small adapter for `_guard_command`'s signature) | **112 pass.** All 37 failures test features we left out (workspace scopes, Web UI loopback, sandbox bind folders, proxy-DNS trust, `is_loopback_host`) or our differences #1–#2 (nanobot skips the guard in full-access mode) |
+| nanobot's `web_fetch` safety tests | Ported the two that don't need Jina Reader: concurrent pinned fetches, and a rebound name | Both pass; **added to our suite** |
+| nanobot's runner safety tests | Read against ours | Already covered (SSRF note, run continues, escalation on repeated `exec cat /outside`) |
+
+Correction made: **a test for the DNS-pinning lock.** Pinning works by
+temporarily replacing Python's process-wide resolver, so two fetches at the same
+time must take turns (`PinnedDNSAsyncTransport._resolver_lock`). No test
+covered that: removing the lock passed the whole suite. The ported nanobot test
+now catches it (checked by breaking it on purpose). No code changes were
+needed; no new nanobot bugs were found.
+

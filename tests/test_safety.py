@@ -445,3 +445,62 @@ def test_cli_reads_the_ssrf_whitelist(ws, monkeypatch):
     monkeypatch.setenv("NANOCLAW_SSRF_WHITELIST", "10.0.0.0/8")
     main(["skills", "-w", str(ws)])
     assert validate_url_target("http://internal.test/") == (True, "")
+
+
+# --- ported from nanobot tests/tools/test_web_fetch_security.py --------------
+
+
+async def test_concurrent_fetches_each_use_their_own_pinned_addresses(monkeypatch):
+    """DNS pinning overrides the process-wide resolver, so two fetches at the
+    same time must not see each other's pins (the transport's lock)."""
+    import asyncio
+    import socket
+
+    public_ips = {"a.example": "93.184.216.34", "b.example": "93.184.216.35"}
+    calls = {host: 0 for host in public_ips}
+    seen = {}
+
+    def rebinding_resolver(hostname, port, family=0, type_=0, proto=0, flags=0):
+        host = str(hostname).rstrip(".").lower()
+        calls[host] += 1
+        ip = public_ips[host] if calls[host] <= 2 else "169.254.169.254"
+        return [(socket.AF_INET, socket.SOCK_STREAM, 0, "", (ip, 0))]
+
+    class Resolving(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            await asyncio.sleep(0)
+            infos = socket.getaddrinfo(request.url.host, request.url.port or 443, socket.AF_UNSPEC, socket.SOCK_STREAM)
+            seen[str(request.url)] = infos[0][4][0]
+            return httpx.Response(200, request=request)
+
+    tool = WebFetchTool()
+
+    async def fetch(url):
+        async with httpx.AsyncClient(transport=PinnedDNSAsyncTransport(inner=Resolving())) as client:
+            return await tool._get_with_redirects(client, url)
+
+    monkeypatch.setattr("nanoclaw.security.network.socket.getaddrinfo", rebinding_resolver)
+    results = await asyncio.gather(fetch("https://a.example/"), fetch("https://b.example/"))
+    assert all(error is None and response is not None for response, error in results)
+    assert seen == {"https://a.example/": "93.184.216.34", "https://b.example/": "93.184.216.35"}
+    assert calls == {"a.example": 2, "b.example": 2}
+
+
+async def test_rebound_target_is_rejected_before_the_connection(monkeypatch):
+    import socket
+
+    calls = {"n": 0}
+
+    def rebinding_resolver(hostname, port, family=0, type_=0, proto=0, flags=0):
+        calls["n"] += 1
+        ip = "93.184.216.34" if calls["n"] <= 2 else "169.254.169.254"
+        return [(socket.AF_INET, socket.SOCK_STREAM, 0, "", (ip, 0))]
+
+    class Fail(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            raise AssertionError("rebound target must be rejected before transport")
+
+    monkeypatch.setattr("nanoclaw.security.network.socket.getaddrinfo", rebinding_resolver)
+    result = await WebFetchTool(transport=Fail()).execute(url="http://evil.example/page")
+    assert is_tool_error(result) and "blocked" in json.loads(result)["error"].lower()
+    assert calls["n"] == 3  # first check, redirect-loop check, pinned transport
