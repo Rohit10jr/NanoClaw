@@ -70,6 +70,9 @@ of `path` is reported instead of silently ignored.
   Windows), and falls back to Latin-1 for text extensions such as `.txt`,
   `.csv`, `.ini` that aren't valid UTF-8.
 - Clear errors: not found, not a file, binary file, offset past the end.
+- *(Since layer 7)* A relative `skills/<name>/...` path missing from the
+  workspace is read from the built-in skills folder (nanobot
+  `_builtin_skill_read_path`); see `07-skills.md`.
 
 ### `write_file(path, content)`
 Creates parent folders; overwrites; replies `Successfully wrote N characters to <path>`.

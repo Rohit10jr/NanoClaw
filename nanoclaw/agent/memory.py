@@ -37,6 +37,12 @@ from nanoclaw.utils.tokens import estimate_prompt_tokens, truncate_text_to_token
 
 _RAW_ARCHIVE_MAX_CHARS = 16_000  # fallback dump (model failed)
 _HISTORY_ENTRY_HARD_CAP = 64_000  # emergency cap in append_history
+# nanobot security/workspace_policy.py: appended to path-boundary errors.
+WORKSPACE_BOUNDARY_NOTE = (
+    " (this is a hard policy boundary, not a transient failure; "
+    "do not retry with shell tricks or alternative tools, and ask "
+    "the user how to proceed if the resource is genuinely required)"
+)
 _ARCHIVE_TOOL_RESULT = (
     "Session archival does not execute tools. Use only the supplied conversation and "
     "return the requested compact checkpoint now; do not call another tool."
@@ -232,33 +238,51 @@ class MemoryStore:
             return None
         batch = entries[:max_entries]
         history_text = "\n".join(f"[{e['timestamp']}] {truncate_text(e['content'], 1000)}" for e in batch)
-        template = render_template("agent/dream.md", strip=True)
+        template = self.default_dream_prompt()
         return f"{template}\n\n## Conversation History\n{history_text}", batch[-1]["cursor"]
 
     def build_dream_tools(self) -> ToolRegistry:
-        """Read files in the workspace; write only MEMORY.md, SOUL.md and USER.md.
+        """Dream's restricted file tools (nanobot ``build_dream_tools``).
 
-        nanobot also lets Dream write under ``skills/`` (layer 7) and gives it
-        ``apply_patch``, which NanoClaw doesn't have.
+        Read: the workspace and the built-in skills. Write: the workspace's
+        ``skills/`` folder plus ``MEMORY.md``, ``SOUL.md`` and ``USER.md``.
+        nanobot also gives Dream ``apply_patch``, which NanoClaw doesn't have.
         """
+        from nanoclaw.agent.skills import BUILTIN_SKILLS_DIR
+
         workspace = self.workspace.resolve()
+        skills_dir = workspace / "skills"
+        skills_dir.mkdir(parents=True, exist_ok=True)
+        read_roots = [workspace, BUILTIN_SKILLS_DIR.resolve()]
         editable = {self.memory_file.resolve(), self.soul_file.resolve(), self.user_file.resolve()}
 
-        def readable(path: Path) -> str | None:
-            if path == workspace or path.is_relative_to(workspace):
-                return None
-            return f"Error: Path {path} is outside allowed directory {workspace}"
+        def within(path: Path, root: Path) -> bool:
+            return path == root or path.is_relative_to(root)
 
-        def writable(path: Path) -> str | None:
-            if path in editable:
+        def readable(raw: str, path: Path) -> str | None:
+            if any(within(path, root) for root in read_roots):
                 return None
-            return f"Error: Path {path} is outside the files Dream may edit (memory/MEMORY.md, SOUL.md, USER.md)"
+            return f"Error: Path {raw} is outside allowed directory {workspace}{WORKSPACE_BOUNDARY_NOTE}"
+
+        def writable(raw: str, path: Path) -> str | None:
+            if within(path, skills_dir) or path in editable:
+                return None
+            return f"Error: Path {raw} is outside allowed directory {skills_dir}{WORKSPACE_BOUNDARY_NOTE}"
 
         tools = ToolRegistry()
         tools.register(_PathGuard(ReadFileTool(workspace), workspace, readable))
         tools.register(_PathGuard(EditFileTool(workspace), workspace, writable))
         tools.register(_PathGuard(WriteFileTool(workspace), workspace, writable))
         return tools
+
+    @staticmethod
+    def default_dream_prompt() -> str:
+        """Dream's instructions, pointing at the bundled skill-creator skill."""
+        from nanoclaw.agent.skills import BUILTIN_SKILLS_DIR
+
+        return render_template(
+            "agent/dream.md", strip=True, skill_creator_path=str(BUILTIN_SKILLS_DIR / "skill-creator" / "SKILL.md")
+        )
 
     @staticmethod
     def dream_session_key() -> str:
@@ -310,7 +334,7 @@ class _PathGuard(Tool):
     options on its file tools; general path restriction is layer 9.
     """
 
-    def __init__(self, inner: Tool, workspace: Path, check: Callable[[Path], str | None]) -> None:
+    def __init__(self, inner: Tool, workspace: Path, check: Callable[[str, Path], str | None]) -> None:
         self._inner = inner
         self._workspace = workspace
         self._check = check
@@ -333,7 +357,7 @@ class _PathGuard(Tool):
             path = Path(raw).expanduser()
             if not path.is_absolute():
                 path = self._workspace / path
-            problem = self._check(path.resolve(strict=False))
+            problem = self._check(raw, path.resolve(strict=False))
             if problem:
                 return ToolResult.error(problem)
         return await self._inner.execute(**kwargs)

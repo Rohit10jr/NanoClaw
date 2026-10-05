@@ -53,6 +53,28 @@ _BLOCKED_DEVICE_PATHS = frozenset({
 })
 
 
+def _builtin_skill_read_path(path: str) -> Path | None:
+    """Map a workspace-relative ``skills/<name>/...`` read onto the built-in skills.
+
+    The skills list in the system prompt shows built-in skills under
+    ``skills/`` too; a file missing from the workspace is looked up there.
+    (nanobot ``_builtin_skill_read_path``)
+    """
+    from nanoclaw.agent.skills import BUILTIN_SKILLS_DIR
+
+    requested = Path(path)
+    if requested.is_absolute():
+        return None
+    parts = requested.parts
+    if len(parts) < 2 or parts[0] != "skills":
+        return None
+    root = BUILTIN_SKILLS_DIR.resolve()
+    candidate = (root / Path(*parts[1:])).resolve()
+    if candidate != root and root not in candidate.parents:
+        return None
+    return candidate if candidate.is_file() else None
+
+
 def _is_blocked_device(path: str | Path) -> bool:
     """Device files that could hang or produce endless output."""
     raw = str(path)
@@ -121,6 +143,8 @@ class ReadFileTool(_FsTool):
                     f"Error: Reading {path} is blocked (device path that could hang or produce infinite output)."
                 )
             fp = self._resolve(path)
+            if not fp.exists():
+                fp = _builtin_skill_read_path(path) or fp
             if _is_blocked_device(fp):
                 return ToolResult.error(
                     f"Error: Reading {fp} is blocked (device path that could hang or produce infinite output)."

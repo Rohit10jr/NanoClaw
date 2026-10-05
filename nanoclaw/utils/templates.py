@@ -50,9 +50,10 @@ def sync_workspace_templates(workspace: Path) -> list[str]:
 
     Returns the paths created, relative to the workspace: ``AGENTS.md``,
     ``SOUL.md``, ``USER.md``, ``memory/MEMORY.md`` and an empty
-    ``memory/history.jsonl``. nanobot also creates ``skills/`` (layer 7),
-    ``HEARTBEAT.md`` and ``prompts/README.md`` (for features NanoClaw doesn't
-    have), and a git repository tracking ``SOUL.md``/``USER.md``/``MEMORY.md``.
+    ``memory/history.jsonl``; the ``skills/`` folder is created too (not
+    listed, as in nanobot). nanobot also creates ``HEARTBEAT.md`` and
+    ``prompts/README.md`` (for features NanoClaw doesn't have), and a git
+    repository tracking ``SOUL.md``/``USER.md``/``MEMORY.md``.
     """
     workspace.mkdir(parents=True, exist_ok=True)
     added: list[str] = []
@@ -69,4 +70,5 @@ def sync_workspace_templates(workspace: Path) -> list[str]:
         write(name, load_bundled_template(name) or "")
     write("memory/MEMORY.md", load_bundled_template("memory/MEMORY.md") or "")
     write("memory/history.jsonl", "")
+    (workspace / "skills").mkdir(exist_ok=True)
     return added

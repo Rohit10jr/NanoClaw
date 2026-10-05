@@ -82,6 +82,20 @@ async def _compact(provider: LLMProvider, workspace: Path, session_key: str) -> 
     return 0
 
 
+def _skills(workspace: Path) -> int:
+    """List the skills (nanobot's ``/skill`` command)."""
+    loader = ContextBuilder(workspace).skills
+    skills = loader.list_skills(filter_unavailable=False)
+    if not skills:
+        print("No skills available.")
+        return 0
+    lines = [f"Available skills ({len(skills)}):", ""]
+    for entry in skills:
+        lines.append(f"- **{entry['name']}** — {loader.get_skill_description(entry['name'])}")
+    print("\n".join(lines))
+    return 0
+
+
 async def _dream(provider: LLMProvider, workspace: Path) -> int:
     print(await _make_loop(provider, workspace).run_dream())
     return 0
@@ -107,6 +121,8 @@ def main(argv: list[str] | None = None, provider: LLMProvider | None = None) -> 
     compact.add_argument("-w", "--workspace", type=Path, default=DEFAULT_WORKSPACE, help=workspace_help)
     dream = commands.add_parser("dream", help="update long-term memory (memory/MEMORY.md, USER.md, SOUL.md) from the history journal")
     dream.add_argument("-w", "--workspace", type=Path, default=DEFAULT_WORKSPACE, help=workspace_help)
+    skills = commands.add_parser("skills", help="list the skills the agent can use (no API key needed)")
+    skills.add_argument("-w", "--workspace", type=Path, default=DEFAULT_WORKSPACE, help=workspace_help)
     show = commands.add_parser("prompt", help="print the system prompt the model receives (no API key needed)")
     show.add_argument("-w", "--workspace", type=Path, default=DEFAULT_WORKSPACE, help=workspace_help)
 
@@ -122,6 +138,8 @@ def main(argv: list[str] | None = None, provider: LLMProvider | None = None) -> 
     if args.command == "dream":
         workspace = _prepare_workspace(args.workspace)
         return asyncio.run(_dream(provider or provider_from_env(), workspace))
+    if args.command == "skills":
+        return _skills(_prepare_workspace(args.workspace))
     if args.command == "prompt":
         workspace = _prepare_workspace(args.workspace)
         print(ContextBuilder(workspace).build_system_prompt(channel=CHANNEL))

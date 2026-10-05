@@ -62,13 +62,14 @@ def test_sections_in_nanobot_order(ws):
     prompt = ContextBuilder(ws).build_system_prompt(channel="cli")
 
     sections = prompt.split(SECTION_SEPARATOR)
-    assert len(sections) == 3
-    identity, bootstrap, tools = sections
+    assert len(sections) == 4
+    identity, bootstrap, tools, skills = sections
     assert identity.startswith("## Runtime\n")
     assert bootstrap.index("## AGENTS.md\n\nUse tabs.") < bootstrap.index("## SOUL.md") < bootstrap.index(
         "## USER.md\n\nName: Sam"
     )
     assert tools.startswith("# Tool Usage Notes")
+    assert skills.startswith("# Skills\n")  # built-in skills (layer 7)
 
 
 def test_identity_has_runtime_workspace_and_untrusted_rule(ws):
@@ -127,7 +128,7 @@ def test_empty_and_missing_files_are_skipped(tmp_path):
     (tmp_path / "SOUL.md").write_text("   \n")
     prompt = ContextBuilder(tmp_path).build_system_prompt()
     assert "## SOUL.md" not in prompt
-    assert len(prompt.split(SECTION_SEPARATOR)) == 2  # identity + tool notes only
+    assert len(prompt.split(SECTION_SEPARATOR)) == 3  # identity + tool notes + skills only
 
 
 def test_soul_edits_change_the_prompt(ws):
@@ -232,7 +233,7 @@ def test_cli_prompt_command_prints_system_prompt_and_creates_files(capsys, tmp_p
     captured = capsys.readouterr()
     assert captured.out.strip() == ContextBuilder(ws).build_system_prompt(channel="cli").strip()
     assert f"[created {ws / 'SOUL.md'}]" in captured.err
-    assert sorted(p.name for p in ws.iterdir()) == ["AGENTS.md", "SOUL.md", "USER.md", "memory"]
+    assert sorted(p.name for p in ws.iterdir()) == ["AGENTS.md", "SOUL.md", "USER.md", "memory", "skills"]
 
 
 def test_cli_ask_sends_edited_soul_to_the_model(tmp_path):

@@ -121,7 +121,11 @@ async def test_dream_tools_write_only_memory_files(ws, store, tmp_path):
     assert (ws / "memory/MEMORY.md").read_text() == "# Facts\n- likes tea\n"
     assert not getattr(await tools.execute("write_file", {"path": "USER.md", "content": "Name: R"}), "is_error", False)
     refused = await tools.execute("write_file", {"path": "notes.txt", "content": "x"})
-    assert refused.is_error and "outside the files Dream may edit" in refused
+    assert refused.is_error
+    assert refused.startswith(f"Error: Path notes.txt is outside allowed directory {ws.resolve() / 'skills'} (this is a hard policy boundary")
+    # Since layer 7 Dream may write skills, and read the built-in ones.
+    assert not getattr(await tools.execute("write_file", {"path": "skills/tea/SKILL.md", "content": "x"}), "is_error", False)
+    assert "name: weather" in await tools.execute("read_file", {"path": "skills/weather/SKILL.md"})
     assert not (ws / "notes.txt").exists()
     refused = await tools.execute("edit_file", {"path": "AGENTS.md", "old_text": "a", "new_text": "b"})
     assert refused.is_error
@@ -308,7 +312,7 @@ def test_memory_section_only_when_edited(ws):
     assert "# Memory" not in builder.build_system_prompt()
     (ws / "memory/MEMORY.md").write_text("- likes tea\n")
     prompt = builder.build_system_prompt()
-    assert prompt.endswith("# Memory\n\n## Long-term Memory\n- likes tea\n")
+    assert "---\n\n# Memory\n\n## Long-term Memory\n- likes tea\n\n\n---\n\n# Skills\n" in prompt
     assert prompt.index("# Tool Usage Notes") < prompt.index("# Memory")
 
 

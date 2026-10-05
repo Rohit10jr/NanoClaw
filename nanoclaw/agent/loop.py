@@ -141,6 +141,11 @@ class AgentLoop:
             summary = session_summary_from_metadata(session.metadata, fallback_last_active=session.updated_at)
             history = session.get_history()
             blocks = [current_time_block()]
+            # Skills named as $skill-name are part of the saved message too (nanobot
+            # adds them while resolving runtime context, before saving).
+            skill_context = self.context.skills.build_explicit_skill_runtime_context(content)
+            if skill_context is not None and skill_context not in blocks:
+                blocks.append(skill_context)
             boundary = len(session.messages)
             persisted_early = not ephemeral and self._persist_user_message_early(content, session, blocks)
             messages = self.context.build_messages(

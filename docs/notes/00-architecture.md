@@ -97,7 +97,7 @@ nanobot's own guidance: problems with routing/sessions/delivery start in
 We rebuild the right-hand side of the diagram first and replace channels + bus
 with a direct call (`process_direct` in nanobot does the same for the CLI).
 
-Layers 0–6 are built; current status is in [`../ROADMAP.md`](../ROADMAP.md).
+Layers 0–7 are built; current status is in [`../ROADMAP.md`](../ROADMAP.md).
 
 | Layer | nanobot reference | NanoClaw module |
 |---|---|---|

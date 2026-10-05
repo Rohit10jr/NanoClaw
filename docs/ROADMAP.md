@@ -32,8 +32,8 @@ with a note in [`notes/`](notes/).
 | 4 | Context | Building the system prompt | `agent/context.py`, `templates/` | `nanoclaw/agent/context.py`, `nanoclaw/templates/` | ✅ done |
 | 5 | Sessions + AgentLoop | Conversations saved and resumed; one turn = context → runner → save | `session/manager.py`, `agent/loop.py` (`process_direct`) | `nanoclaw/session/`, `nanoclaw/agent/loop.py` | ✅ done |
 | 6 | Memory | Long-term memory; compacting old history | `agent/memory.py`, `agent/autocompact.py`, `session/summary.py`, `agent/context_governance.py` (compaction) | `nanoclaw/agent/memory.py`, `nanoclaw/session/summary.py`, `nanoclaw/utils/tokens.py` | ✅ done |
-| 7 | Skills | Markdown procedures loaded on demand | `agent/skills.py`, `skills/` | `nanoclaw/agent/skills.py`, `nanoclaw/skills/` | ⏭ next |
-| 8 | Subagents | Hand a task to a child agent | `agent/subagent.py`, `agent/tools/spawn.py` | `nanoclaw/agent/subagent.py` | planned |
+| 7 | Skills | Markdown procedures loaded on demand | `agent/skills.py`, `skills/` | `nanoclaw/agent/skills.py`, `nanoclaw/skills/` | ✅ done |
+| 8 | Subagents | Hand a task to a child agent | `agent/subagent.py`, `agent/tools/spawn.py` | `nanoclaw/agent/subagent.py` | ⏭ next |
 | 9 | Safety | Keep tools inside the workspace; guard shell commands | `security/workspace_access.py`, `security/workspace_policy.py`, `security/network.py`, `agent/tools/sandbox.py` | `nanoclaw/security/` | planned |
 | 10 | Terminal chat | Interactive REPL using everything above | `cli/agent.py`, `cli/commands.py` | `nanoclaw/cli.py` | planned |
 
@@ -104,9 +104,19 @@ between tool calls in a turn (phase 2, context governance).
 Dream, git history of memory files, provider-native compaction, Dream prompt
 override, Dream model override, compaction events.
 
-**7 — Skills.** `SkillsLoader` lists `skills/*/SKILL.md` (name + description
-in the prompt); the model reads the full skill with `read_file` when needed.
-One or two bundled example skills.
+**7 — Skills.** `SkillsLoader` lists `skills/*/SKILL.md` from the workspace
+and the built-in folder (workspace wins by name) as one line each in the
+`# Skills` section; the model reads a skill with `read_file` (built-in skills
+are found through a `skills/` fallback). Requirements (`bins`, `env`) mark a
+skill unavailable; `always: true` puts it in `# Active Skills`; `$name` in a
+message loads it for that turn. Dream may now write skills. `nanoclaw skills`.
+See `notes/07-skills.md`.
+**Decisions:** 6 built-in skills (`skill-creator`, `memory`, `weather`,
+`github`, `tmux`, `summarize`); PyYAML added; `nanoclaw skills` command.
+**Result:** the whole system prompt is now identical to nanobot's (apart from
+the two layer 4 differences).
+*Deferred (see phase 2):* plugin skills, CLI-app aliases, disabling skills,
+ClawHub; the other 5 nanobot built-in skills.
 
 **8 — Subagents.** `SubagentManager` + `spawn` tool: run a child `AgentRunner`
 with its own task and a restricted toolset; return its result to the parent.
@@ -131,7 +141,7 @@ NanoClaw needs it, and build only the ones we pick.
 |---|---|---|
 | Message bus + channels | `bus/`, `channels/` (Telegram, Slack, Discord, …) | Same agent from many chat apps. A long-running process would also allow **idle auto-compact** (`agent/autocompact.py`: summarize a chat after 15 idle minutes; deferred from layer 6) |
 | Hooks | `agent/hook.py`, `agent/turn_hooks.py`, `agent/progress_hook.py` | Plugins and UIs observe or change each step; also **compaction events** (`ContextCompactionEvent`; deferred from layer 6) |
-| Plugins | `agent/plugins.py` | Installable bundles of skills + MCP servers |
+| Plugins | `agent/plugins.py` | Installable bundles of skills + MCP servers (plugin skills appear as an "Agent Plugin skills" group; deferred from layer 7) |
 | Recovery + checkpoints | `session/recovery.py`, runner checkpoint callbacks | Resume a turn after a crash (closing a crashed turn is already ported, layer 5) |
 | Mid-turn injections | runner `injection_callback` | Fold new user messages into a running turn |
 | Context governance | `agent/context_governance.py` | Keep requests within the context window: token budgets, tool-result budgets, and **compaction in the middle of a turn** (between tool calls). Already ported: the adjacent-user-message merge (layer 5) and compaction before a turn (layer 6) |
@@ -146,5 +156,6 @@ NanoClaw needs it, and build only the ones we pick.
 | Memory history (git) | `utils/gitstore.py`, `/dream-log`, `/dream-restore` | Commits `SOUL.md`/`USER.md`/`MEMORY.md` after each Dream so changes can be viewed and undone (deferred from layer 6) |
 | Provider conversation state | `providers/conversation_state.py`, `summarize_provider_compaction` | Server-side conversation state (e.g. OpenAI Responses API), including **provider-native compaction** (deferred from layer 6) |
 | Prompt overrides | `utils/workspace_prompts.py`, `templates/prompts/`, `/dream-prompt` | Replace Dream's (and the heartbeat's) instructions with a file in the workspace (deferred from layer 6) |
+| More skills features | `skills/clawhub`, `disabled_skills` config, `apps/cli` aliases, nanobot's `cron`/`image-generation`/`my`/`update-setup` skills | Install community skills (after layer 9), hide skills, CLI-app aliases, and the built-in skills that need features NanoClaw lacks (deferred from layer 7) |
 | Logging | `loguru` throughout | Warnings for degraded archives, corrupt files, ... (NanoClaw has no logging yet) |
 | Separate project folder | `agent/context.py` (`workspace` vs project), `security/workspace_access.py` | Keep `SOUL.md`/`USER.md`/memory/skills in the agent's home while tools and `AGENTS.md` use a chosen project folder; would add a `--project` CLI option |

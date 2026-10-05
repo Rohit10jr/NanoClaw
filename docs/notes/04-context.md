@@ -97,9 +97,9 @@ do change (here, the time) are attached to the **user's message** inside
 | nanobot feature | Where | Why it exists |
 |---|---|---|
 | Memory section | `build_system_prompt`, `MemoryStore` | Long-term facts (**layer 6**, done) |
-| Active skills + skills list | `SkillsLoader` | On-demand procedures (**layer 7**) |
+| Active skills + skills list | `SkillsLoader` | On-demand procedures (**layer 7**, done) |
 | Archived conversation summary | `session_summary` | Context after compaction (**layer 6**, done) |
-| Skills named in the message | `build_explicit_skill_runtime_context` | Auto-load a skill the user mentions (**layer 7**) |
+| Skills named in the message | `build_explicit_skill_runtime_context` | Auto-load a skill the user mentions (**layer 7**, done) |
 | Images in the user message | `build_user_content` | Vision models |
 | Legacy `SOUL.md` upgrade | `_load_bootstrap_files` | Migrating old installs |
 | Git-backed profile files | `sync_workspace_templates` → `GitStore` | History of `SOUL.md`/`USER.md`/`MEMORY.md` edits (nanobot creates `.git` and `.gitignore` in the workspace) |
@@ -138,7 +138,7 @@ environment):
 
 | Check | How | Result |
 |---|---|---|
-| Whole system prompt | Fresh workspace, each project's own `sync_workspace_templates`, then `ContextBuilder(ws).build_system_prompt(channel="cli")` in both; `diff` of the output | Identical except the recorded differences (name, "Dream" wording, image line) and nanobot's `# Skills` section, which arrives in layer 7 |
+| Whole system prompt | Fresh workspace, each project's own `sync_workspace_templates`, then `ContextBuilder(ws).build_system_prompt(channel="cli")` in both; `diff` of the output | Identical except the recorded differences (name, "Dream" wording, image line) and nanobot's `# Skills` section, which arrives in layer 7 *(since layer 7 the whole prompt matches, skills included; see `07-skills.md`)* |
 | Message building | The same 5 cases through both `build_messages`: empty history with a runtime block; history ending with the assistant; trailing user message as text, as a list of parts, and empty | Identical output in all 5 cases |
 | Copied templates | `diff` of `platform_policy.md`, `tool_contract.md`, `USER.md` | Identical apart from the name |
 | When workspace files are created | Where nanobot calls `sync_workspace_templates` | Also on startup of its `agent` command (`cli/agent.py:154`), as ours does on `ask`/`prompt` |

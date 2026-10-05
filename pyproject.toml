@@ -11,6 +11,7 @@ dependencies = [
     "jinja2>=3.1.0,<4.0.0",
     "lxml-html-clean>=0.4.0,<1.0.0",
     "openai>=2.8.0",
+    "pyyaml>=6.0",
     "readability-lxml>=0.8.4,<1.0.0",
     "tiktoken>=0.12.0,<1.0.0",
 ]

@@ -21,7 +21,7 @@ codebases can be read side by side, and leaves the production features
 | 4 | Context / system prompt | done |
 | 5 | Sessions + agent loop | done |
 | 6 | Memory + compaction | done |
-| 7 | Skills | planned |
+| 7 | Skills | done |
 | 8 | Subagents | planned |
 | 9 | Safety (workspace limits, shell guards) | planned |
 | 10 | Terminal chat (CLI) | planned |
@@ -68,6 +68,16 @@ Memory, as in nanobot:
 uv run nanoclaw compact     # summarize the conversation so far (also automatic when it gets too long)
 uv run nanoclaw dream       # fold the summaries into long-term memory (memory/MEMORY.md, USER.md, SOUL.md)
 export NANOCLAW_CONTEXT_WINDOW=128000   # your model's context window in tokens (default 128000)
+```
+
+Skills, as in nanobot: Markdown procedures in `skills/<name>/SKILL.md`
+(your workspace) or built in (`github`, `memory`, `skill-creator`,
+`summarize`, `tmux`, `weather`). The agent sees a one-line list and reads a
+skill when it needs it; `$name` in a message loads one for that turn.
+
+```bash
+uv run nanoclaw skills                                   # list skills
+uv run nanoclaw ask 'What is the $weather in Paris?'     # use a skill now
 ```
 
 Summaries are kept in a journal, `memory/history.jsonl` in the workspace;
