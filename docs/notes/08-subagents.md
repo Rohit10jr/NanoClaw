@@ -93,6 +93,7 @@ X turns out to be ...                    ← the follow-up turn's reply
 
 Children started before an error in the main turn still report. When the
 layer 10 chat arrives, reports will appear as they finish, as in nanobot.
+*(Done in layer 10: `nanoclaw chat` prints them as they finish, above the prompt.)*
 
 ## Runner options added
 
@@ -109,7 +110,7 @@ returns.
 
 | # | Difference | nanobot | NanoClaw | Why | Later |
 |---|---|---|---|---|---|
-| 1 | Background results in one-shot mode | `agent -m` cancels running children at exit; results lost | `ask` waits for them and runs each report as a follow-up turn | Otherwise background `spawn` would do nothing useful until the layer 10 chat. Chosen with the user (option A) | Layer 10 chat delivers them as they finish |
+| 1 | Background results in one-shot mode | `agent -m` cancels running children at exit; results lost | `ask` waits for them and runs each report as a follow-up turn | Otherwise background `spawn` would do nothing useful until the layer 10 chat. Chosen with the user (option A) | Layer 10 chat delivers them as they finish *(done)* |
 | 2 | Iteration limit | 200 (`max_tool_iterations`), for the main agent and children | 20, for both | NanoClaw's limit since layer 2. Chosen with the user: keep 20 for now | To be updated later |
 | 3 | A report arriving **during** a main turn | Added to that running turn (mid-turn injection, `loop.py:1095`) | Waits until the turn has finished, then becomes its own follow-up turn | NanoClaw has no mid-turn injection (layer 2 skipped it) | Phase 2: Mid-turn injections |
 | 4 | How the report travels | `InboundMessage` on the message bus (channel `system`, sender `subagent`) | `SubagentResult` on the manager's `results` queue, read by the loop | NanoClaw has no bus | Phase 2: Message bus + channels |
@@ -129,7 +130,7 @@ Everything else matches nanobot (checked by running both; see below).
 | Compaction during a child's run | `consolidate_history`, `consolidate_provider_compaction` (`:450`) | Summarizes a child's own messages if its run outgrows the context window (session key `subagent:<id>`, not saved) | **Phase 2: Context governance** (with mid-turn compaction) |
 | Project-folder scope | `workspace_scope`, `bind_workspace_scope` | Runs the child in the main agent's project folder, with workspace restriction | **Layer 9** (restriction) / **Phase 2: Separate project folder** |
 | Shared background shell sessions | `ExecSessionManager`, `exec_session` tools | Long-running shell sessions shared by children; closed with them | **Phase 2** (with background `exec`) |
-| Stop commands | `cancel_by_session` called by `/stop`; `aclose()` | Cancel a conversation's children. NanoClaw has `cancel_by_session()` and `close()`, with no command yet | **Layer 10** (chat commands) |
+| Stop commands | `cancel_by_session` called by `/stop`; `aclose()` | Cancel a conversation's children. NanoClaw has `cancel_by_session()` and `close()` | **Done in layer 10**: `/stop` and `/new` in `nanoclaw chat` |
 | Usage attribution | `llm_usage_source` | Counts a child's tokens under the conversation that started it | **Phase 2: Usage accounting** |
 | Provider conversation state for reports | `_SUBAGENT_PROVIDER_TASK_META`, `provider_state` | Adds the report to server-side conversation state | **Phase 2: Provider conversation state** |
 | Old constructor arguments | `provider=`/`model=`, `set_provider()` | Deprecated compatibility paths | Not needed |

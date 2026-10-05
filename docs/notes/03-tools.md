@@ -36,7 +36,8 @@ About 1,420 lines (including `agent/tool_results.py`), versus about 4,170 in the
 
 `nanoclaw ask` now gets all seven tools, working in `--workspace`
 (default `~/.nanoclaw/workspace`, like nanobot's `~/.nanobot/workspace`), and
-prints `[tools used: ...]` to stderr.
+prints `[tools used: ...]` to stderr *(since layer 10: progress lines such as
+`↳ $ ls`, as in nanobot's `agent -m`)*.
 
 ## Parameter checking
 

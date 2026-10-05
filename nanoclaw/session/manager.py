@@ -25,6 +25,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from nanoclaw.runtime_context import public_history_message
 from nanoclaw.session.summary import HIDDEN_HISTORY_META, SUMMARY_CONTINUATION_TEXT, is_summary_checkpoint
 from nanoclaw.utils.tokens import estimate_message_tokens
 
@@ -132,14 +133,15 @@ class Session:
         }
         self.last_archived = boundary
 
-    def get_history(self, *, max_tokens: int = 0) -> list[dict[str, Any]]:
+    def get_history(self, *, max_tokens: int = 0, include_runtime_context: bool = True) -> list[dict[str, Any]]:
         """The messages to replay to the model, in OpenAI chat format.
 
         Starts after the last summary and at the first user message (never
         mid-turn), drops tool results whose call is missing, skips empty
         assistant messages and the summary marker, and keeps only the keys the
         model needs. A positive ``max_tokens`` keeps only the most recent
-        messages that fit.
+        messages that fit. ``include_runtime_context=False`` removes the
+        appended runtime context (the time block), as shown to the user.
         """
         sliced = self.messages[self.last_archived:]
         for i, message in enumerate(sliced):
@@ -152,6 +154,8 @@ class Session:
         for message in sliced:
             if message.get("_command") or is_summary_checkpoint(message):
                 continue
+            if not include_runtime_context:
+                message = public_history_message(message)
             role = message.get("role")
             content = message.get("content", "")
             if role == "assistant" and isinstance(content, str):

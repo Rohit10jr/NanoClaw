@@ -1,4 +1,4 @@
-"""Command-line entry point. Grows into a terminal chat in layer 10."""
+"""Command-line entry point: ``nanoclaw chat`` (interactive), ``nanoclaw ask`` (one message), and the rest."""
 
 from __future__ import annotations
 
@@ -62,6 +62,15 @@ def _make_loop(provider: LLMProvider, workspace: Path, *, restrict: bool = False
     )
 
 
+async def _print_progress_to_stderr(content: str, *, tool_hint: bool = False, **_: object) -> None:
+    """Progress lines for ``ask``, on stderr so stdout holds only the reply.
+
+    nanobot's ``agent -m`` prints the same "↳" lines (cli/agent.py:199).
+    """
+    if content.strip():
+        print(f"  ↳ {content}", file=sys.stderr)
+
+
 async def _ask(
     provider: LLMProvider, prompt: str, workspace: Path, session_key: str, new: bool, restrict: bool = False
 ) -> int:
@@ -70,12 +79,12 @@ async def _ask(
         await loop.new_session(session_key)
     try:
         try:
-            result = await loop.process_direct(prompt, session_key=session_key, channel=CHANNEL)
+            result = await loop.process_direct(
+                prompt, session_key=session_key, channel=CHANNEL, on_progress=_print_progress_to_stderr
+            )
         except ContextWindowExceededError as exc:
             print(f"Error: {exc}", file=sys.stderr)
             return 1
-        if result.tools_used:
-            print(f"[tools used: {', '.join(result.tools_used)}]", file=sys.stderr)
         status = 0
         if result.stop_reason == "error":
             print(result.final_content, file=sys.stderr)
@@ -92,26 +101,58 @@ async def _deliver_subagent_results(loop: AgentLoop) -> int:
     """Wait for background subagents and let the main agent report each result.
 
     nanobot's one-shot ``agent -m`` cancels them at exit and loses their
-    results; its chat and server modes deliver them as they finish. ``ask``
-    waits instead, so a background spawn is useful before the layer 10 chat.
+    results; its chat and server modes deliver them as they finish (as
+    ``nanoclaw chat`` does). ``ask`` waits instead, so a background spawn is
+    still useful in one-shot use.
     """
     status = 0
     while (report := await loop.next_subagent_result()) is not None:
         print(f"[subagent '{report.label}' finished]", file=sys.stderr)
         try:
-            result = await loop.process_subagent_result(report)
+            result = await loop.process_subagent_result(report, on_progress=_print_progress_to_stderr)
         except ContextWindowExceededError as exc:
             print(f"Error: {exc}", file=sys.stderr)
             status = 1
             continue
-        if result.tools_used:
-            print(f"[tools used: {', '.join(result.tools_used)}]", file=sys.stderr)
         if result.stop_reason == "error":
             print(result.final_content, file=sys.stderr)
             status = 1
         elif result.final_content and result.final_content.strip():
             print(result.final_content)
     return status
+
+
+async def _chat(
+    provider: LLMProvider, workspace: Path, session_key: str, restrict: bool, markdown: bool
+) -> int:
+    """The interactive chat (nanobot ``agent`` in classic mode)."""
+    from nanoclaw.cli.chat import Chat, install_exit_signal_handlers
+    from nanoclaw.cli.terminal import PromptInput, make_console, print_above_prompt, stdin_is_interactive
+
+    console = make_console()
+    loop = _make_loop(provider, workspace, restrict=restrict)
+    if stdin_is_interactive():
+        read_input, print_async = PromptInput(), print_above_prompt
+    else:
+        # Piped input (scripts, tests): plain lines, no prompt_toolkit.
+        async def read_input() -> str:
+            line = await asyncio.to_thread(sys.stdin.readline)
+            if not line:
+                raise EOFError
+            return line.rstrip("\n")
+
+        from nanoclaw.cli.chat import _print_directly as print_async
+    install_exit_signal_handlers(console)
+    chat = Chat(
+        loop,
+        session_key=session_key,
+        console=console,
+        read_input=read_input,
+        render_markdown=markdown,
+        print_async=print_async,
+    )
+    await chat.run()
+    return 0
 
 
 async def _compact(provider: LLMProvider, workspace: Path, session_key: str) -> int:
@@ -151,7 +192,20 @@ def main(argv: list[str] | None = None, provider: LLMProvider | None = None) -> 
     commands = parser.add_subparsers(dest="command")
 
     workspace_help = "directory the agent works in (default: ~/.nanoclaw/workspace)"
-    ask = commands.add_parser("ask", help="send a message; the conversation continues across calls")
+    chat = commands.add_parser("chat", help="chat with the agent in the terminal (type exit or press Ctrl+C to quit)")
+    chat.add_argument(
+        "-s", "--session", default=DEFAULT_SESSION, help=f"conversation to continue (default: {DEFAULT_SESSION})"
+    )
+    chat.add_argument("-w", "--workspace", type=Path, default=DEFAULT_WORKSPACE, help=workspace_help)
+    chat.add_argument(
+        "--restrict",
+        action="store_true",
+        help="keep file tools and shell commands inside the workspace (also NANOCLAW_RESTRICT_TO_WORKSPACE=1)",
+    )
+    chat.add_argument(
+        "--markdown", action=argparse.BooleanOptionalAction, default=True, help="render replies as Markdown (default: on)"
+    )
+    ask = commands.add_parser("ask", help="send one message and exit; the conversation continues across calls")
     ask.add_argument("prompt")
     ask.add_argument(
         "-s", "--session", default=DEFAULT_SESSION, help=f"conversation to continue (default: {DEFAULT_SESSION})"
@@ -178,6 +232,12 @@ def main(argv: list[str] | None = None, provider: LLMProvider | None = None) -> 
     args = parser.parse_args(argv)
     # Trusted private ranges web_fetch may reach (nanobot tools.ssrfWhitelist).
     configure_ssrf_whitelist_from_env()
+    if args.command == "chat":
+        workspace = _prepare_workspace(args.workspace)
+        restrict = args.restrict or _restrict_from_env()
+        return asyncio.run(
+            _chat(provider or provider_from_env(), workspace, args.session, restrict, args.markdown)
+        )
     if args.command == "ask":
         workspace = _prepare_workspace(args.workspace)
         restrict = args.restrict or _restrict_from_env()

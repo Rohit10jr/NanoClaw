@@ -24,6 +24,7 @@ the original project NanoClaw is based on.
 | 3 | A saved oversized tool result can point the model to stale content when a tool-call ID repeats in a session | Mechanism confirmed; real-world trigger not yet confirmed | Low–medium | Fixed with the suggested fix (content-hash file names) |
 | 4 | Compaction usually falls back to a raw dump: the model is only asked for a summary when the request overflows by less than ~600 tokens | Confirmed | Medium | Same as nanobot (kept faithful; fix not applied yet) |
 | 5 | When a **repeated** subagent report triggers compaction, the summary marker is placed one message too early, so an already-summarized message is replayed again | Confirmed (only for a report delivered twice) | Low | Correct in NanoClaw (layer 8, difference #8) |
+| 6 | Terminal progress lines are printed as rich markup: a shell command containing `[/x]` **aborts the turn** in `nanobot agent -m`; `[red]`, `[a-z]` etc. silently disappear from the displayed line | Confirmed | Medium | Fixed in NanoClaw (text escaped; layer 10) |
 
 ---
 
@@ -376,6 +377,56 @@ caller effectively does for user turns), or subtract 1 only when
 len(session.messages)` before saving the report and inserts the marker there.
 Regression test: `test_compacting_on_a_duplicate_report_keeps_the_summary_boundary_right`
 in `tests/test_subagents.py` (using nanobot's formula makes it fail).
+
+---
+
+## 6. Progress lines are printed as rich markup
+
+**Where:** `nanobot/cli/terminal.py`, `_print_cli_progress_line` (line 276) and
+`_print_interactive_line`:
+
+```python
+target.print(f"  [dim]↳ {text}[/dim]")
+```
+
+**Problem:** `text` is the model's text before a tool call, or a tool hint such
+as `$ echo "[/x]"`. rich reads square brackets as markup, so:
+
+- a closing tag that matches nothing (`[/x]`, `[/]`) raises `rich.errors.MarkupError`;
+- a valid tag (`[red]`, `[bold]`) or a style-like word (`[a-z]`, `[it]`) is
+  silently removed from what the user sees (`$ grep -E "[a-z]+" f` is shown as
+  `$ grep -E "+" f`).
+
+In one-shot mode (`nanobot agent -m`) the progress callback runs inside the
+agent turn, so the exception **aborts the turn**: the tool never runs, there is
+no reply, and only the user's message is saved. Square brackets are common in
+shell commands (regex classes, `[[ … ]]` tests, array indexes, JSON), so this is
+easy to hit.
+
+**Reproduction** (nanobot `d3d70f2`; the second part uses a scripted model):
+
+```python
+from nanobot.cli import terminal as t
+t._print_cli_progress_line('$ echo "[/x]"', None, None)
+# rich.errors.MarkupError: closing tag '[/x]' at position 17 doesn't match any open tag
+
+# A turn whose model calls exec with command 'echo "[/x]"', with
+# on_progress=lambda c, **k: t._print_cli_progress_line(c, None, None)
+# (what `nanobot agent -m` passes):
+#   AgentLoop.process_direct(...) raises MarkupError; saved session: [user "go"] only
+```
+
+**Suggested fix:** escape the text: `from rich.markup import escape`, then
+`f"  [dim]↳ {escape(text)}[/dim]"` (also in `_print_interactive_line` and the
+reasoning printer). Regression test: a progress line with `[/x]`, `[red]` and
+`[a-z]` prints them literally.
+
+**NanoClaw:** fixed this way (`nanoclaw/cli/terminal.py`,
+`progress_line_markup`); tests `test_progress_text_is_not_treated_as_markup`
+in `tests/test_chat.py` (removing the escape makes it fail). Not checked: the
+same pattern in nanobot's interactive classic chat, where the line is printed
+from the outbound-consumer task; that task only catches `TimeoutError` and
+`CancelledError`, so the error would likely end it, but this wasn't run.
 
 ---
 

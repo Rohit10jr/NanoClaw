@@ -35,7 +35,7 @@ with a note in [`notes/`](notes/).
 | 7 | Skills | Markdown procedures loaded on demand | `agent/skills.py`, `skills/` | `nanoclaw/agent/skills.py`, `nanoclaw/skills/` | ✅ done |
 | 8 | Subagents | Hand a task to a child agent | `agent/subagent.py`, `agent/tools/spawn.py`, `agent/tools/context.py` | `nanoclaw/agent/subagent.py`, `nanoclaw/agent/tools/spawn.py` | ✅ done |
 | 9 | Safety | Keep tools inside the workspace; block private-network addresses | `security/workspace_policy.py`, `security/network.py`, `agent/tools/execution.py` (violations), `agent/tools/shell.py` (guard) | `nanoclaw/security/`, `nanoclaw/agent/tools/violations.py` | ✅ done |
-| 10 | Terminal chat | Interactive REPL using everything above | `cli/agent.py`, `cli/commands.py` | `nanoclaw/cli.py` | ⏭ next |
+| 10 | Terminal chat | Interactive chat using everything above | `cli/agent.py` (classic), `cli/terminal.py`, `cli/stream.py`, `command/builtin.py`, `utils/tool_hints.py` | `nanoclaw/cli/`, `nanoclaw/utils/tool_hints.py` | ✅ done |
 
 ### Layer details
 
@@ -151,10 +151,21 @@ restricted only); settings come from environment variables and `--restrict`.
 *Deferred (see phase 2):* OS sandbox, allow patterns, extra allowed folders,
 configured fetch proxy, Web UI loopback access, MCP SSRF checks.
 
-**10 — Terminal chat.** `nanoclaw chat`: REPL with session resume, `/new`,
-`/exit`, showing tool calls as they happen. `nanoclaw ask` stays for one-shot
-use. Background subagent reports appear as they finish; `/stop` cancels a
-conversation's subagents (`cancel_by_session`, built in layer 8).
+**10 — Terminal chat.** `nanoclaw chat`: nanobot's classic chat (prompt_toolkit
+input with saved history, rich Markdown replies, a "thinking" spinner, `↳`
+progress lines with tool hints) and the slash commands NanoClaw has (`/new`,
+`/compact`, `/stop`, `/status`, `/history`, `/dream`, `/skill`, `/help`, with
+nanobot's unknown-command suggestions). Background subagent results appear as
+they finish. `nanoclaw ask` stays for one-shot use and now shows progress lines
+on stderr. See `notes/10-terminal-chat.md`.
+**Decisions:** prompt_toolkit + rich; Ctrl+C during a turn ends the chat (as
+nanobot); `nanoclaw` name without emoji; streaming in phase 2.
+**Found:** progress lines are printed as markup in nanobot, so `[/x]` in a
+command aborts the turn (`UPSTREAM_BUGS.md`, bug 6; fixed in NanoClaw).
+*Deferred (see phase 2):* native full-screen app, streaming, reasoning display,
+the other 9 commands, cancelling a running turn.
+
+**Phase 1 is complete.** Next: the phase 2 review below.
 
 ## Phase 2 — review production features
 
@@ -170,13 +181,15 @@ NanoClaw needs it, and build only the ones we pick.
 | Mid-turn injections | runner `injection_callback` | Fold new user messages into a running turn; also **subagent reports that arrive during a turn** (NanoClaw runs them after the turn; layer 8 difference #3) |
 | Context governance | `agent/context_governance.py` | Keep requests within the context window: token budgets, tool-result budgets, and **compaction in the middle of a turn** (between tool calls), including **inside a subagent's run** (deferred from layer 8). Already ported: the adjacent-user-message merge (layer 5) and compaction before a turn (layer 6) |
 | Provider retries | `providers/base.py` `chat_with_retry` | Rate limits, flaky gateways |
-| Streaming | `chat_stream`, `cli/stream.py` | Replies appear word by word |
+| Streaming | `chat_stream`, `cli/stream.py`, `IncrementalThinkExtractor` | Replies appear word by word; also showing the model's reasoning. Changes the provider and runner and needs hooks (why it was deferred from layer 10: `notes/10-terminal-chat.md`) |
 | Model presets + fallback | `agent/model_presets.py`, `providers/fallback_provider.py` | Named model setups, backup models; also the **Dream model override** (run Dream on another model; deferred from layer 6) |
 | Anthropic adapter | `providers/anthropic_provider.py` | Non-OpenAI wire format |
 | MCP | `agent/tools/mcp.py` | Tools from external MCP servers |
 | Cron + heartbeat | `cron/`, `agent/tools/cron.py`, `templates/HEARTBEAT.md` | Scheduled and proactive tasks, including **Dream every 2 hours** (`cli/gateway_runtime.py`, `DreamConfig`; deferred from layer 6, where Dream is the manual `nanoclaw dream`) |
 | Usage accounting | `llm_usage/` | Token and cost tracking (including a subagent's tokens counted under the conversation that started it; deferred from layer 8) |
-| Web UI / TUI | `webui/`, `tui/` | Browser and full-screen terminal interfaces |
+| Web UI / TUI | `webui/`, `tui/`, `cli/tui_launcher.py` | Browser and full-screen terminal interfaces (nanobot's default chat; NanoClaw has the classic one, layer 10) |
+| More chat commands | `command/builtin.py` | `/restart`, `/model`, `/goal`, `/trigger`, `/dream-log`, `/dream-restore`, `/dream-prompt`, `/evaluator-prompt`, `/pairing`, `!shell` — each with the feature it needs (deferred from layer 10) |
+| Cancelling a running turn | `_cancel_active_tasks`, `/stop` | Stop the agent mid-turn without leaving the chat (deferred from layer 10) |
 | Memory history (git) | `utils/gitstore.py`, `/dream-log`, `/dream-restore` | Commits `SOUL.md`/`USER.md`/`MEMORY.md` after each Dream so changes can be viewed and undone (deferred from layer 6) |
 | Provider conversation state | `providers/conversation_state.py`, `summarize_provider_compaction` | Server-side conversation state (e.g. OpenAI Responses API), including **provider-native compaction** (deferred from layer 6) and adding subagent reports to it (deferred from layer 8) |
 | Prompt overrides | `utils/workspace_prompts.py`, `templates/prompts/`, `/dream-prompt` | Replace Dream's (and the heartbeat's) instructions with a file in the workspace (deferred from layer 6) |

@@ -28,7 +28,7 @@ from nanoclaw.agent.context import ContextBuilder
 from nanoclaw.agent.context_governance import merge_adjacent_user_messages_for_model
 from nanoclaw.agent.memory import Consolidator, MemoryStore
 from nanoclaw.agent.messages import EMPTY_FINAL_RESPONSE_MESSAGE, is_blank
-from nanoclaw.agent.runner import AgentRunner, AgentRunResult, AgentRunSpec
+from nanoclaw.agent.runner import AgentRunner, AgentRunResult, AgentRunSpec, ProgressCallback
 from nanoclaw.agent.subagent import SUBAGENT_RESULT_EVENT, SubagentManager, SubagentResult
 from nanoclaw.agent.tools import ToolRegistry, build_default_tools
 from nanoclaw.agent.tools.context import RequestContext, bind_request_context, reset_request_context
@@ -59,6 +59,7 @@ CONTEXT_SAFETY_BUFFER = 1024
 # nanobot's default is 200,000; NanoClaw's default model, gpt-4o-mini, has 128,000.
 DEFAULT_CONTEXT_WINDOW_TOKENS = 128_000
 DEFAULT_SESSION_KEY = "cli:direct"
+LAST_USAGE_KEY = "_last_usage"
 
 
 class ContextWindowExceededError(RuntimeError):
@@ -121,6 +122,7 @@ class AgentLoop:
             self.memory, self.sessions, self.context.build_messages, self.tools.get_definitions
         )
         self.runner = AgentRunner()
+        self.start_time = time.time()
         self._session_locks: dict[str, asyncio.Lock] = {}
 
     @property
@@ -141,19 +143,25 @@ class AgentLoop:
         *,
         ephemeral: bool = False,
         tools: ToolRegistry | None = None,
+        on_progress: ProgressCallback | None = None,
     ) -> AgentRunResult:
         """Run one turn in the session and return the result.
 
         Turns in the same session run one at a time. An ``ephemeral`` turn
         starts from an empty session and saves nothing (used by Dream); ``tools``
-        replaces the default tool set for this turn.
+        replaces the default tool set for this turn. ``on_progress`` receives
+        the model's text and tool hints while the turn works (nanobot ``on_progress``).
         """
-        result = await self._process_turn(content, session_key, channel, ephemeral=ephemeral, tools=tools)
+        result = await self._process_turn(
+            content, session_key, channel, ephemeral=ephemeral, tools=tools, on_progress=on_progress
+        )
         if is_blank(result.final_content):
             result = dataclasses.replace(result, final_content=EMPTY_FINAL_RESPONSE_MESSAGE)
         return result
 
-    async def process_subagent_result(self, report: SubagentResult) -> AgentRunResult:
+    async def process_subagent_result(
+        self, report: SubagentResult, *, on_progress: ProgressCallback | None = None
+    ) -> AgentRunResult:
         """Let the main agent react to a finished background subagent.
 
         Mirrors nanobot's system turn for a subagent result (``_build_turn``
@@ -162,7 +170,11 @@ class AgentLoop:
         block. The model's reply is what the user sees.
         """
         return await self._process_turn(
-            report.content, report.session_key or DEFAULT_SESSION_KEY, report.channel, subagent=report
+            report.content,
+            report.session_key or DEFAULT_SESSION_KEY,
+            report.channel,
+            subagent=report,
+            on_progress=on_progress,
         )
 
     async def next_subagent_result(self) -> SubagentResult | None:
@@ -192,6 +204,7 @@ class AgentLoop:
         ephemeral: bool = False,
         tools: ToolRegistry | None = None,
         subagent: SubagentResult | None = None,
+        on_progress: ProgressCallback | None = None,
     ) -> AgentRunResult:
         tools = tools if tools is not None else self.tools
         # Children follow the loop's current iteration limit (nanobot
@@ -249,6 +262,7 @@ class AgentLoop:
                         max_tokens=self.max_tokens,
                         temperature=self.temperature,
                         session_key=session.key,
+                        on_progress=on_progress,
                     )
                 )
             finally:
@@ -260,6 +274,13 @@ class AgentLoop:
                 if checkpoint is not None:
                     session.commit_summary_checkpoint(checkpoint, insert_at=boundary)
                 skip = len(messages) if persisted_early else len(messages) - 1
+                # Token use of the last turn, for /status (nanobot ``_last_usage``).
+                if result.usage is not None:
+                    session.metadata[LAST_USAGE_KEY] = {
+                        "input_tokens": result.usage.input_tokens,
+                        "output_tokens": result.usage.output_tokens,
+                        "total_tokens": result.usage.total_tokens,
+                    }
                 self._save_turn(session, result.messages, skip)
                 session.metadata.pop(PENDING_USER_TURN_KEY, None)
                 self.sessions.save(session)

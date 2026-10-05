@@ -9,6 +9,7 @@ Its caller builds ``initial_messages`` and decides what to do with the result.
 from __future__ import annotations
 
 import copy
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,11 @@ from nanoclaw.agent.tools import ToolRegistry, is_tool_error
 from nanoclaw.agent.tools.registry import with_retry_hint
 from nanoclaw.agent.tools.violations import classify_violation
 from nanoclaw.providers import LLMProvider, LLMResponse, LLMUsage, ToolCallRequest
+from nanoclaw.utils.tool_hints import format_tool_hints
+
+# Called as on_progress(text) for the model's text before tool calls, and
+# on_progress(hint, tool_hint=True) with the tool hints (nanobot's progress events).
+ProgressCallback = Callable[..., Awaitable[None]]
 
 # After this many empty replies in a row, ask once more with tools off.
 _MAX_EMPTY_RETRIES = 2
@@ -61,6 +67,8 @@ class AgentRunSpec:
     finalize_on_max_iterations: bool = True
     # Replaces the default out-of-iterations message ({max_iterations} is filled in).
     max_iterations_message: str | None = None
+    # Progress reports while the run works (nanobot ``on_progress``); see ProgressCallback.
+    on_progress: ProgressCallback | None = None
 
 
 @dataclass
@@ -108,6 +116,8 @@ class AgentRunner:
 
             # 1. The model wants tools: run them and go round again.
             if response.should_execute_tools:
+                if spec.on_progress is not None:
+                    await self._report_progress(spec.on_progress, response)
                 messages.append(
                     build_assistant_message(
                         response.content,
@@ -177,6 +187,18 @@ class AgentRunner:
         usage = _add_usage(usage, finalize_usage)
         messages.append(build_assistant_message(final))
         return AgentRunResult(final, messages, tools_used, usage, "max_iterations")
+
+    @staticmethod
+    async def _report_progress(on_progress: ProgressCallback, response: LLMResponse) -> None:
+        """The model's text, then the tool hints, before the tools run.
+
+        (nanobot ``AgentProgressHook.before_execute_tools``, without streaming)
+        """
+        thought = strip_think(response.content) if response.content else None
+        if thought:
+            await on_progress(thought)
+        hint = strip_think(format_tool_hints(response.tool_calls))
+        await on_progress(hint or "", tool_hint=True)
 
     async def _request(
         self,

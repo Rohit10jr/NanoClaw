@@ -6,9 +6,10 @@ A minimal personal AI agent, rebuilt layer by layer to understand how
 nanobot is a framework plus agent of about 130k lines, most of it chat-app
 integrations, a web UI and many model providers. NanoClaw rebuilds only the
 **agent core**: the loop, provider interface, tools, context, sessions, memory,
-skills and subagents. It keeps nanobot's concepts and class names, so the two
-codebases can be read side by side, and leaves the production features
-(multi-channel routing, hooks, plugins, recovery, governance) for later.
+skills, subagents, safety guards and a terminal chat. It keeps nanobot's
+concepts and class names, so the two codebases can be read side by side, and
+leaves the production features (multi-channel routing, hooks, plugins,
+recovery, governance) for later.
 
 ## Status
 
@@ -24,7 +25,10 @@ codebases can be read side by side, and leaves the production features
 | 7 | Skills | done |
 | 8 | Subagents | done |
 | 9 | Safety (workspace limits, shell guards) | done |
-| 10 | Terminal chat (CLI) | planned |
+| 10 | Terminal chat (CLI) | done |
+
+Phase 1 (the core agent) is complete; phase 2 reviews nanobot's production
+features.
 
 - [`docs/ROADMAP.md`](docs/ROADMAP.md): every layer in build order, plus the
   production features we'll review afterwards.
@@ -52,6 +56,7 @@ Groq, Ollama, vLLM, ...):
 export NANOCLAW_API_KEY=sk-...
 export NANOCLAW_MODEL=gpt-4o-mini                  # default
 export NANOCLAW_API_BASE=https://openrouter.ai/api/v1   # omit for OpenAI
+uv run nanoclaw chat                      # chat in the terminal (type exit or Ctrl+C to quit)
 uv run nanoclaw ask "My name is Rohit"
 uv run nanoclaw ask "What's my name?"     # the conversation continues
 uv run nanoclaw ask --new "hello"         # forget it and start over
@@ -61,6 +66,10 @@ uv run nanoclaw prompt        # show the system prompt (no key needed)
 Conversations are saved in `~/.nanoclaw/sessions/`, outside the workspace, so
 the agent's file tools can't edit them. Use `--session NAME` to keep several
 separate conversations (default `cli:direct`).
+
+In the chat, slash commands: `/new` (start over), `/compact`, `/stop` (cancel
+background subagents), `/status`, `/history [n]`, `/dream`, `/skill`, `/help`.
+While the agent works you see what it does (`↳ $ ls`, `↳ read notes.txt`).
 
 Memory, as in nanobot:
 
