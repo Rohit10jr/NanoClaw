@@ -23,6 +23,7 @@ the original project NanoClaw is based on.
 | 2 | The configured timezone has no effect: no current date/time reaches the model, although the docs say it does | Confirmed | Medium | Added a current-time block (layer 4) |
 | 3 | A saved oversized tool result can point the model to stale content when a tool-call ID repeats in a session | Mechanism confirmed; real-world trigger not yet confirmed | Low–medium | Fixed with the suggested fix (content-hash file names) |
 | 4 | Compaction usually falls back to a raw dump: the model is only asked for a summary when the request overflows by less than ~600 tokens | Confirmed | Medium | Same as nanobot (kept faithful; fix not applied yet) |
+| 5 | When a **repeated** subagent report triggers compaction, the summary marker is placed one message too early, so an already-summarized message is replayed again | Confirmed (only for a report delivered twice) | Low | Correct in NanoClaw (layer 8, difference #8) |
 
 ---
 
@@ -319,6 +320,62 @@ overflows of 1, 300 and 3,000 tokens; see `docs/notes/06-memory.md`, "The raw
 fallback"). The fix is not applied; deciding on one is open. The test
 `test_large_overflow_gets_a_raw_checkpoint_like_nanobot` in
 `tests/test_compaction.py` documents the current behaviour.
+
+---
+
+## 5. Summary marker one message too early on a repeated subagent report
+
+**Where:** `nanobot/agent/loop.py`:
+
+```python
+# _build_turn, line 2088: set for every subagent turn, also when the report
+# was a duplicate and _persist_subagent_followup() saved nothing
+ctx.input_persisted_early = True
+
+# _save_turn, line 2357: assumes the last saved row is this turn's input
+insert_at = len(session.messages) - (1 if input_persisted_early else 0)
+```
+
+**Problem:** `_persist_subagent_followup` (line 2454) skips a report whose
+`subagent_task_id` is already saved, but the turn still runs (and may
+compact). When it compacts, `_save_turn` places the summary marker one row
+before the end, assuming that row is this turn's input. For a duplicate it is
+not: it is the previous turn's last reply, which **was** included in the
+summary. That reply stays after the marker, so every later turn sends it again
+next to the summary that already contains it, and `last_archived` is one too low.
+
+**Reproduction** (scripted model, empty tool registry, as in
+`docs/notes/08-subagents.md`, "Second review"):
+
+1. Two long user turns, then a subagent report (task `abcd1234`) processed as
+   a system turn; the model replies `first-reply`.
+2. Reopen with a context window that the next request overflows by ~200 tokens.
+3. Deliver the **same** report again (same `subagent_task_id`).
+
+Saved session afterwards:
+
+```
+... ok2, [Subagent report], <summary marker>, first-reply, Fine.    ← nanobot (last_archived 5)
+... ok2, [Subagent report], first-reply, <summary marker>, Fine.    ← expected (last_archived 6)
+```
+
+The next user turn's request in nanobot contains `first-reply` after the
+`[Archived Context Summary]`, although the summary request already covered it.
+
+**Severity:** low. It needs a report delivered twice (which the
+deduplication exists for, e.g. a redelivered report after a crash or one
+already injected into a running turn) **and** compaction in that same turn.
+Effect: one duplicated message in context.
+
+**Suggested fix:** record the history boundary before the follow-up is
+persisted and use it for `insert_at` (as `_persist_user_message_early`'s
+caller effectively does for user turns), or subtract 1 only when
+`_persist_subagent_followup` returned `True`.
+
+**NanoClaw:** correct. `AgentLoop._process_turn` records `boundary =
+len(session.messages)` before saving the report and inserts the marker there.
+Regression test: `test_compacting_on_a_duplicate_report_keeps_the_summary_boundary_right`
+in `tests/test_subagents.py` (using nanobot's formula makes it fail).
 
 ---
 

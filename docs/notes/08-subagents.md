@@ -60,7 +60,7 @@ Later turns replay the report as an assistant message.
 | Messages | System prompt + the task as the user message (no time block, no conversation history) | `:434` |
 | Tools | The standard 7: `read_file`, `write_file`, `edit_file`, `list_dir`, `exec`, `web_fetch`, `web_search`. **No `spawn`**, so no subagents inside subagents | `_build_tools` (`:227`, scope `subagent`) |
 | Model settings | The main agent's model, max tokens and temperature; `temperature` in the `spawn` call overrides it | `with_generation_overrides` |
-| Iteration limit | Same as the main agent (20 in NanoClaw; see differences). When it runs out there is **no extra summary request**; the result is `Task completed but no final response was generated.` | `finalize_on_max_iterations=False`, `max_iterations_message` (`:471`) |
+| Iteration limit | Same as the main agent (20 in NanoClaw; see differences), re-read at the start of every turn so a changed limit applies (nanobot `_sync_subagent_runtime_limits`, `loop.py:517`). When it runs out there is **no extra summary request**; the result is `Task completed but no final response was generated.` | `finalize_on_max_iterations=False`, `max_iterations_message` (`:471`) |
 | Results | Model error: the error text (`Sorry, I encountered an error calling the AI model.`), marked as an error. Exception: `Error: <message>`. Empty: `Task completed but no final response was generated.` | `:491`, `:510` |
 | Large tool results | Saved in the conversation's tool-results folder, as for the main agent | `session_key` passed to the runner |
 | Running at once | At most **4**; the others wait (`queued` → `initializing` → `done`/`error`) | `asyncio.Semaphore`, `max_concurrent_subagents` (`config/schema.py:131`) |
@@ -115,6 +115,8 @@ returns.
 | 4 | How the report travels | `InboundMessage` on the message bus (channel `system`, sender `subagent`) | `SubagentResult` on the manager's `results` queue, read by the loop | NanoClaw has no bus | Phase 2: Message bus + channels |
 | 5 | Child tools | Also `apply_patch`, `rg`, `exec_session`, `list_exec_sessions`, `run_cli_app` | The 7 tools NanoClaw has | Those tools aren't ported (layer 3) | With those tools |
 | 6 | Line in the child prompt | Also "Tools like 'read_file' and 'web_fetch' can return native image content…" | Not included | The same image line left out in layer 4 (NanoClaw's tools don't return images) | — |
+| 7 | Several `spawn` calls in one model reply | Run at the same time (`spawn` is `concurrency_safe`, and the main loop runs such tools in parallel) | Run one after another | NanoClaw's runner runs tools one at a time (parallel tools were skipped in layer 2). The results, requests and saved conversation are the same (checked); only the waiting time differs | Phase 2 (parallel tools) |
+| 8 | Compaction on a **repeated** report | The summary marker goes one message too early, so a summarized message is replayed again ([upstream bug 5](../UPSTREAM_BUGS.md#5-summary-marker-one-message-too-early-on-a-repeated-subagent-report)) | Marker after everything that was summarized | Found in the second review; NanoClaw records the boundary before saving the report, so it was already correct. Kept, with a regression test | — |
 
 Everything else matches nanobot (checked by running both; see below).
 
@@ -146,7 +148,7 @@ Everything else matches nanobot (checked by running both; see below).
 
 ## Tests
 
-`tests/test_subagents.py` (22 tests):
+`tests/test_subagents.py` (24 tests):
 
 - the `spawn` schema matches nanobot's, and `spawn` errors outside a turn;
 - the main agent has `spawn`; children and Dream don't;
@@ -155,12 +157,13 @@ Everything else matches nanobot (checked by running both; see below).
 - background: the reply text, the label rules, the report text, the follow-up turn (request, saved rows), replay in later turns, a report saved only once, failures and exceptions, the empty-answer fallback;
 - at most 4 at once (the rest queued); `cancel_by_session` and `close`; waiting for running children;
 - the runner's two new options;
-- `nanoclaw ask` waits for a background child and prints both replies, also after an error.
+- `nanoclaw ask` waits for a background child and prints both replies, also after an error;
+- (second review) children follow a changed iteration limit; compaction on a repeated report puts the summary marker in the right place.
 
 One existing test was updated: the main agent's tool list now includes `spawn`.
 
 Every rule was checked by breaking it on purpose and confirming a test fails
-(45 rules; two tests were added after this check found gaps: `wait=true` sends
+(45 rules, plus 2 from the second review; two tests were added after this check found gaps: `wait=true` sends
 no report, and `spawn` refuses a context without model settings). Two changes
 cannot fail because they change nothing: the fallback texts for a child error
 without error text and for an empty answer. NanoClaw's runner, like nanobot's,
@@ -181,3 +184,31 @@ for the main agent and the children, because they run at the same time):
 
 33 checks, all identical once the differences above are allowed for. No new
 nanobot bugs were found.
+
+### Second review (after the build)
+
+A second pass over nanobot's code, then more side-by-side runs for the paths
+the first comparison didn't cover:
+
+| Check | Result |
+|---|---|
+| Child request's `max_tokens` and temperature (no override) | Identical |
+| A report whose task mentions `$weather` (the skill is loaded into the follow-up turn in both) | Identical request and saved conversation |
+| A child whose tool output is too large: what the child sees, and where the file is saved | Identical |
+| Two `wait=true` spawns in one reply | Identical requests and saved conversation (nanobot runs them at the same time: difference #7) |
+| A report arriving after a crashed turn (the unanswered message gets the error reply first) | Identical request, saved conversation and flag |
+| A report whose turn must compact first: archive request, follow-up request, summary, saved conversation, history journal | Identical (apart from the summary's timestamp) |
+| The same, for a **repeated** report | **Different:** nanobot places the summary marker one message too early, so the next turn replays an already-summarized reply. Recorded as [upstream bug 5](../UPSTREAM_BUGS.md#5-summary-marker-one-message-too-early-on-a-repeated-subagent-report); NanoClaw's placement is correct (difference #8) |
+
+Corrections made:
+
+1. **Iteration limit re-read every turn.** nanobot copies the loop's limit to
+   the subagents before each turn (`_sync_subagent_runtime_limits`); NanoClaw
+   only set it once, so changing `loop.max_iterations` later didn't reach the
+   children. Fixed, with a test.
+2. **Regression test for the repeated-report boundary** (difference #8).
+3. Recorded difference #7 (parallel `spawn` calls), which reading the code
+   showed and the runs confirmed has no effect on the results.
+
+Both new rules were checked by breaking them on purpose (caught).
+

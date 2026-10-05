@@ -428,9 +428,9 @@ Note: [`notes/08-subagents.md`](notes/08-subagents.md)
 |---|---|---|
 | `AgentRunSpec.finalize_on_max_iterations`, `max_iterations_message`; [`_max_iterations_fallback()`](../nanoclaw/agent/runner.py#L280) | [`agent/runner.py:101`][nb-l8-runspec], [`:795`][nb-l8-finalize], [`:1249`][nb-l8-fallback] | Same (`error_message` not needed: same default) |
 | `AgentLoop.__init__`: `self.subagents`, `spawn` in the main tools | `agent/loop.py:392`, tool loader | Same: main agent only |
-| `_process_turn` binds the request context around the run | `_request_context_for_turn` | Simplified |
+| `_process_turn` binds the request context around the run and copies the iteration limit to the subagents | `_request_context_for_turn`, [`_sync_subagent_runtime_limits` :517][nb-l8-sync] | Simplified / Same |
 | [`process_subagent_result()`](../nanoclaw/agent/loop.py#L151) | [`agent/loop.py:2066`][nb-l8-isub] (system turn) | Same request and saved rows (checked); runs after the main turn, not injected into it ([`:1095`][nb-l8-inject], difference #3) |
-| [`_persist_subagent_followup()`](../nanoclaw/agent/loop.py#L416) | [`:2454`][nb-l8-persist] | Same |
+| [`_persist_subagent_followup()`](../nanoclaw/agent/loop.py#L419) | [`:2454`][nb-l8-persist] | Same; the summary boundary is recorded before it, so a repeated report compacts correctly (nanobot: [bug 5](UPSTREAM_BUGS.md#5-summary-marker-one-message-too-early-on-a-repeated-subagent-report)) |
 | [`next_subagent_result()`](../nanoclaw/agent/loop.py#L163) | `bus.consume_inbound` | **New:** reads the report queue, waiting for running children |
 | [`close()`](../nanoclaw/agent/loop.py#L177) | [`aclose()` :1639][nb-l8-aclose] | Simplified: cancels subagents |
 | [`_deliver_subagent_results()`](../nanoclaw/__main__.py#L79) | [`cli/agent.py:190`][nb-l8-cliclose] cancels them | Different: `ask` waits and reports (difference #1) |
@@ -462,7 +462,7 @@ Note: [`notes/08-subagents.md`](notes/08-subagents.md)
 | `tests/test_session.py` | history replay rules, file format, safe file names, atomic save, corrupt lines, cache, storage location, workspace ID |
 | `tests/test_memory.py` | journal, cursors, trimming; Dream prompt and tool limits; raw fallback; archiving with the model; summary checkpoints; token limit in history; prompt sections; token counting |
 | `tests/test_compaction.py` | a compacting turn end to end, the next turn, budgets, raw dump on large overflow, errors, `compact`, ephemeral turns, Dream, CLI commands and settings |
-| `tests/test_subagents.py` | `spawn` schema; main vs child tools; `wait=true` (child request, answer, temperature, errors, out of iterations); child prompt; background reply, report and follow-up turn; replay; saved once; failures; 4 at once; cancel/close; waiting; runner options; `ask` waiting for children |
+| `tests/test_subagents.py` | `spawn` schema; main vs child tools; `wait=true` (child request, answer, temperature, errors, out of iterations); child prompt; background reply, report and follow-up turn; replay; saved once; failures; 4 at once; cancel/close; waiting; runner options; `ask` waiting for children; iteration-limit sync; repeated-report compaction boundary |
 | `tests/test_skills.py` | frontmatter, discovery and precedence, requirements, always-on and `$skill` skills, summary, bundled skills, `read_file` fallback, prompt sections, saved `$skill` turn, Dream's skills access, CLI |
 | `tests/test_loop.py` | two-turn memory, restart, byte-identical replay, tool messages saved and replayed, user message saved before the run, crashed turn closed, interrupted turn, model error, save rules, separate sessions, `--new`, per-session lock, generation settings, CLI options and defaults |
 | `tests/test_context_governance.py` | merging adjacent user messages with the time block kept last; detach/reattach |
@@ -710,6 +710,7 @@ Note: [`notes/08-subagents.md`](notes/08-subagents.md)
 [nb-l8-finalize]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/runner.py#L795
 [nb-l8-fallback]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/runner.py#L1249
 [nb-l8-isub]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/loop.py#L2066
+[nb-l8-sync]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/loop.py#L517
 [nb-l8-persist]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/loop.py#L2454
 [nb-l8-aclose]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/loop.py#L1639
 [nb-l8-inject]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/loop.py#L1095

@@ -189,6 +189,9 @@ class AgentLoop:
         subagent: SubagentResult | None = None,
     ) -> AgentRunResult:
         tools = tools if tools is not None else self.tools
+        # Children follow the loop's current iteration limit (nanobot
+        # _sync_subagent_runtime_limits).
+        self.subagents.max_iterations = self.max_iterations
         async with self._get_session_lock(session_key):
             if ephemeral:
                 session = Session(key=session_key)

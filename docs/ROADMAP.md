@@ -128,7 +128,10 @@ turn (saved as an assistant message, given to the model as new input). At most
 results (nanobot's one-shot mode cancels them); iteration limit stays 20 for
 the main agent and children (nanobot: 200) for now, to be updated later.
 **Differences:** a report arriving during a main turn waits for the next turn
-(no mid-turn injection); a queue instead of the message bus.
+(no mid-turn injection); a queue instead of the message bus; several `spawn`
+calls in one reply run one after another (no parallel tools).
+**Found:** a repeated report that triggers compaction puts nanobot's summary
+marker one message too early (`UPSTREAM_BUGS.md`, bug 5; correct in NanoClaw).
 *Deferred (see phase 2):* live status and logging of children (hooks),
 compaction inside a child's run, project-folder scope, shared background
 shell sessions, usage attribution, stop commands (layer 10).

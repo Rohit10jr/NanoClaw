@@ -460,3 +460,44 @@ def test_cli_ask_reports_subagents_even_after_an_error(capsys, tmp_path):
     out = capsys.readouterr()
     assert "API down" in out.err
     assert out.out == "Report ready.\n"
+
+
+async def test_children_follow_the_loops_current_iteration_limit(ws, tmp_path):
+    loop, provider = make_loop(
+        ws,
+        tmp_path,
+        [call("spawn", {"task": "loop forever", "wait": True}), "gave up"],
+        [call("list_dir", {"path": "."}, f"c{i}") for i in range(5)],
+    )
+    loop.max_iterations = 2  # changed after the loop was created
+    await loop.process_direct("go")
+    assert len(provider.child_calls) == 2
+
+
+async def test_compacting_on_a_duplicate_report_keeps_the_summary_boundary_right(ws, tmp_path):
+    """nanobot puts the summary marker one message too early here (UPSTREAM_BUGS.md, bug 5)."""
+    from nanoclaw.agent.context_governance import merge_adjacent_user_messages_for_model
+    from nanoclaw.session.summary import is_summary_checkpoint
+    from nanoclaw.utils.tokens import estimate_prompt_tokens
+
+    report = SubagentResult("abcd1234", "x", "[Subagent 'x' completed successfully]\n\nResult:\n" + "r " * 300, "ok", "cli:direct", "cli")
+    loop, _ = make_loop(ws, tmp_path, ["ok1", "first-reply"])
+    await loop.process_direct("first " + "word " * 2000)
+    await loop.process_subagent_result(report)
+    session = loop.sessions.get_or_create("cli:direct")
+    history_len = len(session.messages)
+
+    request = loop.context.build_messages(session.get_history(), report.content, channel="cli")
+    full, _ = estimate_prompt_tokens(merge_adjacent_user_messages_for_model(request), loop.tools.get_definitions())
+    small, provider = make_loop(
+        ws, tmp_path, ["Fine."], max_tokens=100, context_window_tokens=full - 200 + 100 + 1024
+    )
+    await small.process_subagent_result(report)  # the same report again: not saved again, but it compacts
+    assert "[Archived Context Summary]" in provider.main_calls[-1].messages[0]["content"]
+
+    session = small.sessions.get_or_create("cli:direct")
+    marker = next(i for i, m in enumerate(session.messages) if is_summary_checkpoint(m))
+    assert marker == history_len  # after everything that was summarized, including "first-reply"
+    history = [m["content"] for m in session.get_history()]
+    assert "first-reply" not in history  # summarized, so not replayed again
+    assert len(history) == 1  # only this turn's reply
