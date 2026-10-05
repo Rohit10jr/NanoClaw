@@ -490,26 +490,27 @@ Note: [`notes/10-terminal-chat.md`](notes/10-terminal-chat.md)
 
 | NanoClaw | nanobot | How it compares |
 |---|---|---|
-| [`Chat`](../nanoclaw/cli/chat.py#L151) | [`cli/agent.py:266`][nb-l10-classic] (classic interactive mode) | Simplified: direct loop calls instead of the message bus; same turns, exit handling and output |
-| ↳ [`banner()`](../nanoclaw/cli/chat.py#L183), [`run()`](../nanoclaw/cli/chat.py#L193), [`turn()`](../nanoclaw/cli/chat.py#L218) | [`:271`][nb-l10-banner], `:384–425` | Same banner, exit words, Ctrl+C/Ctrl+D, spinner and reply |
-| ↳ [`_deliver_subagent_results()`](../nanoclaw/cli/chat.py#L232) | `_consume_outbound` (`agent.py:296`) | Same idea: results printed above the prompt; read from the subagent queue |
-| ↳ [`handle_command()`](../nanoclaw/cli/chat.py#L259) | [`command/router.py`][nb-l10-router] `dispatch` | Same matching (exact, `/history ` prefix, case-insensitive) |
-| ↳ [`cmd_new()`](../nanoclaw/cli/chat.py#L280), [`cmd_compact()`](../nanoclaw/cli/chat.py#L286), [`cmd_stop()`](../nanoclaw/cli/chat.py#L294), [`cmd_status()`](../nanoclaw/cli/chat.py#L299), [`cmd_history()`](../nanoclaw/cli/chat.py#L321), [`cmd_dream()`](../nanoclaw/cli/chat.py#L338), [`cmd_skill()`](../nanoclaw/cli/chat.py#L346), [`cmd_help()`](../nanoclaw/cli/chat.py#L358) | [`cmd_new` :314][nb-l10-new], [`cmd_compact` :349][nb-l10-compact] (+ [events][nb-l10-compactevt]), [`cmd_stop` :214][nb-l10-stop], [`cmd_status` :267][nb-l10-status], [`cmd_history` :869][nb-l10-history], [`cmd_dream` :453][nb-l10-dream], [`cmd_skill` :954][nb-l10-skill] | Same texts; `/stop` cancels subagents only; `/dream` waits (differences #5, #6) |
-| [`COMMANDS`](../nanoclaw/cli/chat.py#L54), [`build_help_text`](../nanoclaw/cli/chat.py#L66) | [`BUILTIN_COMMAND_SPECS` :69][nb-l10-specs], [`build_help_text` :1056][nb-l10-help] | Same descriptions for the 8 commands we have (checked) |
-| [`invalid_command_text`](../nanoclaw/cli/chat.py#L75) | [`_invalid_command_response`][nb-l10-router] | Same texts (checked through nanobot's router) |
-| [`_format_history_message`](../nanoclaw/cli/chat.py#L90) | [`:845`][nb-l10-histfmt] | Same |
-| [`build_status_content`](../nanoclaw/cli/chat.py#L111) | [`utils/helpers.py:900`][nb-l10-statustext] | Same lines, without cache rate and search quota |
-| [`install_exit_signal_handlers`](../nanoclaw/cli/chat.py#L362) | [`agent.py:283`][nb-l10-signal] | Same |
+| [`Chat`](../nanoclaw/cli/chat.py#L153) | [`cli/agent.py:266`][nb-l10-classic] (classic interactive mode) | Simplified: direct loop calls instead of the message bus; same turns, exit handling and output |
+| ↳ [`banner()`](../nanoclaw/cli/chat.py#L185), [`run()`](../nanoclaw/cli/chat.py#L195), [`turn()`](../nanoclaw/cli/chat.py#L222) | [`:271`][nb-l10-banner], `:384–425` | Same banner, exit words, Ctrl+C/Ctrl+D, spinner and reply |
+| ↳ [`_deliver_subagent_results()`](../nanoclaw/cli/chat.py#L236) | `_consume_outbound` (`agent.py:296`) | Same idea: results printed above the prompt; read from the subagent queue |
+| ↳ [`handle_command()`](../nanoclaw/cli/chat.py#L263) | [`command/router.py`][nb-l10-router] `dispatch` | Same matching (exact, `/history ` prefix, case-insensitive) |
+| ↳ [`cmd_new()`](../nanoclaw/cli/chat.py#L284), [`cmd_compact()`](../nanoclaw/cli/chat.py#L290), [`cmd_stop()`](../nanoclaw/cli/chat.py#L298), [`cmd_status()`](../nanoclaw/cli/chat.py#L303), [`cmd_history()`](../nanoclaw/cli/chat.py#L325), [`cmd_dream()`](../nanoclaw/cli/chat.py#L342), [`cmd_skill()`](../nanoclaw/cli/chat.py#L351), [`cmd_help()`](../nanoclaw/cli/chat.py#L363) | [`cmd_new` :314][nb-l10-new], [`cmd_compact` :349][nb-l10-compact] (+ [events][nb-l10-compactevt]), [`cmd_stop` :214][nb-l10-stop], [`cmd_status` :267][nb-l10-status], [`cmd_history` :869][nb-l10-history], [`cmd_dream` :453][nb-l10-dream], [`cmd_skill` :954][nb-l10-skill] | Same texts; `/stop` cancels subagents only; `/dream` waits (differences #5, #6) |
+| [`COMMANDS`](../nanoclaw/cli/chat.py#L56), [`build_help_text`](../nanoclaw/cli/chat.py#L68) | [`BUILTIN_COMMAND_SPECS` :69][nb-l10-specs], [`build_help_text` :1056][nb-l10-help] | Same descriptions for the 8 commands we have (checked) |
+| [`invalid_command_text`](../nanoclaw/cli/chat.py#L77) | [`_invalid_command_response`][nb-l10-router] | Same texts (checked through nanobot's router) |
+| [`_format_history_message`](../nanoclaw/cli/chat.py#L92) | [`:845`][nb-l10-histfmt] | Same |
+| [`build_status_content`](../nanoclaw/cli/chat.py#L113) | [`utils/helpers.py:900`][nb-l10-statustext] | Same lines, without cache rate and search quota |
+| [`install_exit_signal_handlers`](../nanoclaw/cli/chat.py#L367) | [`agent.py:283`][nb-l10-signal] | Same |
 
 ### Terminal — `nanoclaw/cli/terminal.py`
 
 | NanoClaw | nanobot | How it compares |
 |---|---|---|
-| [`EXIT_COMMANDS`](../nanoclaw/cli/terminal.py#L23), [`is_exit_command`](../nanoclaw/cli/terminal.py#L29) | [`cli/terminal.py:51`][nb-l10-exit] | Same |
-| [`print_agent_response`](../nanoclaw/cli/terminal.py#L45), [`response_renderable`](../nanoclaw/cli/terminal.py#L38) | [`:216`][nb-l10-reply], [`:233`][nb-l10-renderable] | Same (name without emoji) |
-| [`print_progress_line`](../nanoclaw/cli/terminal.py#L98), [`progress_line_markup`](../nanoclaw/cli/terminal.py#L59) | [`:276`][nb-l10-progress] | Same, but the text is escaped (bug 6) |
-| [`ThinkingSpinner`](../nanoclaw/cli/terminal.py#L65) | [`cli/stream.py:50`][nb-l10-spinner] | Same |
-| [`PromptInput`](../nanoclaw/cli/terminal.py#L106) | [`_init_prompt_session` :172][nb-l10-session], [`_read_interactive_input_async` :415][nb-l10-read] | Same (history in `~/.nanoclaw/history/`) |
+| [`EXIT_COMMANDS`](../nanoclaw/cli/terminal.py#L25), [`is_exit_command`](../nanoclaw/cli/terminal.py#L43) | [`cli/terminal.py:51`][nb-l10-exit] | Same |
+| [`print_agent_response`](../nanoclaw/cli/terminal.py#L59), [`response_renderable`](../nanoclaw/cli/terminal.py#L52) | [`:216`][nb-l10-reply], [`:233`][nb-l10-renderable] | Same (name without emoji) |
+| [`print_progress_line`](../nanoclaw/cli/terminal.py#L123), [`progress_line_markup`](../nanoclaw/cli/terminal.py#L73) | [`:276`][nb-l10-progress] | Same, but the text is escaped (bug 6) |
+| [`ThinkingSpinner`](../nanoclaw/cli/terminal.py#L88) | [`cli/stream.py:50`][nb-l10-spinner] | Same |
+| [`PromptInput`](../nanoclaw/cli/terminal.py#L206) | [`_init_prompt_session` :172][nb-l10-session], [`_read_interactive_input_async` :415][nb-l10-read] | Same (history in `~/.nanoclaw/history/`) |
+| [`build_key_bindings`](../nanoclaw/cli/terminal.py#L131), [`flush_pending_tty_input`](../nanoclaw/cli/terminal.py#L164), [`save_terminal`](../nanoclaw/cli/terminal.py#L187) / [`restore_terminal`](../nanoclaw/cli/terminal.py#L196), [`sanitize_surrogates`](../nanoclaw/cli/terminal.py#L31), `SafeFileHistory`, `_clear_current_line` | [`_build_cli_key_bindings` :132][nb-l10-keys], [`_flush_pending_tty_input` :98][nb-l10-flush], [`_restore_terminal` :122][nb-l10-restore], `sanitize_surrogates`, [`SafeFileHistory` :86][nb-l10-safehist] | Same (added in the second review) |
 
 ### Tool hints and the progress callback
 
@@ -864,3 +865,7 @@ Note: [`notes/10-terminal-chat.md`](notes/10-terminal-chat.md)
 [nb-l10-usage]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/loop.py#L2217
 [nb-l10-gethist]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/session/manager.py#L240
 [nb-l10-compactevt]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/bus/outbound_events.py#L155
+[nb-l10-keys]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/cli/terminal.py#L132
+[nb-l10-flush]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/cli/terminal.py#L98
+[nb-l10-restore]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/cli/terminal.py#L122
+[nb-l10-safehist]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/cli/terminal.py#L86

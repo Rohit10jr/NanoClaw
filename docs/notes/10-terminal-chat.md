@@ -38,7 +38,8 @@ NanoClaw builds the classic chat; the full-screen app is phase 2.
 | Feature | nanobot | NanoClaw |
 |---|---|---|
 | Banner `… Interactive mode (model) — type exit or Ctrl+C to quit` | `agent.py:271` | Same (`nanoclaw` instead of `🐈`) |
-| Prompt `You:`; ↑/↓ input history saved to a file; multi-line paste | `terminal.py:172` (`~/.nanobot/history/cli_history`), `:415` | Same (`~/.nanoclaw/history/cli_history`) |
+| Prompt `You:`; ↑/↓ input history saved to a file; multi-line input box: **Enter sends, Alt+Enter (or Shift+Enter where the terminal reports it) adds a line**; multi-line paste | `terminal.py:172` (`~/.nanobot/history/cli_history`), `:132`, `:415` | Same (`~/.nanoclaw/history/cli_history`) |
+| Keys typed while the agent works are dropped before the next prompt (so they aren't sent by accident); terminal settings saved at start and restored on every exit; broken Unicode surrogates (emoji from some consoles) repaired in input and the history file | `_flush_pending_tty_input` `:98`, `_restore_terminal` `:122`, `SafeFileHistory` `:86`, `sanitize_surrogates` | Same |
 | Leave with `exit`, `quit`, `/exit`, `/quit`, `:q` (any case), Ctrl+C or Ctrl+D at the prompt → "Goodbye!" | `terminal.py:51`, `agent.py:417–425` | Same |
 | Ctrl+C (or another termination signal) **while the agent works** ends the chat: "Received SIGINT, goodbye!" | `agent.py:283` | Same (decision 2). The interrupted message gets the "interrupted" reply on the next turn (layer 5) |
 | "… is thinking..." spinner while the agent works | `stream.py:50` `ThinkingSpinner` | Same |
@@ -126,7 +127,7 @@ The commands NanoClaw has, with nanobot's descriptions and texts
 
 ## Tests
 
-`tests/test_chat.py` (38 tests), the chat driven by scripted input with the
+`tests/test_chat.py` (47 tests), the chat driven by scripted input with the
 output captured:
 
 - turns continue the conversation; blank lines skipped; the exit words in any case; Ctrl+C and Ctrl+D; the termination-signal handler;
@@ -134,7 +135,8 @@ output captured:
 - Markdown on and off;
 - every slash command; unknown and malformed commands never reach the model; `/history` limits, cut-off and roles; `/new` and `/status` with a running subagent; `/compact` success, nothing to do, and failure;
 - a background subagent result printed while waiting for input;
-- the CLI: `chat` with piped input, `-s`, `--restrict`, `--no-markdown`; `ask` progress on stderr; `_last_usage`; history without the time block.
+- the CLI: `chat` with piped input, `-s`, `--restrict`, `--no-markdown`; `ask` progress on stderr; `_last_usage`; history without the time block;
+- (second review) the real prompt_toolkit input driven through a pipe: Enter sends, Alt+Enter adds a line, multi-line box, history file; surrogate repair; typed-ahead keys dropped; the terminal restored on every exit; `/dream`'s nothing-to-do text; the spinner clearing its line.
 
 Also run by hand in a **real pseudo-terminal**: prompt_toolkit input,
 spinner, progress lines, Markdown, `/help`, unknown-command suggestion, the
@@ -164,3 +166,23 @@ Checked by running both projects' code:
 **Found:** [upstream bug 6](../UPSTREAM_BUGS.md#6-progress-lines-are-printed-as-rich-markup):
 a shell command containing `[/x]` aborts the turn in `nanobot agent -m`, and
 bracketed text vanishes from progress lines. Fixed in NanoClaw.
+
+### Second review (after the build)
+
+Read nanobot's classic chat line by line (`cli/terminal.py`, `cli/stream.py`,
+`cli/agent.py`) against ours. Six things were missing and are now added:
+
+| # | Missing | nanobot | Fix |
+|---|---|---|---|
+| 1 | **Enter / Alt+Enter**: a multi-line input box where Enter sends and Alt+Enter (Shift+Enter on CSI-u terminals) adds a line | `_build_cli_key_bindings` (`terminal.py:132`), `multiline=True` | Same key bindings (compared: identical) |
+| 2 | **Typed-ahead keys dropped** before each prompt, so keys pressed while the agent worked aren't sent as the next message | `_flush_pending_tty_input` (`:98`) | Same |
+| 3 | **Terminal restored** (echo, line mode) on exit, Ctrl+C/Ctrl+D and termination signals | `_init_prompt_session` saves, `_restore_terminal` (`:122`) | Same |
+| 4 | **Broken Unicode surrogates** (emoji from Windows consoles) repaired in input and in the history file | `sanitize_surrogates`, `SafeFileHistory` (`:86`, issue #2846) | Same |
+| 5 | **Spinner line cleared** before printing | `_clear_current_line` (`stream.py:26`) | Same |
+| 6 | **`/dream` with nothing to do** shown as plain text (its line breaks and backticks kept) | `cmd_dream`, `render_as: text` (`builtin.py:480`) | Same |
+
+Checked again in a real pseudo-terminal: "hello", Alt+Enter, "second line"
+is sent as one two-line message and saved as one history entry. The 12 new
+rules were checked by breaking them on purpose (3 needed stronger tests, now
+added). No new nanobot bugs found.
+

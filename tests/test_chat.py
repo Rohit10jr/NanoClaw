@@ -94,12 +94,15 @@ async def test_ctrl_c_at_the_prompt_says_goodbye(ws, tmp_path):
 
 def test_exit_signal_handler(monkeypatch):
     handlers = {}
+    restored = []
     monkeypatch.setattr(signal, "signal", lambda sig, handler: handlers.__setitem__(sig, handler))
+    monkeypatch.setattr(chat_module, "restore_terminal", lambda: restored.append(1))
     out = io.StringIO()
     chat_module.install_exit_signal_handlers(Console(file=out, color_system=None))
     with pytest.raises(SystemExit) as exc:
         handlers[signal.SIGINT](signal.SIGINT, None)
     assert exc.value.code == 0
+    assert restored == [1]  # terminal put back before leaving
     assert out.getvalue() == "\nReceived SIGINT, goodbye!\n"
     assert handlers[signal.SIGPIPE] is signal.SIG_IGN
 
@@ -441,3 +444,104 @@ def test_cli_chat_markdown_option(ws, monkeypatch, capsys):
         assert expected in out
         if not flag:
             assert "**Hi**" not in out
+
+
+# --- second review: nanobot's terminal handling ------------------------------
+
+
+async def test_prompt_enter_sends_and_alt_enter_adds_a_line(tmp_path):
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from nanoclaw.cli.terminal import PromptInput
+
+    with create_pipe_input() as pipe:
+        reader = PromptInput(tmp_path / "hist", input=pipe, output=DummyOutput())
+        pipe.send_text("line one\x1b\rline two\r")
+        assert await reader() == "line one\nline two"
+        pipe.send_text("second\r")
+        assert await reader() == "second"
+        from prompt_toolkit.filters import to_filter
+
+        assert to_filter(reader._session.multiline)()  # a multi-line input box, as nanobot
+    history = (tmp_path / "hist").read_text()
+    assert "+line one\n+line two\n" in history and "+second\n" in history
+
+
+def test_history_file_never_gets_broken_surrogates(tmp_path):
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from nanoclaw.cli.terminal import PromptInput
+
+    with create_pipe_input() as pipe:
+        reader = PromptInput(tmp_path / "hist", input=pipe, output=DummyOutput())
+        reader._session.history.store_string("bad \ud83d end")
+    assert "bad � end" in (tmp_path / "hist").read_text(encoding="utf-8")
+
+
+def test_sanitize_surrogates():
+    from nanoclaw.cli.terminal import sanitize_surrogates
+
+    assert sanitize_surrogates("plain ✓") == "plain ✓"
+    assert sanitize_surrogates("😀") == "😀"  # a pair becomes the emoji
+    assert sanitize_surrogates("a\ud800b") == "a�b"  # a lone half is replaced
+
+
+async def test_input_is_sanitized_before_the_model_sees_it(ws, tmp_path):
+    chat, provider, _ = make_chat(ws, tmp_path, ["ok"], ["smile 😀 and \ud800"])
+    await chat.run()
+    assert provider.calls[0].messages[-1]["content"].startswith("smile 😀 and �")
+
+
+async def test_terminal_is_restored_on_every_exit(ws, tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(chat_module, "restore_terminal", lambda: calls.append(1))
+    for inputs in (["exit"], [KeyboardInterrupt()], []):
+        chat, _, _ = make_chat(ws, tmp_path, [], inputs)
+        await chat.run()
+    assert len(calls) == 3
+
+
+def test_flush_and_restore_are_safe_without_a_terminal():
+    from nanoclaw.cli import terminal
+
+    terminal.flush_pending_tty_input()  # stdin is not a TTY under pytest: nothing happens
+    terminal.restore_terminal()
+
+
+async def test_dream_with_nothing_to_do_is_plain_text(ws, tmp_path):
+    chat, _, out = make_chat(ws, tmp_path, [], ["/dream"])
+    await chat.run()
+    text = out.getvalue()
+    assert "Dream has no conversation history to process yet.\n\nDream reads new entries" in text
+    assert "`memory/history.jsonl`" in text  # backticks kept: not rendered as Markdown
+
+
+def test_spinner_clears_its_line_on_a_terminal():
+    from nanoclaw.cli.terminal import ThinkingSpinner
+
+    class TTY(io.StringIO):
+        def isatty(self):
+            return True
+
+    out = TTY()
+    console = Console(file=out, force_terminal=True, color_system=None)
+    with ThinkingSpinner(console):
+        pass
+    assert out.getvalue().endswith("\r\x1b[2K")
+
+
+async def test_typed_ahead_keys_are_dropped_before_each_prompt(tmp_path, monkeypatch):
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from nanoclaw.cli import terminal
+
+    flushed = []
+    monkeypatch.setattr(terminal, "flush_pending_tty_input", lambda: flushed.append(1))
+    with create_pipe_input() as pipe:
+        reader = terminal.PromptInput(tmp_path / "hist", input=pipe, output=DummyOutput())
+        pipe.send_text("hi\r")
+        await reader()
+    assert flushed == [1]

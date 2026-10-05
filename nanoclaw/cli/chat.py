@@ -20,13 +20,15 @@ from typing import Any
 from rich.console import Console
 
 from nanoclaw import __version__
-from nanoclaw.agent.loop import LAST_USAGE_KEY, AgentLoop, ContextWindowExceededError
+from nanoclaw.agent.loop import DREAM_NO_INPUT_MESSAGE, LAST_USAGE_KEY, AgentLoop, ContextWindowExceededError
 from nanoclaw.cli.terminal import (
     BOT_NAME,
     ThinkingSpinner,
     is_exit_command,
     print_agent_response,
     print_progress_line,
+    restore_terminal,
+    sanitize_surrogates,
 )
 
 CHANNEL = "cli"
@@ -196,14 +198,16 @@ class Chat:
         try:
             while True:
                 try:
-                    user_input = await self.read_input()
+                    user_input = sanitize_surrogates(await self.read_input())
                 except (KeyboardInterrupt, EOFError):
+                    restore_terminal()
                     self.console.print("\nGoodbye!")
                     break
                 command = user_input.strip()
                 if not command:
                     continue
                 if is_exit_command(command):
+                    restore_terminal()
                     self.console.print("\nGoodbye!")
                     break
                 if command.startswith("/"):
@@ -341,7 +345,8 @@ class Chat:
         spinner = ThinkingSpinner(self.console)
         with spinner:
             result = await self.loop.run_dream()
-        self._reply(result)
+        # nanobot shows the nothing-to-do message as plain text (keeps its line breaks).
+        self._reply(result, as_text=result == DREAM_NO_INPUT_MESSAGE)
 
     async def cmd_skill(self) -> None:
         """nanobot ``cmd_skill``."""
@@ -366,6 +371,7 @@ def install_exit_signal_handlers(console: Console) -> None:
     import signal
 
     def _handle(signum: int, _frame: Any) -> None:
+        restore_terminal()
         console.print(f"\nReceived {signal.Signals(signum).name}, goodbye!")
         sys.exit(0)
 
