@@ -8,6 +8,11 @@ and crash recovery; here only the direct path is kept: text in, reply out.
 Since layer 6 a turn also compacts the conversation when it no longer fits the
 model's context window, and the loop runs nanobot's ``/compact``, ``/new``
 (with archiving) and ``/dream`` commands.
+
+Since layer 8 the main agent has the ``spawn`` tool. A background subagent's
+report becomes a follow-up turn (``process_subagent_result``): saved as an
+assistant message and shown to the model as new input, so the main agent can
+tell the user about it.
 """
 
 from __future__ import annotations
@@ -24,7 +29,10 @@ from nanoclaw.agent.context_governance import merge_adjacent_user_messages_for_m
 from nanoclaw.agent.memory import Consolidator, MemoryStore
 from nanoclaw.agent.messages import EMPTY_FINAL_RESPONSE_MESSAGE, is_blank
 from nanoclaw.agent.runner import AgentRunner, AgentRunResult, AgentRunSpec
+from nanoclaw.agent.subagent import SUBAGENT_RESULT_EVENT, SubagentManager, SubagentResult
 from nanoclaw.agent.tools import ToolRegistry, build_default_tools
+from nanoclaw.agent.tools.context import RequestContext, bind_request_context, reset_request_context
+from nanoclaw.agent.tools.spawn import SpawnTool
 from nanoclaw.providers import LLMProvider
 from nanoclaw.runtime_context import (
     RUNTIME_CONTEXT_HISTORY_META,
@@ -50,6 +58,7 @@ DREAM_NO_INPUT_MESSAGE = "\n".join([
 CONTEXT_SAFETY_BUFFER = 1024
 # nanobot's default is 200,000; NanoClaw's default model, gpt-4o-mini, has 128,000.
 DEFAULT_CONTEXT_WINDOW_TOKENS = 128_000
+DEFAULT_SESSION_KEY = "cli:direct"
 
 
 class ContextWindowExceededError(RuntimeError):
@@ -93,7 +102,15 @@ class AgentLoop:
         self.context_window_tokens = context_window_tokens
         self.context = ContextBuilder(workspace)
         self.memory: MemoryStore = self.context.memory
-        self.tools = tools if tools is not None else build_default_tools(workspace)
+        self.subagents = SubagentManager(
+            workspace, max_tool_result_chars=max_tool_result_chars, max_iterations=max_iterations
+        )
+        if tools is None:
+            # The main agent's tools: the standard set plus spawn. Subagents and
+            # Dream build their own sets without it.
+            tools = build_default_tools(workspace)
+            tools.register(SpawnTool(self.subagents))
+        self.tools = tools
         self.sessions = sessions if sessions is not None else SessionManager(workspace)
         self.consolidator = Consolidator(
             self.memory, self.sessions, self.context.build_messages, self.tools.get_definitions
@@ -126,6 +143,51 @@ class AgentLoop:
         starts from an empty session and saves nothing (used by Dream); ``tools``
         replaces the default tool set for this turn.
         """
+        result = await self._process_turn(content, session_key, channel, ephemeral=ephemeral, tools=tools)
+        if is_blank(result.final_content):
+            result = dataclasses.replace(result, final_content=EMPTY_FINAL_RESPONSE_MESSAGE)
+        return result
+
+    async def process_subagent_result(self, report: SubagentResult) -> AgentRunResult:
+        """Let the main agent react to a finished background subagent.
+
+        Mirrors nanobot's system turn for a subagent result (``_build_turn``
+        with ``is_subagent``): the report is saved as an assistant message
+        (once per task) and given to the model as new input, without the time
+        block. The model's reply is what the user sees.
+        """
+        return await self._process_turn(
+            report.content, report.session_key or DEFAULT_SESSION_KEY, report.channel, subagent=report
+        )
+
+    async def next_subagent_result(self) -> SubagentResult | None:
+        """The next background subagent report, waiting for running subagents.
+
+        Returns ``None`` when no report is waiting and no subagent is running.
+        """
+        while True:
+            if not self.subagents.results.empty():
+                return self.subagents.results.get_nowait()
+            running = self.subagents.running_tasks()
+            if not running:
+                return None
+            # A subagent queues its report before its task ends.
+            await asyncio.wait(running, return_when=asyncio.FIRST_COMPLETED)
+
+    async def close(self) -> None:
+        """Cancel running subagents (nanobot ``AgentLoop.aclose``)."""
+        await self.subagents.close()
+
+    async def _process_turn(
+        self,
+        content: str,
+        session_key: str,
+        channel: str,
+        *,
+        ephemeral: bool = False,
+        tools: ToolRegistry | None = None,
+        subagent: SubagentResult | None = None,
+    ) -> AgentRunResult:
         tools = tools if tools is not None else self.tools
         async with self._get_session_lock(session_key):
             if ephemeral:
@@ -140,14 +202,21 @@ class AgentLoop:
             # so it survives a crash or an error mid-turn.
             summary = session_summary_from_metadata(session.metadata, fallback_last_active=session.updated_at)
             history = session.get_history()
-            blocks = [current_time_block()]
-            # Skills named as $skill-name are part of the saved message too (nanobot
-            # adds them while resolving runtime context, before saving).
-            skill_context = self.context.skills.build_explicit_skill_runtime_context(content)
-            if skill_context is not None and skill_context not in blocks:
-                blocks.append(skill_context)
             boundary = len(session.messages)
-            persisted_early = not ephemeral and self._persist_user_message_early(content, session, blocks)
+            blocks: list[RuntimeContextBlock] = []
+            if subagent is not None:
+                # Saved as the agent's own record; it reaches the model as input.
+                if self._persist_subagent_followup(session, subagent):
+                    self.sessions.save(session)
+                persisted_early = True
+            else:
+                blocks.append(current_time_block())
+                # Skills named as $skill-name are part of the saved message too (nanobot
+                # adds them while resolving runtime context, before saving).
+                skill_context = self.context.skills.build_explicit_skill_runtime_context(content)
+                if skill_context is not None and skill_context not in blocks:
+                    blocks.append(skill_context)
+                persisted_early = not ephemeral and self._persist_user_message_early(content, session, blocks)
             messages = self.context.build_messages(
                 history, content, channel=channel, runtime_context_blocks=blocks, session_summary=summary
             )
@@ -156,22 +225,26 @@ class AgentLoop:
                 session, messages, history, summary, content, channel, blocks, tools, persist=not ephemeral
             )
 
-            # Run.
-            result = await self.runner.run(
-                AgentRunSpec(
-                    initial_messages=messages,
-                    tools=tools,
-                    provider=self.provider,
-                    model=self.model,
-                    max_iterations=self.max_iterations,
-                    max_tool_result_chars=self.max_tool_result_chars,
-                    # Temporary turns never write spill files.
-                    workspace=None if ephemeral else self.workspace,
-                    max_tokens=self.max_tokens,
-                    temperature=self.temperature,
-                    session_key=session.key,
+            # Run. Tools such as spawn read the turn's session and model settings.
+            token = bind_request_context(RequestContext(channel=channel, session_key=session.key, runtime=self.runtime))
+            try:
+                result = await self.runner.run(
+                    AgentRunSpec(
+                        initial_messages=messages,
+                        tools=tools,
+                        provider=self.provider,
+                        model=self.model,
+                        max_iterations=self.max_iterations,
+                        max_tool_result_chars=self.max_tool_result_chars,
+                        # Temporary turns never write spill files.
+                        workspace=None if ephemeral else self.workspace,
+                        max_tokens=self.max_tokens,
+                        temperature=self.temperature,
+                        session_key=session.key,
+                    )
                 )
-            )
+            finally:
+                reset_request_context(token)
 
             # Persist: the summary boundary (if compacted), then everything the
             # runner added after the user's message.
@@ -182,9 +255,6 @@ class AgentLoop:
                 self._save_turn(session, result.messages, skip)
                 session.metadata.pop(PENDING_USER_TURN_KEY, None)
                 self.sessions.save(session)
-
-        if is_blank(result.final_content):
-            result = dataclasses.replace(result, final_content=EMPTY_FINAL_RESPONSE_MESSAGE)
         return result
 
     def _input_budget(self) -> int:
@@ -340,6 +410,30 @@ class AgentLoop:
         # Cleared once the turn is saved; still set next time means it crashed.
         session.metadata[PENDING_USER_TURN_KEY] = True
         self.sessions.save(session)
+        return True
+
+    @staticmethod
+    def _persist_subagent_followup(session: Session, report: SubagentResult) -> bool:
+        """Save a subagent report as an assistant message, once per task.
+
+        Returns False if the report is empty or this task's report is already
+        saved. (nanobot ``_persist_subagent_followup``)
+        """
+        if not report.content:
+            return False
+        task_id = report.task_id
+        if task_id and any(
+            m.get("injected_event") == SUBAGENT_RESULT_EVENT and m.get("subagent_task_id") == task_id
+            for m in session.messages
+        ):
+            return False
+        session.add_message(
+            "assistant",
+            report.content,
+            sender_id="subagent",
+            injected_event=SUBAGENT_RESULT_EVENT,
+            subagent_task_id=task_id,
+        )
         return True
 
     @staticmethod

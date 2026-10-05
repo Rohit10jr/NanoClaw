@@ -55,6 +55,11 @@ class AgentRunSpec:
     temperature: float = 0.7
     # Saved tool results go in a folder per session (nanobot: per session key).
     session_key: str | None = None
+    # When the iterations run out: ask the model for a summary with tools off
+    # (main agent), or just end with the fixed message (subagents set False).
+    finalize_on_max_iterations: bool = True
+    # Replaces the default out-of-iterations message ({max_iterations} is filled in).
+    max_iterations_message: str | None = None
 
 
 @dataclass
@@ -260,14 +265,21 @@ class AgentRunner:
         spec: AgentRunSpec,
         messages: list[dict[str, Any]],
     ) -> tuple[str, LLMUsage | None]:
+        if not spec.finalize_on_max_iterations:
+            return self._max_iterations_fallback(spec), None
         response = await self._request(
             spec,
             messages + [{"role": "user", "content": BUDGET_EXHAUSTED_FINALIZATION_PROMPT}],
             with_tools=False,
         )
         if response.is_error or response.has_tool_calls or is_blank(response.content):
-            return MAX_ITERATIONS_MESSAGE.format(max_iterations=spec.max_iterations), response.usage
+            return self._max_iterations_fallback(spec), response.usage
         return response.content or "", response.usage
+
+    @staticmethod
+    def _max_iterations_fallback(spec: AgentRunSpec) -> str:
+        """The fixed out-of-iterations message. (nanobot runner.py:1249)"""
+        return (spec.max_iterations_message or MAX_ITERATIONS_MESSAGE).format(max_iterations=spec.max_iterations)
 
     @staticmethod
     def _append_model_error_placeholder(messages: list[dict[str, Any]]) -> None:

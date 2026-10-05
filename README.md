@@ -22,7 +22,7 @@ codebases can be read side by side, and leaves the production features
 | 5 | Sessions + agent loop | done |
 | 6 | Memory + compaction | done |
 | 7 | Skills | done |
-| 8 | Subagents | planned |
+| 8 | Subagents | done |
 | 9 | Safety (workspace limits, shell guards) | planned |
 | 10 | Terminal chat (CLI) | planned |
 
@@ -83,6 +83,11 @@ uv run nanoclaw ask 'What is the $weather in Paris?'     # use a skill now
 Summaries are kept in a journal, `memory/history.jsonl` in the workspace;
 `nanoclaw dream` reads the new entries and updates the memory files, which the
 agent sees in every system prompt.
+
+Subagents, as in nanobot: the agent can hand a task to a child agent with the
+`spawn` tool. With `wait=true` it waits for the answer; otherwise the child
+works in the background (up to 4 at once) and the agent tells you the result
+when it's done. `nanoclaw ask` waits for background children before exiting.
 
 The agent's personality and instructions live in editable Markdown files in
 the workspace (`~/.nanoclaw/workspace` by default, change with `-w`):

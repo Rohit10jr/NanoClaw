@@ -33,8 +33,8 @@ with a note in [`notes/`](notes/).
 | 5 | Sessions + AgentLoop | Conversations saved and resumed; one turn = context → runner → save | `session/manager.py`, `agent/loop.py` (`process_direct`) | `nanoclaw/session/`, `nanoclaw/agent/loop.py` | ✅ done |
 | 6 | Memory | Long-term memory; compacting old history | `agent/memory.py`, `agent/autocompact.py`, `session/summary.py`, `agent/context_governance.py` (compaction) | `nanoclaw/agent/memory.py`, `nanoclaw/session/summary.py`, `nanoclaw/utils/tokens.py` | ✅ done |
 | 7 | Skills | Markdown procedures loaded on demand | `agent/skills.py`, `skills/` | `nanoclaw/agent/skills.py`, `nanoclaw/skills/` | ✅ done |
-| 8 | Subagents | Hand a task to a child agent | `agent/subagent.py`, `agent/tools/spawn.py` | `nanoclaw/agent/subagent.py` | ⏭ next |
-| 9 | Safety | Keep tools inside the workspace; guard shell commands | `security/workspace_access.py`, `security/workspace_policy.py`, `security/network.py`, `agent/tools/sandbox.py` | `nanoclaw/security/` | planned |
+| 8 | Subagents | Hand a task to a child agent | `agent/subagent.py`, `agent/tools/spawn.py`, `agent/tools/context.py` | `nanoclaw/agent/subagent.py`, `nanoclaw/agent/tools/spawn.py` | ✅ done |
+| 9 | Safety | Keep tools inside the workspace; guard shell commands | `security/workspace_access.py`, `security/workspace_policy.py`, `security/network.py`, `agent/tools/sandbox.py` | `nanoclaw/security/` | ⏭ next |
 | 10 | Terminal chat | Interactive REPL using everything above | `cli/agent.py`, `cli/commands.py` | `nanoclaw/cli.py` | planned |
 
 ### Layer details
@@ -118,8 +118,20 @@ the two layer 4 differences).
 *Deferred (see phase 2):* plugin skills, CLI-app aliases, disabling skills,
 ClawHub; the other 5 nanobot built-in skills.
 
-**8 — Subagents.** `SubagentManager` + `spawn` tool: run a child `AgentRunner`
-with its own task and a restricted toolset; return its result to the parent.
+**8 — Subagents.** `SubagentManager` + the `spawn` tool (main agent only): a
+child agent with its own short prompt, the task as its only message and the 7
+standard tools (no `spawn`). `wait=true` returns the child's answer as the tool
+result; otherwise it runs in the background and its report becomes a follow-up
+turn (saved as an assistant message, given to the model as new input). At most
+4 children at once. See `notes/08-subagents.md`.
+**Decisions:** `nanoclaw ask` waits for background children and reports their
+results (nanobot's one-shot mode cancels them); iteration limit stays 20 for
+the main agent and children (nanobot: 200) for now, to be updated later.
+**Differences:** a report arriving during a main turn waits for the next turn
+(no mid-turn injection); a queue instead of the message bus.
+*Deferred (see phase 2):* live status and logging of children (hooks),
+compaction inside a child's run, project-folder scope, shared background
+shell sessions, usage attribution, stop commands (layer 10).
 
 **9 — Safety.** `restrict_to_workspace`: path checks so file tools and
 `exec` stay in the workspace; blocking private-network addresses in
@@ -130,7 +142,8 @@ behaviour of applying it only in restricted mode.
 
 **10 — Terminal chat.** `nanoclaw chat`: REPL with session resume, `/new`,
 `/exit`, showing tool calls as they happen. `nanoclaw ask` stays for one-shot
-use.
+use. Background subagent reports appear as they finish; `/stop` cancels a
+conversation's subagents (`cancel_by_session`, built in layer 8).
 
 ## Phase 2 — review production features
 
@@ -139,23 +152,25 @@ NanoClaw needs it, and build only the ones we pick.
 
 | Feature | nanobot reference | Why it exists |
 |---|---|---|
-| Message bus + channels | `bus/`, `channels/` (Telegram, Slack, Discord, …) | Same agent from many chat apps. A long-running process would also allow **idle auto-compact** (`agent/autocompact.py`: summarize a chat after 15 idle minutes; deferred from layer 6) |
-| Hooks | `agent/hook.py`, `agent/turn_hooks.py`, `agent/progress_hook.py` | Plugins and UIs observe or change each step; also **compaction events** (`ContextCompactionEvent`; deferred from layer 6) |
+| Message bus + channels | `bus/`, `channels/` (Telegram, Slack, Discord, …) | Same agent from many chat apps. A long-running process would also allow **idle auto-compact** (`agent/autocompact.py`: summarize a chat after 15 idle minutes; deferred from layer 6). Subagent reports travel on the bus in nanobot (NanoClaw: a queue, layer 8) |
+| Hooks | `agent/hook.py`, `agent/turn_hooks.py`, `agent/progress_hook.py` | Plugins and UIs observe or change each step; also **compaction events** (`ContextCompactionEvent`; deferred from layer 6) and **live subagent status** (`_SubagentHook`: each child's iteration, tool calls and token use, and a log line per child tool call; deferred from layer 8) |
 | Plugins | `agent/plugins.py` | Installable bundles of skills + MCP servers (plugin skills appear as an "Agent Plugin skills" group; deferred from layer 7) |
 | Recovery + checkpoints | `session/recovery.py`, runner checkpoint callbacks | Resume a turn after a crash (closing a crashed turn is already ported, layer 5) |
-| Mid-turn injections | runner `injection_callback` | Fold new user messages into a running turn |
-| Context governance | `agent/context_governance.py` | Keep requests within the context window: token budgets, tool-result budgets, and **compaction in the middle of a turn** (between tool calls). Already ported: the adjacent-user-message merge (layer 5) and compaction before a turn (layer 6) |
+| Mid-turn injections | runner `injection_callback` | Fold new user messages into a running turn; also **subagent reports that arrive during a turn** (NanoClaw runs them after the turn; layer 8 difference #3) |
+| Context governance | `agent/context_governance.py` | Keep requests within the context window: token budgets, tool-result budgets, and **compaction in the middle of a turn** (between tool calls), including **inside a subagent's run** (deferred from layer 8). Already ported: the adjacent-user-message merge (layer 5) and compaction before a turn (layer 6) |
 | Provider retries | `providers/base.py` `chat_with_retry` | Rate limits, flaky gateways |
 | Streaming | `chat_stream`, `cli/stream.py` | Replies appear word by word |
 | Model presets + fallback | `agent/model_presets.py`, `providers/fallback_provider.py` | Named model setups, backup models; also the **Dream model override** (run Dream on another model; deferred from layer 6) |
 | Anthropic adapter | `providers/anthropic_provider.py` | Non-OpenAI wire format |
 | MCP | `agent/tools/mcp.py` | Tools from external MCP servers |
 | Cron + heartbeat | `cron/`, `agent/tools/cron.py`, `templates/HEARTBEAT.md` | Scheduled and proactive tasks, including **Dream every 2 hours** (`cli/gateway_runtime.py`, `DreamConfig`; deferred from layer 6, where Dream is the manual `nanoclaw dream`) |
-| Usage accounting | `llm_usage/` | Token and cost tracking |
+| Usage accounting | `llm_usage/` | Token and cost tracking (including a subagent's tokens counted under the conversation that started it; deferred from layer 8) |
 | Web UI / TUI | `webui/`, `tui/` | Browser and full-screen terminal interfaces |
 | Memory history (git) | `utils/gitstore.py`, `/dream-log`, `/dream-restore` | Commits `SOUL.md`/`USER.md`/`MEMORY.md` after each Dream so changes can be viewed and undone (deferred from layer 6) |
-| Provider conversation state | `providers/conversation_state.py`, `summarize_provider_compaction` | Server-side conversation state (e.g. OpenAI Responses API), including **provider-native compaction** (deferred from layer 6) |
+| Provider conversation state | `providers/conversation_state.py`, `summarize_provider_compaction` | Server-side conversation state (e.g. OpenAI Responses API), including **provider-native compaction** (deferred from layer 6) and adding subagent reports to it (deferred from layer 8) |
 | Prompt overrides | `utils/workspace_prompts.py`, `templates/prompts/`, `/dream-prompt` | Replace Dream's (and the heartbeat's) instructions with a file in the workspace (deferred from layer 6) |
 | More skills features | `skills/clawhub`, `disabled_skills` config, `apps/cli` aliases, nanobot's `cron`/`image-generation`/`my`/`update-setup` skills | Install community skills (after layer 9), hide skills, CLI-app aliases, and the built-in skills that need features NanoClaw lacks (deferred from layer 7) |
 | Logging | `loguru` throughout | Warnings for degraded archives, corrupt files, ... (NanoClaw has no logging yet) |
-| Separate project folder | `agent/context.py` (`workspace` vs project), `security/workspace_access.py` | Keep `SOUL.md`/`USER.md`/memory/skills in the agent's home while tools and `AGENTS.md` use a chosen project folder; would add a `--project` CLI option |
+| Separate project folder | `agent/context.py` (`workspace` vs project), `security/workspace_access.py` | Keep `SOUL.md`/`USER.md`/memory/skills in the agent's home while tools and `AGENTS.md` use a chosen project folder; would add a `--project` CLI option; subagents would then run in the project folder (`workspace_scope`; deferred from layer 8) |
+| Long-running shell sessions | `agent/tools/exec_session.py`, `ExecSessionManager` | Background shell commands the agent checks on later, shared with subagents (deferred from layers 3 and 8) |
+| Iteration limit | `config/schema.py` `max_tool_iterations` (200) | NanoClaw uses 20 for the main agent and subagents; to be revisited (layer 8 decision) |

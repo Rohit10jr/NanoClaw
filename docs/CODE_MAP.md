@@ -27,7 +27,8 @@ so line numbers stay correct even as nanobot changes.
 | 5 Sessions + AgentLoop | `nanoclaw/session/`, `nanoclaw/agent/loop.py`, `agent/context_governance.py` | ~580 | `session/manager.py`, `agent/loop.py` | ~4,400 |
 | 6 Memory + compaction | `nanoclaw/agent/memory.py`, `session/summary.py`, `utils/tokens.py`, `utils/llm_runtime.py` + loop/context changes | ~1,100 | `agent/memory.py`, `agent/autocompact.py`, `session/summary.py`, parts of `agent/context_governance.py`, `utils/helpers.py`, `command/builtin.py` | ~2,500 |
 | 7 Skills | `nanoclaw/agent/skills.py` + 6 built-in skills, context/loop/read_file/Dream changes | ~290 + skills | `agent/skills.py`, `skills/`, parts of `context.py`, `filesystem.py`, `memory.py` | ~420 + skills |
-| CLI (`ask`, `compact`, `dream`, `skills`, `prompt`) | `nanoclaw/__main__.py` | ~135 | `cli/agent.py`, `cli/commands.py` | ~1,180 |
+| 8 Subagents | `nanoclaw/agent/subagent.py`, `tools/spawn.py`, `tools/context.py` + runner/loop/CLI changes | ~470 | `agent/subagent.py`, `agent/tools/spawn.py`, parts of `tools/context.py`, `runner.py`, `loop.py` | ~800 |
+| CLI (`ask`, `compact`, `dream`, `skills`, `prompt`) | `nanoclaw/__main__.py` | ~165 | `cli/agent.py`, `cli/commands.py` | ~1,180 |
 
 ## Layer 1 — Provider
 
@@ -392,11 +393,54 @@ Note: [`notes/07-skills.md`](notes/07-skills.md)
 | [`nanoclaw skills`](../nanoclaw/__main__.py#L85) | [`command/builtin.py:954`][nb-l7-cmdskill] `/skill` | Same output (checked) |
 | `sync_workspace_templates` creates `skills/` | [`utils/helpers.py:983`][nb-l7-syncskills] | Same |
 
+## Layer 8 — Subagents
+
+Note: [`notes/08-subagents.md`](notes/08-subagents.md)
+
+### Subagent manager — `nanoclaw/agent/subagent.py`
+
+| NanoClaw | nanobot | How it compares |
+|---|---|---|
+| [`SubagentStatus`](../nanoclaw/agent/subagent.py#L46) | [`agent/subagent.py:57`][nb-l8-status] | Simplified: phase, stop reason and error only (no live iteration/tool events/usage; those come from hooks) |
+| [`SubagentResult`](../nanoclaw/agent/subagent.py#L61) | `InboundMessage` published at [`:527`][nb-l8-announce] | Replaced: a report on the manager's `results` queue instead of the message bus |
+| [`SubagentManager`](../nanoclaw/agent/subagent.py#L76) | [`:99`][nb-l8-manager] | Simplified: no exec sessions, workspace scopes, usage sources or deprecated constructor arguments |
+| ↳ [`spawn()`](../nanoclaw/agent/subagent.py#L119) | [`:249`][nb-l8-spawn] | Same reply, ID and label rules |
+| ↳ [`run_inline()`](../nanoclaw/agent/subagent.py#L143) | [`:313`][nb-l8-inline] | Same (error result marked as a tool error) |
+| ↳ [`_run_subagent()`](../nanoclaw/agent/subagent.py#L174) | [`:376`][nb-l8-run] | Same 4-slot queue (`queued` → `initializing`) |
+| ↳ [`_run_admitted_subagent()`](../nanoclaw/agent/subagent.py#L194) | [`:405`][nb-l8-admitted] | Same messages, runner settings and results; no hook, checkpoints or compaction |
+| ↳ [`_announce_result()`](../nanoclaw/agent/subagent.py#L255) | [`:527`][nb-l8-announce] | Same text (`subagent_announce.md`) |
+| ↳ [`_build_subagent_prompt()`](../nanoclaw/agent/subagent.py#L281) | [`:572`][nb-l8-prompt] | Same (one workspace, so no separate agent-workspace line) |
+| ↳ [`_build_tools()`](../nanoclaw/agent/subagent.py#L98) | [`:227`][nb-l8-buildtools] | Same idea: the standard tools, no `spawn` (difference #5) |
+| ↳ [`cancel_by_session()`](../nanoclaw/agent/subagent.py#L304), [`close()`](../nanoclaw/agent/subagent.py#L317), [`get_running_count()`](../nanoclaw/agent/subagent.py#L325), [`statuses_for_session()`](../nanoclaw/agent/subagent.py#L297) | [`:595`][nb-l8-cancel], [`:606`][nb-l8-close], [`:615`][nb-l8-count] | Same (no exec sessions to close) |
+| [`DEFAULT_MAX_CONCURRENT_SUBAGENTS`](../nanoclaw/agent/subagent.py#L39) = 4 | [`config/schema.py:131`][nb-l8-config] | Same |
+
+### Tools — `nanoclaw/agent/tools/spawn.py`, `context.py`
+
+| NanoClaw | nanobot | How it compares |
+|---|---|---|
+| [`SpawnTool`](../nanoclaw/agent/tools/spawn.py#L15) | [`agent/tools/spawn.py:48`][nb-l8-spawntool] | Same schema, description and replies (checked) |
+| ↳ [`execute()`](../nanoclaw/agent/tools/spawn.py#L63) | [`:81`][nb-l8-spawnexec] | Same; no workspace scope or origin message ID |
+| [`RequestContext`](../nanoclaw/agent/tools/context.py#L20), [`bind_request_context`](../nanoclaw/agent/tools/context.py#L29), [`current_request_context`](../nanoclaw/agent/tools/context.py#L37) | [`agent/tools/context.py:30`][nb-l8-reqctx], [`:52`][nb-l8-bind], [`:70`][nb-l8-current] | Simplified: channel, session key and model settings only |
+
+### Runner and loop
+
+| NanoClaw | nanobot | How it compares |
+|---|---|---|
+| `AgentRunSpec.finalize_on_max_iterations`, `max_iterations_message`; [`_max_iterations_fallback()`](../nanoclaw/agent/runner.py#L280) | [`agent/runner.py:101`][nb-l8-runspec], [`:795`][nb-l8-finalize], [`:1249`][nb-l8-fallback] | Same (`error_message` not needed: same default) |
+| `AgentLoop.__init__`: `self.subagents`, `spawn` in the main tools | `agent/loop.py:392`, tool loader | Same: main agent only |
+| `_process_turn` binds the request context around the run | `_request_context_for_turn` | Simplified |
+| [`process_subagent_result()`](../nanoclaw/agent/loop.py#L151) | [`agent/loop.py:2066`][nb-l8-isub] (system turn) | Same request and saved rows (checked); runs after the main turn, not injected into it ([`:1095`][nb-l8-inject], difference #3) |
+| [`_persist_subagent_followup()`](../nanoclaw/agent/loop.py#L416) | [`:2454`][nb-l8-persist] | Same |
+| [`next_subagent_result()`](../nanoclaw/agent/loop.py#L163) | `bus.consume_inbound` | **New:** reads the report queue, waiting for running children |
+| [`close()`](../nanoclaw/agent/loop.py#L177) | [`aclose()` :1639][nb-l8-aclose] | Simplified: cancels subagents |
+| [`_deliver_subagent_results()`](../nanoclaw/__main__.py#L79) | [`cli/agent.py:190`][nb-l8-cliclose] cancels them | Different: `ask` waits and reports (difference #1) |
+| `templates/agent/subagent_system.md`, `subagent_announce.md` | [same][nb-l8-tsys] [files][nb-l8-tann] | Same text ("NanoClaw's agent workspace") |
+
 ## CLI — `nanoclaw/__main__.py`
 
 | NanoClaw | nanobot | How it compares |
 |---|---|---|
-| [`main()`](../nanoclaw/__main__.py#L104) `nanoclaw ask "..." [-w DIR] [-s KEY] [--new]` | [`cli/agent.py:55`][nb-cli] `nanobot agent -m "..."` | Simplified: creates missing workspace files, then one `AgentLoop.process_direct` turn in session `cli:direct` (nanobot's key), temperature 0.1 and 8192 max tokens (nanobot's config defaults). `--new` is nanobot's `/new` command. Since layer 6 also `nanoclaw compact` and `nanoclaw dream`, and `NANOCLAW_CONTEXT_WINDOW`. A chat REPL comes in layer 10 |
+| [`main()`](../nanoclaw/__main__.py#L104) `nanoclaw ask "..." [-w DIR] [-s KEY] [--new]` | [`cli/agent.py:55`][nb-cli] `nanobot agent -m "..."` | Simplified: creates missing workspace files, then one `AgentLoop.process_direct` turn in session `cli:direct` (nanobot's key), temperature 0.1 and 8192 max tokens (nanobot's config defaults). `--new` is nanobot's `/new` command. Since layer 6 also `nanoclaw compact` and `nanoclaw dream`, and `NANOCLAW_CONTEXT_WINDOW`. Since layer 8 `ask` waits for background subagents and prints each follow-up reply. A chat REPL comes in layer 10 |
 | `nanoclaw prompt [-w DIR]` | — | **New:** prints the system prompt (no API key needed) |
 
 ## Tests
@@ -418,6 +462,7 @@ Note: [`notes/07-skills.md`](notes/07-skills.md)
 | `tests/test_session.py` | history replay rules, file format, safe file names, atomic save, corrupt lines, cache, storage location, workspace ID |
 | `tests/test_memory.py` | journal, cursors, trimming; Dream prompt and tool limits; raw fallback; archiving with the model; summary checkpoints; token limit in history; prompt sections; token counting |
 | `tests/test_compaction.py` | a compacting turn end to end, the next turn, budgets, raw dump on large overflow, errors, `compact`, ephemeral turns, Dream, CLI commands and settings |
+| `tests/test_subagents.py` | `spawn` schema; main vs child tools; `wait=true` (child request, answer, temperature, errors, out of iterations); child prompt; background reply, report and follow-up turn; replay; saved once; failures; 4 at once; cancel/close; waiting; runner options; `ask` waiting for children |
 | `tests/test_skills.py` | frontmatter, discovery and precedence, requirements, always-on and `$skill` skills, summary, bundled skills, `read_file` fallback, prompt sections, saved `$skill` turn, Dream's skills access, CLI |
 | `tests/test_loop.py` | two-turn memory, restart, byte-identical replay, tool messages saved and replayed, user message saved before the run, crashed turn closed, interrupted turn, model error, save rules, separate sessions, `--new`, per-session lock, generation settings, CLI options and defaults |
 | `tests/test_context_governance.py` | merging adjacent user messages with the time block kept last; detach/reattach |
@@ -644,3 +689,31 @@ Note: [`notes/07-skills.md`](notes/07-skills.md)
 [nb-l7-dreamprompt]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/memory.py#L503
 [nb-l7-cmdskill]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/command/builtin.py#L954
 [nb-l7-syncskills]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/utils/helpers.py#L983
+[nb-l8-status]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/subagent.py#L57
+[nb-l8-manager]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/subagent.py#L99
+[nb-l8-buildtools]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/subagent.py#L227
+[nb-l8-spawn]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/subagent.py#L249
+[nb-l8-inline]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/subagent.py#L313
+[nb-l8-run]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/subagent.py#L376
+[nb-l8-admitted]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/subagent.py#L405
+[nb-l8-announce]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/subagent.py#L527
+[nb-l8-prompt]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/subagent.py#L572
+[nb-l8-cancel]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/subagent.py#L595
+[nb-l8-close]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/subagent.py#L606
+[nb-l8-count]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/subagent.py#L615
+[nb-l8-spawntool]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/tools/spawn.py#L48
+[nb-l8-spawnexec]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/tools/spawn.py#L81
+[nb-l8-reqctx]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/tools/context.py#L30
+[nb-l8-bind]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/tools/context.py#L52
+[nb-l8-current]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/tools/context.py#L70
+[nb-l8-runspec]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/runner.py#L101
+[nb-l8-finalize]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/runner.py#L795
+[nb-l8-fallback]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/runner.py#L1249
+[nb-l8-isub]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/loop.py#L2066
+[nb-l8-persist]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/loop.py#L2454
+[nb-l8-aclose]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/loop.py#L1639
+[nb-l8-inject]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/agent/loop.py#L1095
+[nb-l8-config]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/config/schema.py#L131
+[nb-l8-cliclose]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/cli/agent.py#L190
+[nb-l8-tsys]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/templates/agent/subagent_system.md
+[nb-l8-tann]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/templates/agent/subagent_announce.md

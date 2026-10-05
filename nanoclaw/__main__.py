@@ -57,17 +57,49 @@ async def _ask(provider: LLMProvider, prompt: str, workspace: Path, session_key:
     if new:
         await loop.new_session(session_key)
     try:
-        result = await loop.process_direct(prompt, session_key=session_key, channel=CHANNEL)
-    except ContextWindowExceededError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        return 1
-    if result.tools_used:
-        print(f"[tools used: {', '.join(result.tools_used)}]", file=sys.stderr)
-    if result.stop_reason == "error":
-        print(result.final_content, file=sys.stderr)
-        return 1
-    print(result.final_content or "")
-    return 0
+        try:
+            result = await loop.process_direct(prompt, session_key=session_key, channel=CHANNEL)
+        except ContextWindowExceededError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        if result.tools_used:
+            print(f"[tools used: {', '.join(result.tools_used)}]", file=sys.stderr)
+        status = 0
+        if result.stop_reason == "error":
+            print(result.final_content, file=sys.stderr)
+            status = 1
+        else:
+            print(result.final_content or "")
+        # Subagents started before an error still report.
+        return max(status, await _deliver_subagent_results(loop))
+    finally:
+        await loop.close()
+
+
+async def _deliver_subagent_results(loop: AgentLoop) -> int:
+    """Wait for background subagents and let the main agent report each result.
+
+    nanobot's one-shot ``agent -m`` cancels them at exit and loses their
+    results; its chat and server modes deliver them as they finish. ``ask``
+    waits instead, so a background spawn is useful before the layer 10 chat.
+    """
+    status = 0
+    while (report := await loop.next_subagent_result()) is not None:
+        print(f"[subagent '{report.label}' finished]", file=sys.stderr)
+        try:
+            result = await loop.process_subagent_result(report)
+        except ContextWindowExceededError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            status = 1
+            continue
+        if result.tools_used:
+            print(f"[tools used: {', '.join(result.tools_used)}]", file=sys.stderr)
+        if result.stop_reason == "error":
+            print(result.final_content, file=sys.stderr)
+            status = 1
+        elif result.final_content and result.final_content.strip():
+            print(result.final_content)
+    return status
 
 
 async def _compact(provider: LLMProvider, workspace: Path, session_key: str) -> int:
