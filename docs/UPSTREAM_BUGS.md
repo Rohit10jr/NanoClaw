@@ -340,7 +340,8 @@ rest dropped out of the agent's context (recall 1/9 against nanobot's 7/9), so
 the older rest is now summarized too.
 
 Compare both on a real model with `scripts/compare_compaction.py` (see
-`docs/notes/06-memory.md`, "Compaction A/B"). If `fixed` wins, it becomes the
+`docs/notes/06-memory.md`, "Compaction A/B"; the test log, with dry-run
+results and the real-API results table, is in "Bug 4 A/B: test log" there). If `fixed` wins, it becomes the
 default and this bug is marked fixed in NanoClaw.
 
 ---

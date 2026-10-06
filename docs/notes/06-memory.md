@@ -214,11 +214,12 @@ The updated `MEMORY.md` appears in the system prompt of every later turn
 | `nanoclaw/agent/context.py` | `# Memory` and `[Archived Context Summary]` sections; `build_messages` with no new message |
 | `nanoclaw/session/manager.py` | `commit_summary_checkpoint`; `get_history` skips the marker, takes `max_tokens`, trims assistant replies |
 | `nanoclaw/session/summary.py` | `SUMMARY_CONTINUATION_TEXT`, `is_summary_checkpoint`, `session_summary_from_metadata` |
-| `nanoclaw/utils/tokens.py` | `estimate_prompt_tokens`, `estimate_message_tokens`, `truncate_text_to_tokens` |
+| `nanoclaw/utils/tokens.py` | `estimate_prompt_tokens`, `estimate_message_tokens`, `truncate_text_to_tokens`; `truncate_text_to_tokens_keep_end` (bug 4 A/B) |
 | `nanoclaw/utils/llm_runtime.py` | `LLMRuntime` (provider, model, max tokens, temperature, window) |
 | `nanoclaw/runtime_context.py` | `public_history_message` (removes the time block from saved messages for the raw dump) |
 | `nanoclaw/templates/` | `memory/MEMORY.md`, `agent/consolidator_archive.md`, `agent/dream.md`; `identity.md` gets nanobot's "Dream" wording back |
-| `nanoclaw/__main__.py` | `compact` and `dream` commands, `NANOCLAW_CONTEXT_WINDOW` |
+| `nanoclaw/__main__.py` | `compact` and `dream` commands, `NANOCLAW_CONTEXT_WINDOW`, `NANOCLAW_COMPACTION` |
+| `scripts/compare_compaction.py` | The bug 4 A/B script (see "Compaction A/B") |
 
 ## Tests
 
@@ -236,6 +237,14 @@ The updated `MEMORY.md` appears in the system prompt of every later turn
   crashed turn; `compact`; ephemeral turns; Dream (nothing to do, memory
   updated, no changes, incomplete run, journal trimmed); CLI commands and
   `NANOCLAW_CONTEXT_WINDOW`.
+- `tests/test_compaction_fixed.py` (19 tests, bug 4 A/B): the switch (default
+  `nanobot`, env variable, bad values); `fixed` in the loop (small overflow same
+  as nanobot; large overflows summarized in 2 and 3 parts that each fit and
+  together cover the history once; a model failure on the first or second part
+  gives a raw dump that keeps the end, nothing journaled twice); `nanobot` mode
+  still keeps the start; equal shares for long summaries; `(nothing)` parts left
+  out; temporary turns journal nothing; a turn too big for any request; `/compact`
+  in parts; keep-the-end truncation (bytes and tiktoken); the script's `--dry-run`.
 - `tests/conftest.py` counts tokens by bytes in tests, so results are exact and
   nothing is downloaded (one test uses tiktoken when available).
 
@@ -303,3 +312,56 @@ had not been kept. Both are now built, as in nanobot:
 | Deny patterns for writes to `history.jsonl` / `.dream_cursor` "come with memory in layer 6" | `03-tools.md`, difference #2 | nanobot's five patterns added to `DEFAULT_DENY_PATTERNS`; the list is identical to nanobot's (checked on 15 commands). Reading the journal stays allowed |
 | Saved tool results get "a folder per session and clean-up with sessions in layer 5" | `03-tools.md`, difference #5 | `.nanoclaw/tool-results/<session>/`; other sessions' folders removed after 7 days and beyond 32 (nanobot `_cleanup_tool_result_buckets`) |
 
+## Bug 4 A/B: test log
+
+What was done to build and check the A/B switch (`NANOCLAW_COMPACTION`). The
+decision (which mode becomes the default) waits for the real-API run below.
+
+**1. Upstream re-checked.** nanobot's latest `main` (`9dc0aba`, 2026-10-04)
+gives the same results as `d3d70f2` for overflows of 1, 300, 600 (summary) and
+900, 2,000 (raw dump); the archive code is unchanged. Bug 4 is not fixed
+upstream.
+
+**2. `nanobot` mode unchanged.** The model call in `archive()` was moved into
+`_ask_for_summary()` without changing it. All earlier tests pass, including
+`test_large_overflow_gets_a_raw_checkpoint_like_nanobot` and the comparisons
+pinned in `test_compaction.py` / `test_memory.py`.
+
+**3. Building the scenario.** Two dry-run findings shaped the script:
+
+| Try | What happened | Why | Change |
+|---|---|---|---|
+| Long *user* messages as filler | Both modes identical, the model always summarized | The archive request leaves out the new message, so it always fits | Filler comes as long **tool results** (`fetch_log`) |
+| Tool results all 3,000 tokens | Both modes identical again | Every compaction overflowed by the same small amount (~300 tokens) | Log sizes vary 50–150 %, as real tool results do |
+| Facts always first in their stretch | Favoured `nanobot` (its raw dump keeps the start) | Placement bias | Each fact at a random place in its stretch |
+
+**4. The fix was revised after the dry run.**
+
+| Version of `fixed` | Dry run (simulated model) | Outcome |
+|---|---|---|
+| v1: summarize the newest part that fits, journal the older rest raw (the plan as first agreed) | Quiz recall 1/9 vs `nanobot` 7/9 (3 runs) | Rejected: facts in the older rest dropped out of the agent's context |
+| v2: summarize the whole history in parts that each fit (current) | Model summaries 25 % vs 100 %; quiz recall 7/15 vs 15/15; MEMORY.md 6/15 vs 12/15; compaction calls 3 vs 20 (5 runs, `nanobot` vs `fixed`) | Kept |
+
+The simulated model "remembers" exactly what is in its request, so these
+numbers only show the mechanics, not the quality of real summaries.
+
+**5. Mutation checks.** 19 rules of the new code were broken on purpose (mode
+switch and its default, the parts search, raw fallback on a failed part,
+journal order, `(nothing)` filter, equal shares, `persist`, keep-the-end in
+characters, tokens and bytes, `/compact` path, env validation). 3 survived at
+first (keep-the-end character slice, `persist=False` in parts, the tiktoken
+slice); a test was added for each, and all 19 are now caught.
+
+**6. Real-API run: pending.** Run by the user:
+
+```bash
+uv run python scripts/compare_compaction.py --runs 3 --model <model>
+```
+
+| Date | Model | Runs | Model summaries (nanobot / fixed) | Quiz recall | MEMORY.md | Compaction calls / tokens | Errors | Decision |
+|---|---|---|---|---|---|---|---|---|
+| — | — | — | — | — | — | — | — | Waiting |
+
+If `fixed` wins: make it the default, mark bug 4 fixed in NanoClaw
+(`UPSTREAM_BUGS.md`), and record it as a deliberate difference from nanobot in
+the table above.
