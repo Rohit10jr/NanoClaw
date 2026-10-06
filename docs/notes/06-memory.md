@@ -74,8 +74,64 @@ same history as the request that just overflowed, plus the archive prompt
 asked for a summary when the overflow is small (about 600 tokens or less);
 beyond that the result is a raw dump. We checked this by running nanobot
 itself, and NanoClaw matches it exactly. It is recorded as
-[upstream bug 4](../UPSTREAM_BUGS.md#4-compaction-usually-falls-back-to-a-raw-dump);
-the fix is not applied yet (your decision, as with bug 3).
+[upstream bug 4](../UPSTREAM_BUGS.md#4-compaction-usually-falls-back-to-a-raw-dump).
+By default NanoClaw keeps nanobot's behaviour; a fix can be switched on and
+compared (next section).
+
+### Compaction A/B: `NANOCLAW_COMPACTION`
+
+| Mode | When the archive request doesn't fit | Raw dump (model failed) keeps |
+|---|---|---|
+| `nanobot` (default) | Raw dump, exactly like upstream | The oldest part |
+| `fixed` | The history is split into parts that each fit one request; each part is summarized; the summaries are journaled oldest first and joined into the checkpoint | The newest part |
+
+When the archive request fits, both modes do the same thing (one model call).
+`fixed` costs one extra model call per extra part. If one turn alone is too
+big for a request, or the model fails on any part, `fixed` uses the raw dump
+(nothing is journaled before that decision, so nothing is written twice).
+`fixed` applies to automatic compaction, `nanoclaw compact` and `ask --new`.
+
+**Comparing them** — `scripts/compare_compaction.py` runs the same
+conversation in both modes and writes a report:
+
+```bash
+uv run python scripts/compare_compaction.py --dry-run          # simulated model, no API
+uv run python scripts/compare_compaction.py --runs 3           # real API: NANOCLAW_API_KEY / _API_BASE / _MODEL
+uv run python scripts/compare_compaction.py --runs 3 --model gpt-4o-mini --out ab-results
+```
+
+The conversation: three facts (early, middle, late), each at a random place in
+a stretch of turns where the agent fetches a long log file with a `fetch_log`
+tool (3,000 tokens on average, 50–150 %), then a quiz, then Dream. The
+window is 12,000 tokens, so it compacts several times. The agent has no other
+tools, so it can't look facts up in the journal. Both modes get the same
+messages and log files in each run.
+
+Options: `--runs`, `--model`, `--dry-run`, `--window`, `--max-tokens`,
+`--filler-tokens`, `--fillers-per-fact`, `--max-dreams`, `--modes`, `--out`.
+
+| Report row | Meaning |
+|---|---|
+| Model summaries | Compactions where the model wrote the checkpoint (not a raw dump) |
+| Quiz recall (early / mid / late / total) | The quiz answer contains the fact |
+| Fact still in context at the quiz (per run) | The fact was somewhere in the quiz request; a miss there is the model's, not compaction's |
+| In MEMORY.md after Dream | Dream wrote the fact to long-term memory. Dream sees only the first 1,000 characters of each journal entry, so a fact deep in a raw dump can't get there |
+| Compaction calls / tokens | The cost of compaction |
+| All calls / tokens, errors | Whole runs; errors are model errors plus turns that failed |
+
+Each run folder (`run1/nanobot/`, `run1/fixed/`, ...) has the checkpoints, the
+quiz answer, the Dream log, the journal (`workspace/memory/history.jsonl`),
+`MEMORY.md` and the session file side by side; `results.json` has the raw
+numbers.
+
+Dry run (simulated model that "remembers" exactly what is in its request; 5
+runs): model summaries 25 % vs 100 %, quiz recall 7/15 vs 15/15, MEMORY.md
+6/15 vs 12/15, compaction calls 3 vs 20. This only shows the mechanics; the
+decision waits for a real-model run.
+
+Note: the scenario uses long **tool results** because those trigger the bug.
+A long *user* message does not: the archive request leaves the new message
+out, so it fits.
 
 ### Other triggers
 
@@ -116,6 +172,7 @@ The updated `MEMORY.md` appears in the system prompt of every later turn
 | Setting | Default | Notes |
 |---|---|---|
 | `NANOCLAW_CONTEXT_WINDOW` | 128,000 | Tokens. Set it to your model's window; `0` turns automatic compaction off |
+| `NANOCLAW_COMPACTION` | `nanobot` | `nanobot` (upstream behaviour) or `fixed` (bug 4 fix, being A/B tested); see "Compaction A/B" |
 | Token counting | tiktoken (`cl100k_base`) | Same as nanobot. The vocabulary is downloaded once to `~/.nanoclaw/cache/tiktoken`; without it, UTF-8 bytes are counted (overestimates, so compacts early) |
 
 ## Differences from nanobot (deliberate)

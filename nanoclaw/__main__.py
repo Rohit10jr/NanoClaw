@@ -11,6 +11,7 @@ from pathlib import Path
 from nanoclaw import __version__
 from nanoclaw.agent.context import ContextBuilder
 from nanoclaw.agent.loop import DEFAULT_CONTEXT_WINDOW_TOKENS, AgentLoop, ContextWindowExceededError
+from nanoclaw.agent.memory import COMPACTION_MODES, COMPACTION_NANOBOT
 from nanoclaw.providers import LLMProvider, provider_from_env
 from nanoclaw.security.network import configure_ssrf_whitelist_from_env
 from nanoclaw.utils.templates import sync_workspace_templates
@@ -51,6 +52,15 @@ def _restrict_from_env() -> bool:
     return os.environ.get("NANOCLAW_RESTRICT_TO_WORKSPACE", "").strip().lower() in _TRUE_VALUES
 
 
+def _compaction() -> str:
+    """``NANOCLAW_COMPACTION``: ``nanobot`` (default, like upstream) or ``fixed``
+    (docs/UPSTREAM_BUGS.md, bug 4)."""
+    value = os.environ.get("NANOCLAW_COMPACTION", "").strip().lower() or COMPACTION_NANOBOT
+    if value not in COMPACTION_MODES:
+        raise SystemExit(f"NANOCLAW_COMPACTION must be one of {', '.join(COMPACTION_MODES)}, got {value!r}")
+    return value
+
+
 def _make_loop(provider: LLMProvider, workspace: Path, *, restrict: bool = False) -> AgentLoop:
     return AgentLoop(
         provider,
@@ -59,6 +69,7 @@ def _make_loop(provider: LLMProvider, workspace: Path, *, restrict: bool = False
         max_tokens=DEFAULT_MAX_TOKENS,
         context_window_tokens=_context_window(),
         restrict_to_workspace=restrict,
+        compaction=_compaction(),
     )
 
 

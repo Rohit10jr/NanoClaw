@@ -34,9 +34,22 @@ from nanoclaw.session.summary import is_summary_checkpoint, session_summary_from
 from nanoclaw.utils.llm_runtime import LLMRuntime
 from nanoclaw.utils.templates import render_template
 from nanoclaw.security.workspace_policy import WORKSPACE_BOUNDARY_NOTE
-from nanoclaw.utils.tokens import estimate_prompt_tokens, truncate_text_to_tokens
+from nanoclaw.utils.tokens import (
+    estimate_message_tokens,
+    estimate_prompt_tokens,
+    truncate_text_to_tokens,
+    truncate_text_to_tokens_keep_end,
+)
 
 _RAW_ARCHIVE_MAX_CHARS = 16_000  # fallback dump (model failed)
+
+# How compaction handles a history too big for one archive request
+# (docs/UPSTREAM_BUGS.md, bug 4). "nanobot": exactly like upstream, a raw
+# dump that keeps the oldest part. "fixed": summarize it in parts that each
+# fit one request; if that fails, a raw dump that keeps the newest part.
+COMPACTION_NANOBOT = "nanobot"
+COMPACTION_FIXED = "fixed"
+COMPACTION_MODES = (COMPACTION_NANOBOT, COMPACTION_FIXED)
 _HISTORY_ENTRY_HARD_CAP = 64_000  # emergency cap in append_history
 _ARCHIVE_TOOL_RESULT = (
     "Session archival does not execute tools. Use only the supplied conversation and "
@@ -303,9 +316,18 @@ class MemoryStore:
         return "\n".join(lines)
 
     def raw_archive(
-        self, messages: list[dict[str, Any]], *, max_chars: int | None = None, session_key: str | None = None
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        max_chars: int | None = None,
+        session_key: str | None = None,
+        keep_end: bool = False,
     ) -> str:
-        """Journal the raw messages in bounded chunks and return a checkpoint."""
+        """Journal the raw messages in bounded chunks and return a checkpoint.
+
+        The journal gets everything. The checkpoint is cut to ``max_chars``,
+        keeping the start like nanobot, or the end with ``keep_end``.
+        """
         limit = max_chars if max_chars is not None else _RAW_ARCHIVE_MAX_CHARS
         chunk_size = min(max(1, limit), _HISTORY_ENTRY_HARD_CAP - 1_000)
         formatted = strip_think(self._format_messages([public_history_message(m) for m in messages]))
@@ -313,13 +335,23 @@ class MemoryStore:
         for part, chunk in enumerate(chunks, start=1):
             suffix = f" (part {part}/{len(chunks)})" if len(chunks) > 1 else ""
             self._append_history_record(f"[RAW] {len(messages)} messages{suffix}\n{chunk}", session_key=session_key)
-        return self._normalize_history_entry(f"[RAW] {len(messages)} messages\n{formatted}", max_chars=limit)
+        return self._raw_text(len(messages), formatted, limit, keep_end)
 
-    def _build_raw_checkpoint(self, messages: list[dict[str, Any]], *, max_chars: int | None = None) -> str:
+    def _build_raw_checkpoint(
+        self, messages: list[dict[str, Any]], *, max_chars: int | None = None, keep_end: bool = False
+    ) -> str:
         """Same checkpoint as ``raw_archive``, without writing to the journal."""
         limit = max_chars if max_chars is not None else _RAW_ARCHIVE_MAX_CHARS
         formatted = self._format_messages([public_history_message(m) for m in messages])
-        return self._normalize_history_entry(f"[RAW] {len(messages)} messages\n{formatted}", max_chars=limit)
+        return self._raw_text(len(messages), formatted, limit, keep_end)
+
+    def _raw_text(self, count: int, formatted: str, limit: int, keep_end: bool) -> str:
+        if not keep_end:
+            return self._normalize_history_entry(f"[RAW] {count} messages\n{formatted}", max_chars=limit)
+        body = strip_think(formatted.rstrip())
+        if len(body) > limit:
+            body = "... (earlier part truncated)\n" + body[-limit:]
+        return f"[RAW] {count} messages\n{body}"
 
 
 class _PathGuard(Tool):
@@ -366,10 +398,19 @@ class MemoryArchiver:
         store: MemoryStore,
         build_messages: Callable[..., list[dict[str, Any]]],
         get_tool_definitions: Callable[[], list[dict[str, Any]]],
+        *,
+        compaction: str = COMPACTION_NANOBOT,
     ) -> None:
+        if compaction not in COMPACTION_MODES:
+            raise ValueError(f"compaction must be one of {COMPACTION_MODES}, got {compaction!r}")
         self.store = store
         self._build_messages = build_messages
         self._get_tool_definitions = get_tool_definitions
+        self.compaction = compaction
+
+    @property
+    def _fixed(self) -> bool:
+        return self.compaction == COMPACTION_FIXED
 
     def _raw_checkpoint(
         self,
@@ -380,29 +421,55 @@ class MemoryArchiver:
         max_tokens: int,
         persist: bool = True,
     ) -> str:
+        keep_end = self._fixed
         raw = (
-            self.store.raw_archive(messages, session_key=session_key)
+            self.store.raw_archive(messages, session_key=session_key, keep_end=keep_end)
             if persist
-            else self.store._build_raw_checkpoint(messages)
+            else self.store._build_raw_checkpoint(messages, keep_end=keep_end)
         )
-        return self._combine_raw_checkpoint(raw, previous_summary=previous_summary, max_tokens=max_tokens)
+        return self._combine_raw_checkpoint(
+            raw, previous_summary=previous_summary, max_tokens=max_tokens, keep_end=keep_end
+        )
 
     @staticmethod
-    def _combine_raw_checkpoint(raw: str, *, previous_summary: str | None, max_tokens: int) -> str:
+    def _fit_raw(raw: str, max_tokens: int, keep_end: bool) -> str:
+        """Cut a raw dump to ``max_tokens``: the start (nanobot), or the end keeping the header line."""
+        if not keep_end:
+            return truncate_text_to_tokens(raw, max_tokens)
+        header, _, body = raw.partition("\n")
+        room = max_tokens - estimate_message_tokens({"role": "user", "content": header})
+        if room <= 8:
+            return truncate_text_to_tokens_keep_end(raw, max_tokens)
+        return f"{header}\n{truncate_text_to_tokens_keep_end(body, room)}"
+
+    @classmethod
+    def _combine_raw_checkpoint(
+        cls, raw: str, *, previous_summary: str | None, max_tokens: int, keep_end: bool = False
+    ) -> str:
         """Keep the previous summary and the new raw dump, within ``max_tokens``."""
         limit = max(1, max_tokens)
         if not previous_summary:
-            return truncate_text_to_tokens(raw, limit)
+            return cls._fit_raw(raw, limit, keep_end)
         combined = f"[Previous archived context]\n{previous_summary}\n\n[Newly archived raw context]\n{raw}"
         bounded = truncate_text_to_tokens(combined, limit)
         if bounded == combined:
             return combined
         section = max(1, (limit - 32) // 2)
+        if keep_end:
+            # Give the raw dump exactly the room that is left, so the final cut can't drop its end.
+            head = (
+                "[Previous archived context]\n"
+                f"{truncate_text_to_tokens(previous_summary, section)}\n\n"
+                "[Newly archived raw context]\n"
+            )
+            room = limit - estimate_message_tokens({"role": "user", "content": head})
+            if room > 8:
+                return head + cls._fit_raw(raw, room, keep_end)
         return truncate_text_to_tokens(
             "[Previous archived context]\n"
             f"{truncate_text_to_tokens(previous_summary, section)}\n\n"
             "[Newly archived raw context]\n"
-            f"{truncate_text_to_tokens(raw, section)}",
+            f"{cls._fit_raw(raw, section, keep_end)}",
             limit,
         )
 
@@ -442,8 +509,29 @@ class MemoryArchiver:
         if input_token_budget is not None:
             estimated, _ = estimate_prompt_tokens(request_messages, request_tools)
             if input_token_budget <= 0 or estimated > input_token_budget:
+                if self._fixed and input_token_budget > 0:
+                    return await self._archive_in_parts(
+                        history,
+                        runtime=runtime,
+                        session_key=session_key,
+                        request_tools=request_tools,
+                        input_token_budget=input_token_budget,
+                        persist=persist,
+                        raw_fallback=raw_fallback,
+                    )
                 return raw_fallback()
 
+        summary = await self._ask_for_summary(request_messages, runtime=runtime, request_tools=request_tools)
+        if summary is None:
+            return raw_fallback()
+        if persist and summary != "(nothing)":
+            self.store.append_history(summary, session_key=session_key)
+        return summary
+
+    async def _ask_for_summary(
+        self, request_messages: list[dict[str, Any]], *, runtime: LLMRuntime, request_tools: list[dict[str, Any]]
+    ) -> str | None:
+        """One archive request (retried once if the model wants tools). ``None`` if it gave no usable summary."""
         response = None
         for attempt in range(2):
             response = await runtime.provider.safe_chat(
@@ -470,16 +558,85 @@ class MemoryArchiver:
             ]
         assert response is not None
         if response.finish_reason in {"error", "length"} or response.has_tool_calls:
-            return raw_fallback()
+            return None
         summary = response.content
         if not summary or not summary.strip():
-            return raw_fallback()
+            return None
         summary = self.store._normalize_history_entry(summary)
-        if not summary:
-            return raw_fallback()
-        if persist and summary != "(nothing)":
-            self.store.append_history(summary, session_key=session_key)
-        return summary
+        return summary or None
+
+    async def _archive_in_parts(
+        self,
+        history: list[dict[str, Any]],
+        *,
+        runtime: LLMRuntime,
+        session_key: str,
+        request_tools: list[dict[str, Any]],
+        input_token_budget: int,
+        persist: bool,
+        raw_fallback: Callable[[], str],
+    ) -> str:
+        """``compaction="fixed"``: the history is too big for one archive request.
+
+        Split it into parts that each fit one request (every part starts at a
+        user message), summarize each part, journal the summaries oldest
+        first, and return them joined. If a single turn can't fit, or the
+        model fails on any part, fall back to a raw dump that keeps the newest
+        part (nothing is journaled before that decision).
+        """
+        lead = 0
+        while lead < len(history) and history[lead].get("role") == "system":
+            lead += 1
+        system, body = history[:lead], history[lead:]
+
+        def request_for(part: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            prompt = render_template("agent/consolidator_archive.md", strip=True, archive_count=len(part))
+            return [*[dict(m) for m in system], *[dict(m) for m in part], {"role": "user", "content": prompt}]
+
+        def fits(part: list[dict[str, Any]]) -> bool:
+            return estimate_prompt_tokens(request_for(part), request_tools)[0] <= input_token_budget
+
+        # Cut parts from the newest end: each takes the earliest user message it
+        # can start at and still fit (fewer messages never cost more tokens).
+        parts: list[list[dict[str, Any]]] = []
+        end = len(body)
+        while end > 0:
+            starts = [i for i in range(end) if body[i].get("role") == "user"]
+            lo, hi, start = 0, len(starts) - 1, None
+            while lo <= hi:
+                mid = (lo + hi) // 2
+                if fits(body[starts[mid]:end]):
+                    start, hi = starts[mid], mid - 1
+                else:
+                    lo = mid + 1
+            if start is None:
+                return raw_fallback()
+            if start > 0 and not any(m.get("role") == "user" for m in body[:start]):
+                start = 0  # leftovers before the first user message ride with the oldest part
+                if not fits(body[:end]):
+                    return raw_fallback()
+            parts.insert(0, body[start:end])
+            end = start
+
+        summaries: list[str] = []
+        for part in parts:
+            summary = await self._ask_for_summary(request_for(part), runtime=runtime, request_tools=request_tools)
+            if summary is None:
+                return raw_fallback()
+            summaries.append(summary)
+        kept = [s for s in summaries if s != "(nothing)"]
+        if persist:
+            for summary in kept:
+                self.store.append_history(summary, session_key=session_key)
+        if not kept:
+            return "(nothing)"
+        joined = "\n\n".join(kept)
+        limit = max(1, runtime.max_tokens)
+        if estimate_message_tokens({"role": "user", "content": joined}) <= limit:
+            return joined
+        # Too long together: give every part the same share, so the newest isn't cut off.
+        share = max(1, limit // len(kept) - 8)
+        return "\n\n".join(truncate_text_to_tokens(s, share) for s in kept)
 
     async def archive_session(
         self, session: Session, *, archive_end: int, runtime: LLMRuntime, input_token_budget: int
@@ -501,7 +658,10 @@ class MemoryArchiver:
         prefix = Session(key=session.key, messages=list(session.messages[:archive_end]), last_archived=session.last_archived)
         history = prefix.get_history(max_tokens=input_token_budget)
         archive_history = Session(key=session.key, messages=messages).get_history()
-        if not archive_history or history[-len(archive_history):] != archive_history:
+        if self._fixed and archive_history and history[-len(archive_history):] != archive_history:
+            # Doesn't fit in one request: let ``archive`` summarize it in parts.
+            history = archive_history
+        elif not archive_history or history[-len(archive_history):] != archive_history:
             # The stretch to archive doesn't fit in one request: dump it raw.
             return self._raw_checkpoint(
                 messages, session_key=session.key, previous_summary=previous_summary, max_tokens=runtime.max_tokens
@@ -532,12 +692,14 @@ class Consolidator:
         sessions: SessionManager,
         build_messages: Callable[..., list[dict[str, Any]]],
         get_tool_definitions: Callable[[], list[dict[str, Any]]],
+        *,
+        compaction: str = COMPACTION_NANOBOT,
     ) -> None:
         self.store = store
         self.sessions = sessions
         self._build_messages = build_messages
         self._get_tool_definitions = get_tool_definitions
-        self.archiver = MemoryArchiver(store, build_messages, get_tool_definitions)
+        self.archiver = MemoryArchiver(store, build_messages, get_tool_definitions, compaction=compaction)
 
     async def summarize_transcript(
         self,

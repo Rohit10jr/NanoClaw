@@ -98,6 +98,9 @@ file tools). Token counting with tiktoken. See `notes/06-memory.md`.
 nanobot: 200,000); tiktoken added; Dream included as a manual command.
 **Difference:** compaction is checked once before a turn; nanobot also checks
 between tool calls in a turn (phase 2, context governance).
+**Bug 4 A/B (open):** `NANOCLAW_COMPACTION=fixed` summarizes an oversized
+history in parts instead of nanobot's raw dump; default stays `nanobot` until
+a real-model run of `scripts/compare_compaction.py` decides.
 **Found:** compaction usually falls back to a raw dump in nanobot too
 (`UPSTREAM_BUGS.md`, bug 4; kept faithful, fix open).
 *Deferred (see phase 2):* mid-turn compaction, idle auto-compact, scheduled

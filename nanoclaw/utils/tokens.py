@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 TRUNCATED_SUFFIX = "\n... (truncated)"
+TRUNCATED_PREFIX = "... (earlier part truncated)\n"
 # nanobot caches the vocabulary under its data directory.
 DEFAULT_TIKTOKEN_CACHE = Path("~/.nanoclaw/cache/tiktoken")
 
@@ -153,3 +154,36 @@ def truncate_text_to_tokens(text: str, max_tokens: int) -> str:
     if max_tokens <= suffix_bytes:
         return _truncate_to_utf8_bytes(text, max_tokens)
     return _truncate_to_utf8_bytes(text, max_tokens - suffix_bytes) + TRUNCATED_SUFFIX
+
+
+def truncate_text_to_tokens_keep_end(text: str, max_tokens: int) -> str:
+    """Like ``truncate_text_to_tokens`` but keeps the END of ``text``, behind a marker.
+
+    NanoClaw only (``NANOCLAW_COMPACTION=fixed``): a raw dump of old messages
+    is more useful with its newest part than with its oldest.
+    """
+    if max_tokens <= 0:
+        return text
+    enc = get_token_encoding()
+    if enc is not None:
+        try:
+            tokens = enc.encode_ordinary(text)
+            if len(tokens) <= max_tokens:
+                return text
+            body_budget = max_tokens - len(enc.encode_ordinary(TRUNCATED_PREFIX))
+            if body_budget <= 0:
+                return enc.decode(tokens[-max_tokens:])
+            for candidate in range(body_budget, -1, -1):
+                result = TRUNCATED_PREFIX + enc.decode(tokens[len(tokens) - candidate:] if candidate else [])
+                if len(enc.encode_ordinary(result)) <= max_tokens:
+                    return result
+            return enc.decode(tokens[-max_tokens:])
+        except Exception:
+            pass
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_tokens:
+        return text
+    prefix_bytes = len(TRUNCATED_PREFIX.encode("utf-8"))
+    if max_tokens <= prefix_bytes:
+        return encoded[-max_tokens:].decode("utf-8", errors="ignore")
+    return TRUNCATED_PREFIX + encoded[-(max_tokens - prefix_bytes):].decode("utf-8", errors="ignore")

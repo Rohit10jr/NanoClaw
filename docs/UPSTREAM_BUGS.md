@@ -22,7 +22,7 @@ the original project NanoClaw is based on.
 | 1 | `list_dir(recursive=true)` reports an empty directory when the workspace is inside a folder named `build`, `dist`, `venv`, ... | Confirmed | Medium | Fixed (layer 3) |
 | 2 | The configured timezone has no effect: no current date/time reaches the model, although the docs say it does | Confirmed | Medium | Added a current-time block (layer 4) |
 | 3 | A saved oversized tool result can point the model to stale content when a tool-call ID repeats in a session | Mechanism confirmed; real-world trigger not yet confirmed | Low–medium | Fixed with the suggested fix (content-hash file names) |
-| 4 | Compaction usually falls back to a raw dump: the model is only asked for a summary when the request overflows by less than ~600 tokens | Confirmed | Medium | Same as nanobot (kept faithful; fix not applied yet) |
+| 4 | Compaction usually falls back to a raw dump: the model is only asked for a summary when the request overflows by less than ~600 tokens | Confirmed | Medium | Same as nanobot by default; an opt-in fix (`NANOCLAW_COMPACTION=fixed`) is being A/B tested |
 | 5 | When a **repeated** subagent report triggers compaction, the summary marker is placed one message too early, so an already-summarized message is replayed again | Confirmed (only for a report delivered twice) | Low | Correct in NanoClaw (layer 8, difference #8) |
 | 6 | Terminal progress lines are printed as rich markup: a shell command containing `[/x]` **aborts the turn** in `nanobot agent -m`; `[red]`, `[a-z]` etc. silently disappear from the displayed line | Confirmed | Medium | Fixed in NanoClaw (text escaped; layer 10) |
 
@@ -318,9 +318,30 @@ tokens should produce a model-written summary (a call with the archive prompt).
 
 **NanoClaw:** behaves exactly like nanobot (checked by running both with
 overflows of 1, 300 and 3,000 tokens; see `docs/notes/06-memory.md`, "The raw
-fallback"). The fix is not applied; deciding on one is open. The test
-`test_large_overflow_gets_a_raw_checkpoint_like_nanobot` in
-`tests/test_compaction.py` documents the current behaviour.
+fallback"). The test `test_large_overflow_gets_a_raw_checkpoint_like_nanobot`
+in `tests/test_compaction.py` documents that behaviour.
+
+Re-checked on nanobot's latest `main` (`9dc0aba`, 2026-10-04): same results,
+the archive code is unchanged. Not fixed upstream.
+
+**Opt-in fix, being A/B tested:** `NANOCLAW_COMPACTION=fixed` (default
+`nanobot`, unchanged). It combines fixes 2 and 3:
+
+- **Summarize in parts**: when the archive request doesn't fit, the history
+  is split into parts that each fit one request (each starting at a user
+  message), and each part is summarized. The summaries are journaled oldest
+  first and joined into the checkpoint.
+- **Raw dump keeps the end**: if one turn alone can't fit, or the model fails
+  on any part, the raw dump keeps the newest part instead of the oldest.
+
+A first version summarized only the newest part that fit and journaled the
+older rest raw. The dry run of the A/B script showed that facts in that older
+rest dropped out of the agent's context (recall 1/9 against nanobot's 7/9), so
+the older rest is now summarized too.
+
+Compare both on a real model with `scripts/compare_compaction.py` (see
+`docs/notes/06-memory.md`, "Compaction A/B"). If `fixed` wins, it becomes the
+default and this bug is marked fixed in NanoClaw.
 
 ---
 

@@ -26,7 +26,7 @@ from typing import Any
 
 from nanoclaw.agent.context import ContextBuilder
 from nanoclaw.agent.context_governance import merge_adjacent_user_messages_for_model
-from nanoclaw.agent.memory import Consolidator, MemoryStore
+from nanoclaw.agent.memory import COMPACTION_NANOBOT, Consolidator, MemoryStore
 from nanoclaw.agent.messages import EMPTY_FINAL_RESPONSE_MESSAGE, is_blank
 from nanoclaw.agent.runner import AgentRunner, AgentRunResult, AgentRunSpec, ProgressCallback
 from nanoclaw.agent.subagent import SUBAGENT_RESULT_EVENT, SubagentManager, SubagentResult
@@ -93,6 +93,7 @@ class AgentLoop:
         temperature: float = 0.7,
         context_window_tokens: int = DEFAULT_CONTEXT_WINDOW_TOKENS,
         restrict_to_workspace: bool = False,
+        compaction: str = COMPACTION_NANOBOT,
     ) -> None:
         self.provider = provider
         self.restrict_to_workspace = restrict_to_workspace
@@ -119,7 +120,7 @@ class AgentLoop:
         self.tools = tools
         self.sessions = sessions if sessions is not None else SessionManager(workspace)
         self.consolidator = Consolidator(
-            self.memory, self.sessions, self.context.build_messages, self.tools.get_definitions
+            self.memory, self.sessions, self.context.build_messages, self.tools.get_definitions, compaction=compaction
         )
         self.runner = AgentRunner()
         self.start_time = time.time()

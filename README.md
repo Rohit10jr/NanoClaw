@@ -77,6 +77,8 @@ Memory, as in nanobot:
 uv run nanoclaw compact     # summarize the conversation so far (also automatic when it gets too long)
 uv run nanoclaw dream       # fold the summaries into long-term memory (memory/MEMORY.md, USER.md, SOUL.md)
 export NANOCLAW_CONTEXT_WINDOW=128000   # your model's context window in tokens (default 128000)
+export NANOCLAW_COMPACTION=nanobot      # or "fixed": NanoClaw's fix for upstream bug 4 (A/B testing it:
+                                        # uv run python scripts/compare_compaction.py --dry-run)
 ```
 
 Skills, as in nanobot: Markdown procedures in `skills/<name>/SKILL.md`
