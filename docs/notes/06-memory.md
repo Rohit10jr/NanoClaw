@@ -333,7 +333,7 @@ pinned in `test_compaction.py` / `test_memory.py`.
 |---|---|---|---|
 | Long *user* messages as filler | Both modes identical, the model always summarized | The archive request leaves out the new message, so it always fits | Filler comes as long **tool results** (`fetch_log`) |
 | Tool results all 3,000 tokens | Both modes identical again | Every compaction overflowed by the same small amount (~300 tokens) | Log sizes vary 50–150 %, as real tool results do |
-| Facts always first in their stretch | Favoured `nanobot` (its raw dump keeps the start) | Placement bias | Each fact at a random place in its stretch |
+| Facts always first in their stretch | Would favour `nanobot`, whose raw dump keeps the start (reasoned, not measured on its own) | Placement bias | Each fact at a random place in its stretch |
 
 **4. The fix was revised after the dry run.**
 
