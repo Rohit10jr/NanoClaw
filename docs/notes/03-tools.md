@@ -36,7 +36,8 @@ About 1,420 lines (including `agent/tool_results.py`), versus about 4,170 in the
 
 `nanoclaw ask` now gets all seven tools, working in `--workspace`
 (default `~/.nanoclaw/workspace`, like nanobot's `~/.nanobot/workspace`), and
-prints `[tools used: ...]` to stderr.
+prints `[tools used: ...]` to stderr *(since layer 10: progress lines such as
+`↳ $ ls`, as in nanobot's `agent -m`)*.
 
 ## Parameter checking
 
@@ -70,6 +71,9 @@ of `path` is reported instead of silently ignored.
   Windows), and falls back to Latin-1 for text extensions such as `.txt`,
   `.csv`, `.ini` that aren't valid UTF-8.
 - Clear errors: not found, not a file, binary file, offset past the end.
+- *(Since layer 7)* A relative `skills/<name>/...` path missing from the
+  workspace is read from the built-in skills folder (nanobot
+  `_builtin_skill_read_path`); see `07-skills.md`.
 
 ### `write_file(path, content)`
 Creates parent folders; overwrites; replies `Successfully wrote N characters to <path>`.
@@ -136,13 +140,13 @@ The runner keeps every tool result (errors included) within
 - **`read_file` is never cut.** It already pages itself and ends with
   "Use offset=N to continue"; cutting it would lose that instruction.
 - **Anything else that is too long is saved in full** to
-  `<workspace>/.nanoclaw/tool-results/default/<call id>-<content hash>.txt`, and the model
+  `<workspace>/.nanoclaw/tool-results/<session>/<call id>-<content hash>.txt`, and the model
   gets the start and end as a preview plus the path, so it can `read_file`
   the rest:
 
 ```
 [tool output persisted]
-Full output saved to workspace path: /home/me/.nanoclaw/workspace/.nanoclaw/tool-results/default/call_1-3f2a9c81d0e4.txt
+Full output saved to workspace path: /home/me/.nanoclaw/workspace/.nanoclaw/tool-results/cli_direct/call_1-3f2a9c81d0e4.txt
 Original size: 48211 chars
 Preview:
 <start of output>
@@ -156,17 +160,21 @@ Result truncated. Read the saved file if you need the complete output.
 - **The file name includes a hash of the content**, so if a tool-call ID ever
   repeats, each reference in the history still points at the output it
   previewed (an improvement over nanobot; see `docs/UPSTREAM_BUGS.md`, bug 3).
+- **One folder per session** (`cli:direct` → `cli_direct`; `default` when the
+  runner is used on its own). Other sessions' folders are deleted after 7 days,
+  and beyond the newest 32. *(Added at the end of layer 6, as promised for
+  layer 5; nanobot `_cleanup_tool_result_buckets`.)*
 - **Without a workspace** (the runner on its own) results are simply truncated.
 
 ## Differences from nanobot (deliberate)
 
 | # | Difference | nanobot | NanoClaw | Why |
 |---|---|---|---|---|
-| 1 | **When the deny list applies** | Only when `restrict_to_workspace` (or the sandbox) is on, `shell.py:446`. That is **off by default** (`config/schema.py:402`), so by default **nothing is blocked**. nanobot's reasoning: full access is an explicit trust decision. | Checked on **every** command (`ExecTool._guard_command`) | Layers 3–8 have no restriction mode, and we point the agent at real folders. A cheap safety net while learning. **Revisit in layer 9** when `restrict_to_workspace` arrives: switch to nanobot's behaviour or keep it. Chosen with the user before building. |
-| 2 | Deny patterns for memory files | Also blocks shell writes to `history.jsonl` / `.dream_cursor` | Not yet | Those files arrive with memory in layer 6; the patterns come with them |
+| 1 | **When the deny list applies** | Only when `restrict_to_workspace` (or the sandbox) is on, `shell.py:446`. That is **off by default** (`config/schema.py:402`), so by default **nothing is blocked**. nanobot's reasoning: full access is an explicit trust decision. | Checked on **every** command (`ExecTool._guard_command`) | Layers 3–8 have no restriction mode, and we point the agent at real folders. A cheap safety net while learning. Chosen with the user before building. *(Revisited in layer 9: kept always on, chosen with the user; see `09-safety.md`, difference #1.)* |
+| 2 | Deny patterns for memory files | Also blocks shell writes to `history.jsonl` / `.dream_cursor` | Not yet | Those files arrive with memory in layer 6; the patterns come with them. *(Resolved at the end of layer 6: nanobot's five patterns added; the list is now identical to nanobot's.)* |
 | 3 | `list_dir` recursive ignore rule | Checks every part of the **absolute** path, so a workspace that itself sits under a folder named `build` or `dist` lists as empty | Checks only the parts **below** the listed folder | Avoids that surprise; tested |
 | 4 | Images, PDFs, Office files | `read_file` returns images and extracts PDF/DOCX/XLSX/PPTX | Text only; binary files get a clear error | Out of scope for the core |
-| 5 | Saved tool results | One folder per session; old folders deleted after 7 days or beyond 32; files named `<call id>.txt` and never overwritten | One `default` folder; no clean-up; files named `<call id>-<content hash>.txt` | Per-session folders and clean-up come with sessions in layer 5. The content hash fixes a stale-output bug in nanobot's naming (`docs/UPSTREAM_BUGS.md`, bug 3): the same ID with different output gets a different file, identical output reuses one |
+| 5 | Saved tool results | One folder per session; old folders deleted after 7 days or beyond 32; files named `<call id>.txt` and never overwritten | One `default` folder; no clean-up; files named `<call id>-<content hash>.txt` | Per-session folders and clean-up come with sessions in layer 5 *(done at the end of layer 6; only the hash in the name still differs)*. The content hash fixes a stale-output bug in nanobot's naming (`docs/UPSTREAM_BUGS.md`, bug 3): the same ID with different output gets a different file, identical output reuses one |
 
 **What the deny list really is.** It is a list of text patterns
 (`DEFAULT_DENY_PATTERNS` in `shell.py`) matched against the lower-cased command.
@@ -175,17 +183,18 @@ It catches `rm -rf`, `rm -r`, `rm -r -f`, `RM -RF`, `mkfs`, `dd if=`,
 spellings, for example `rm --recursive --force`, `find dir -delete`, or a Python
 one-liner calling `shutil.rmtree`. (Earlier, in chat, I wrongly gave `rm -r -f`
 as an example that slips through; the tests showed it is blocked.) So the list
-prevents accidents, it is not a security boundary. Real protection (workspace
-restriction, sandboxing, private-network blocking) is layer 9. Both the
+prevents accidents, it is not a security boundary. Workspace restriction and
+private-network blocking arrived in layer 9 (`09-safety.md`); OS sandboxing is
+phase 2. Both the
 blocked and the slip-through cases are tested in `tests/test_shell_tool.py`.
 
 ## What we left out
 
 | nanobot feature | Where | Why it exists |
 |---|---|---|
-| Workspace restriction, extra allowed dirs | `_FsTool._resolve_*`, `security/workspace_*.py` | Keep tools inside the workspace (**layer 9**) |
-| Private-network (SSRF) blocking | `security/network.py`, `_validate_url_safe` | Stop `web_fetch` reaching `localhost` or cloud metadata (**layer 9**) |
-| Sandbox (bubblewrap / macOS seatbelt) | `tools/sandbox.py` | OS-level isolation for `exec` (**layer 9**) |
+| Workspace restriction, extra allowed dirs | `_FsTool._resolve_*`, `security/workspace_*.py` | Keep tools inside the workspace (**done in layer 9**; extra allowed dirs: phase 2) |
+| Private-network (SSRF) blocking | `security/network.py`, `_validate_url_safe` | Stop `web_fetch` reaching `localhost` or cloud metadata (**done in layer 9**) |
+| Sandbox (bubblewrap / macOS seatbelt) | `tools/sandbox.py` | OS-level isolation for `exec` (**phase 2**, decided in layer 9) |
 | "File unchanged since last read" | `file_state.py` | Saves tokens when the model rereads a file |
 | `edit_file` `line_hint`, `expected_replacements` | `filesystem.py` | Pick a match by line number; guard the number of replacements |
 | `apply_patch`, ripgrep `search` | `tools/apply_patch.py`, `tools/search.py` | Multi-file patches, fast code search |
@@ -203,7 +212,11 @@ blocked and the slip-through cases are tested in `tests/test_shell_tool.py`.
   caps, every edit strategy and error, CRLF, best-match diff, list_dir rules.
 - `tests/test_shell_tool.py`: real bash; output format, exit codes, timeout
   killing child processes, secrets not visible, deny list (blocked,
-  allowed, and slip-through cases).
+  allowed, and slip-through cases; since the end of layer 6 also writes to
+  the memory journal, while reading it stays allowed).
+- `tests/test_tool_results.py`: large results saved with a preview, `read_file`
+  never cut, the content-hash names (bug 3), truncation without a workspace,
+  and (since the end of layer 6) a folder per session with clean-up.
 - `tests/test_web_tools.py`: mocked HTTP for HTML/JSON/text, redirects,
   bad schemes, too many redirects, errors; fake search function.
 - `tests/test_tools_end_to_end.py`: a scripted model reading, editing and

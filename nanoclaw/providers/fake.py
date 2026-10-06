@@ -16,6 +16,8 @@ class RecordedCall:
     messages: list[dict[str, Any]]
     tools: list[dict[str, Any]] | None
     model: str | None
+    max_tokens: int = 4096
+    temperature: float = 0.7
 
 
 class FakeProvider(LLMProvider):
@@ -48,7 +50,9 @@ class FakeProvider(LLMProvider):
         # Deep-copy so later mutation of the caller's history can't rewrite
         # what the test sees as "sent".
         self.calls.append(
-            RecordedCall(copy.deepcopy(messages), copy.deepcopy(tools), model or self.default_model)
+            RecordedCall(
+                copy.deepcopy(messages), copy.deepcopy(tools), model or self.default_model, max_tokens, temperature
+            )
         )
         if not self._script:
             return LLMResponse(content="FakeProvider: script exhausted", finish_reason="error")

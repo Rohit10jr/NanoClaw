@@ -9,10 +9,12 @@ Its caller builds ``initial_messages`` and decides what to do with the result.
 from __future__ import annotations
 
 import copy
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from nanoclaw.agent.context_governance import merge_adjacent_user_messages_for_model
 from nanoclaw.agent.messages import (
     BUDGET_EXHAUSTED_FINALIZATION_PROMPT,
     DEFAULT_ERROR_MESSAGE,
@@ -29,7 +31,13 @@ from nanoclaw.agent.messages import (
 from nanoclaw.agent.tool_results import normalize_tool_result
 from nanoclaw.agent.tools import ToolRegistry, is_tool_error
 from nanoclaw.agent.tools.registry import with_retry_hint
+from nanoclaw.agent.tools.violations import classify_violation
 from nanoclaw.providers import LLMProvider, LLMResponse, LLMUsage, ToolCallRequest
+from nanoclaw.utils.tool_hints import format_tool_hints
+
+# Called as on_progress(text) for the model's text before tool calls, and
+# on_progress(hint, tool_hint=True) with the tool hints (nanobot's progress events).
+ProgressCallback = Callable[..., Awaitable[None]]
 
 # After this many empty replies in a row, ask once more with tools off.
 _MAX_EMPTY_RETRIES = 2
@@ -52,6 +60,15 @@ class AgentRunSpec:
     workspace: Path | None = None
     max_tokens: int = 4096
     temperature: float = 0.7
+    # Saved tool results go in a folder per session (nanobot: per session key).
+    session_key: str | None = None
+    # When the iterations run out: ask the model for a summary with tools off
+    # (main agent), or just end with the fixed message (subagents set False).
+    finalize_on_max_iterations: bool = True
+    # Replaces the default out-of-iterations message ({max_iterations} is filled in).
+    max_iterations_message: str | None = None
+    # Progress reports while the run works (nanobot ``on_progress``); see ProgressCallback.
+    on_progress: ProgressCallback | None = None
 
 
 @dataclass
@@ -90,6 +107,8 @@ class AgentRunner:
         tools_used: list[str] = []
         usage: LLMUsage | None = None
         empty_retries = 0
+        # Per-run throttle for repeated attempts at the same outside target.
+        workspace_violation_counts: dict[str, int] = {}
 
         for _iteration in range(spec.max_iterations):
             response, request_usage = await self._request_model(spec, messages)
@@ -97,6 +116,8 @@ class AgentRunner:
 
             # 1. The model wants tools: run them and go round again.
             if response.should_execute_tools:
+                if spec.on_progress is not None:
+                    await self._report_progress(spec.on_progress, response)
                 messages.append(
                     build_assistant_message(
                         response.content,
@@ -105,13 +126,14 @@ class AgentRunner:
                     )
                 )
                 for call in response.tool_calls:
-                    raw, ok = await self._execute_tool_call(spec, call)
+                    raw, ok = await self._execute_tool_call(spec, call, workspace_violation_counts)
                     content = normalize_tool_result(
                         call.name,
                         call.id,
                         raw,
                         workspace=spec.workspace,
                         max_chars=spec.max_tool_result_chars,
+                        bucket=spec.session_key or "default",
                     )
                     messages.append(build_tool_message(call.id, call.name, content))
                     if ok:
@@ -166,6 +188,18 @@ class AgentRunner:
         messages.append(build_assistant_message(final))
         return AgentRunResult(final, messages, tools_used, usage, "max_iterations")
 
+    @staticmethod
+    async def _report_progress(on_progress: ProgressCallback, response: LLMResponse) -> None:
+        """The model's text, then the tool hints, before the tools run.
+
+        (nanobot ``AgentProgressHook.before_execute_tools``, without streaming)
+        """
+        thought = strip_think(response.content) if response.content else None
+        if thought:
+            await on_progress(thought)
+        hint = strip_think(format_tool_hints(response.tool_calls))
+        await on_progress(hint or "", tool_hint=True)
+
     async def _request(
         self,
         spec: AgentRunSpec,
@@ -176,7 +210,7 @@ class AgentRunner:
         """One provider call. Inline <think> blocks are removed from the answer."""
         tools = spec.tools.get_definitions() if with_tools else []
         response = await spec.provider.safe_chat(
-            messages=messages,
+            messages=merge_adjacent_user_messages_for_model(messages),
             tools=tools or None,
             model=spec.model,
             max_tokens=spec.max_tokens,
@@ -234,21 +268,36 @@ class AgentRunner:
         self,
         spec: AgentRunSpec,
         call: ToolCallRequest,
+        workspace_violation_counts: dict[str, int] | None = None,
     ) -> tuple[str, bool]:
         """Run one call; return the text for the tool message and whether it succeeded.
 
-        Mirrors nanobot agent/tools/execution.py _execute_tool_call.
+        Mirrors nanobot agent/tools/execution.py _execute_tool_call. Boundary
+        errors (private network, outside the workspace) are reported as nanobot
+        does (``classify_violation``).
         """
+        counts = workspace_violation_counts if workspace_violation_counts is not None else {}
+
+        def failed(raw_text: str, payload: str) -> tuple[str, bool]:
+            handled = classify_violation(
+                raw_text=raw_text,
+                soft_payload=payload,
+                tool_name=call.name,
+                arguments=call.arguments,
+                workspace_violation_counts=counts,
+            )
+            return (handled if handled is not None else payload), False
+
         tool, params, error = spec.tools.prepare_call(call.name, call.arguments)
         if error:
-            return with_retry_hint(error), False
+            return failed(error, with_retry_hint(error))
         assert tool is not None
         try:
             result = await tool.execute(**params)
         except Exception as exc:
-            return with_retry_hint(f"Error: {type(exc).__name__}: {exc}"), False
+            return failed(str(exc), with_retry_hint(f"Error: {type(exc).__name__}: {exc}"))
         if is_tool_error(result):
-            return with_retry_hint(str(result)), False
+            return failed(str(result), with_retry_hint(str(result)))
         return ("" if result is None else str(result)), True
 
     async def _finalize_after_max_iterations(
@@ -256,14 +305,21 @@ class AgentRunner:
         spec: AgentRunSpec,
         messages: list[dict[str, Any]],
     ) -> tuple[str, LLMUsage | None]:
+        if not spec.finalize_on_max_iterations:
+            return self._max_iterations_fallback(spec), None
         response = await self._request(
             spec,
             messages + [{"role": "user", "content": BUDGET_EXHAUSTED_FINALIZATION_PROMPT}],
             with_tools=False,
         )
         if response.is_error or response.has_tool_calls or is_blank(response.content):
-            return MAX_ITERATIONS_MESSAGE.format(max_iterations=spec.max_iterations), response.usage
+            return self._max_iterations_fallback(spec), response.usage
         return response.content or "", response.usage
+
+    @staticmethod
+    def _max_iterations_fallback(spec: AgentRunSpec) -> str:
+        """The fixed out-of-iterations message. (nanobot runner.py:1249)"""
+        return (spec.max_iterations_message or MAX_ITERATIONS_MESSAGE).format(max_iterations=spec.max_iterations)
 
     @staticmethod
     def _append_model_error_placeholder(messages: list[dict[str, Any]]) -> None:

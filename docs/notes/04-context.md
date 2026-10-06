@@ -54,7 +54,8 @@ Sections are joined with `\n\n---\n\n`, in nanobot's order
 
 On first run (`ask` or `prompt`), `SOUL.md`, `USER.md` and `AGENTS.md` are
 copied into the workspace (`~/.nanoclaw/workspace` by default). They are
-**never overwritten** afterwards (nanobot `sync_workspace_templates`).
+**never overwritten** afterwards (nanobot `sync_workspace_templates`). Since
+layer 6, `memory/MEMORY.md` and an empty `memory/history.jsonl` are created too.
 
 **An unfilled form is left out.** While `USER.md` or `AGENTS.md` is still
 identical to the starting template (ignoring surrounding whitespace), it is not
@@ -68,7 +69,7 @@ The prompt pieces under `nanoclaw/templates/agent/` are Jinja2 templates, as in
 nanobot, with the same settings (`autoescape=False`, `trim_blocks`,
 `lstrip_blocks`). This keeps them diffable against nanobot's: the only
 differences are the name (nanobot → NanoClaw), "Dream" (nanobot's memory job,
-layer 6) written generically, and removed lines about features we don't have
+layer 6) written generically until layer 6 restored it, and removed lines about features we don't have
 (images, cron, heartbeat, `apply_patch`).
 
 ## Why per-turn data goes in the user message
@@ -89,22 +90,22 @@ do change (here, the time) are attached to the **user's message** inside
 |---|---|---|---|---|
 | 1 | **Current date and time** | Not given to the model at all at this commit; no default runtime-context provider adds it | A `Current Time` runtime-context block on every user message (`runtime_context.current_time_block`) | Without it the model can't know what "today", "this week" or "latest" means. Uses nanobot's own block mechanism, so the system prompt stays cacheable. Chosen with the user |
 | 2 | **Separate project folder** | Optional (mainly in the web UI): personal files (`SOUL.md`, `USER.md`, memory, skills) stay in the agent's home; `AGENTS.md`, file tools and shell use a chosen project folder; a "Current Project" section is added | One folder for everything (nanobot's default when no project is chosen) | Not needed yet; recorded in the roadmap to add together with a `--project` option |
-| 3 | `identity.md` wording | "Only Dream memory-consolidation tasks may edit ..." | "Only memory-consolidation tasks may edit ..." | Dream is nanobot's name for its memory job, which arrives in layer 6 |
+| 3 | `identity.md` wording | "Only Dream memory-consolidation tasks may edit ..." | "Only memory-consolidation tasks may edit ..." | Dream is nanobot's name for its memory job, which arrives in layer 6. *(Resolved in layer 6: nanobot's wording restored.)* |
 
 ## What we left out
 
 | nanobot feature | Where | Why it exists |
 |---|---|---|
-| Memory section | `build_system_prompt`, `MemoryStore` | Long-term facts (**layer 6**) |
-| Active skills + skills list | `SkillsLoader` | On-demand procedures (**layer 7**) |
-| Archived conversation summary | `session_summary` | Context after compaction (**layer 6**) |
-| Skills named in the message | `build_explicit_skill_runtime_context` | Auto-load a skill the user mentions (**layer 7**) |
+| Memory section | `build_system_prompt`, `MemoryStore` | Long-term facts (**layer 6**, done) |
+| Active skills + skills list | `SkillsLoader` | On-demand procedures (**layer 7**, done) |
+| Archived conversation summary | `session_summary` | Context after compaction (**layer 6**, done) |
+| Skills named in the message | `build_explicit_skill_runtime_context` | Auto-load a skill the user mentions (**layer 7**, done) |
 | Images in the user message | `build_user_content` | Vision models |
 | Legacy `SOUL.md` upgrade | `_load_bootstrap_files` | Migrating old installs |
 | Git-backed profile files | `sync_workspace_templates` → `GitStore` | History of `SOUL.md`/`USER.md`/`MEMORY.md` edits (nanobot creates `.git` and `.gitignore` in the workspace) |
 | `HEARTBEAT.md` | `templates/HEARTBEAT.md`, gateway heartbeat job | Periodic background task list |
 | `prompts/` overrides | `templates/prompts/README.md`, `utils/workspace_prompts.py` | Editable prompts for Dream (memory) and the heartbeat evaluator; not part of the system prompt |
-| Runtime-context detach/reattach | `runtime_context.py` | Hiding the blocks when showing history in UIs |
+| Runtime-context detach/reattach | `runtime_context.py` | Hiding the blocks when showing history in UIs. (Since layer 5 we do return and save nanobot's marker of what was appended, which these functions use.) |
 | Other runtime-context providers | tools, web UI | Session messages, goals, CLI apps, quotes |
 
 ## Files
@@ -121,11 +122,11 @@ About 260 lines of code plus the templates, versus about 640 in nanobot's
 
 ## Tests
 
-`tests/test_context.py` (28 tests):
+`tests/test_context.py` (29 tests):
 
 - **Templates:** file sync creates missing files and never overwrites; rendering leaves no Jinja syntax behind.
 - **System prompt:** sections in nanobot's order and separators; runtime, workspace and untrusted-content lines; channel hints (`cli`, `telegram`, `email`, none); Windows/macOS policy (simulated); unedited `USER.md`/`AGENTS.md` skipped, edited ones included; empty files skipped; prompt identical between calls.
-- **Runtime context:** tags, appending to text and to content parts, the time line in three timezones, local time by default.
+- **Runtime context:** tags, appending to text and to content parts (with the marker, added in layer 5), the time line in three timezones, local time by default.
 - **Messages:** `[system, *history, user]`; a trailing user message merged (text and list content); input history untouched.
 - **CLI:** `nanoclaw prompt` prints the prompt and creates the files; `nanoclaw ask` sends an edited `SOUL.md`, the terminal hint, and the time only in the user message.
 
@@ -137,7 +138,7 @@ environment):
 
 | Check | How | Result |
 |---|---|---|
-| Whole system prompt | Fresh workspace, each project's own `sync_workspace_templates`, then `ContextBuilder(ws).build_system_prompt(channel="cli")` in both; `diff` of the output | Identical except the recorded differences (name, "Dream" wording, image line) and nanobot's `# Skills` section, which arrives in layer 7 |
+| Whole system prompt | Fresh workspace, each project's own `sync_workspace_templates`, then `ContextBuilder(ws).build_system_prompt(channel="cli")` in both; `diff` of the output | Identical except the recorded differences (name, "Dream" wording, image line) and nanobot's `# Skills` section, which arrives in layer 7 *(since layer 7 the whole prompt matches, skills included; see `07-skills.md`)* |
 | Message building | The same 5 cases through both `build_messages`: empty history with a runtime block; history ending with the assistant; trailing user message as text, as a list of parts, and empty | Identical output in all 5 cases |
 | Copied templates | `diff` of `platform_policy.md`, `tool_contract.md`, `USER.md` | Identical apart from the name |
 | When workspace files are created | Where nanobot calls `sync_workspace_templates` | Also on startup of its `agent` command (`cli/agent.py:154`), as ours does on `ask`/`prompt` |

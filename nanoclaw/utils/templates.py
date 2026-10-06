@@ -48,18 +48,27 @@ def load_bundled_template(name: str) -> str | None:
 def sync_workspace_templates(workspace: Path) -> list[str]:
     """Create any missing starting files in ``workspace``. Never overwrites.
 
-    Returns the names of the files created. nanobot also creates
-    ``memory/MEMORY.md``, ``memory/history.jsonl`` and ``skills/`` (those come
-    with layers 6 and 7), ``HEARTBEAT.md`` and ``prompts/README.md`` (for
-    features NanoClaw doesn't have), and a git repository tracking
-    ``SOUL.md``/``USER.md``/``MEMORY.md``.
+    Returns the paths created, relative to the workspace: ``AGENTS.md``,
+    ``SOUL.md``, ``USER.md``, ``memory/MEMORY.md`` and an empty
+    ``memory/history.jsonl``; the ``skills/`` folder is created too (not
+    listed, as in nanobot). nanobot also creates ``HEARTBEAT.md`` and
+    ``prompts/README.md`` (for features NanoClaw doesn't have), and a git
+    repository tracking ``SOUL.md``/``USER.md``/``MEMORY.md``.
     """
     workspace.mkdir(parents=True, exist_ok=True)
     added: list[str] = []
-    for name in WORKSPACE_FILES:
+
+    def write(name: str, content: str) -> None:
         dest = workspace / name
         if dest.exists():
-            continue
-        dest.write_text(load_bundled_template(name) or "", encoding="utf-8")
+            return
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(content, encoding="utf-8")
         added.append(name)
+
+    for name in WORKSPACE_FILES:
+        write(name, load_bundled_template(name) or "")
+    write("memory/MEMORY.md", load_bundled_template("memory/MEMORY.md") or "")
+    write("memory/history.jsonl", "")
+    (workspace / "skills").mkdir(exist_ok=True)
     return added

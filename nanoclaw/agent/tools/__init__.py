@@ -8,8 +8,11 @@ from nanoclaw.agent.tools.base import Tool, ToolResult, is_tool_error
 from nanoclaw.agent.tools.registry import RETRY_HINT, ToolRegistry
 
 
-def build_default_tools(workspace: Path) -> ToolRegistry:
+def build_default_tools(workspace: Path, *, restrict_to_workspace: bool = False) -> ToolRegistry:
     """The standard tool set, rooted at ``workspace``.
+
+    ``restrict_to_workspace`` keeps file tools and ``exec`` inside the
+    workspace (nanobot ``tools.restrictToWorkspace``, off by default).
 
     nanobot discovers tools by scanning its tools package (agent/tools/loader.py);
     NanoClaw lists them explicitly.
@@ -20,11 +23,11 @@ def build_default_tools(workspace: Path) -> ToolRegistry:
 
     registry = ToolRegistry()
     for tool in (
-        ReadFileTool(workspace),
-        WriteFileTool(workspace),
-        EditFileTool(workspace),
-        ListDirTool(workspace),
-        ExecTool(working_dir=workspace),
+        ReadFileTool(workspace, restrict_to_workspace=restrict_to_workspace),
+        WriteFileTool(workspace, restrict_to_workspace=restrict_to_workspace),
+        EditFileTool(workspace, restrict_to_workspace=restrict_to_workspace),
+        ListDirTool(workspace, restrict_to_workspace=restrict_to_workspace),
+        ExecTool(working_dir=workspace, restrict_to_workspace=restrict_to_workspace),
         WebFetchTool(),
         WebSearchTool(),
     ):

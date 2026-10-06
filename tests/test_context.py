@@ -29,7 +29,11 @@ def ws(tmp_path):
 
 
 def test_sync_creates_missing_files_and_never_overwrites(tmp_path):
-    assert sync_workspace_templates(tmp_path) == ["AGENTS.md", "SOUL.md", "USER.md"]
+    assert sync_workspace_templates(tmp_path) == [
+        "AGENTS.md", "SOUL.md", "USER.md", "memory/MEMORY.md", "memory/history.jsonl"
+    ]
+    assert (tmp_path / "memory" / "MEMORY.md").read_text() == load_bundled_template("memory/MEMORY.md")
+    assert (tmp_path / "memory" / "history.jsonl").read_text() == ""
     for name in WORKSPACE_FILES:
         assert (tmp_path / name).read_text() == load_bundled_template(name)
 
@@ -58,13 +62,14 @@ def test_sections_in_nanobot_order(ws):
     prompt = ContextBuilder(ws).build_system_prompt(channel="cli")
 
     sections = prompt.split(SECTION_SEPARATOR)
-    assert len(sections) == 3
-    identity, bootstrap, tools = sections
+    assert len(sections) == 4
+    identity, bootstrap, tools, skills = sections
     assert identity.startswith("## Runtime\n")
     assert bootstrap.index("## AGENTS.md\n\nUse tabs.") < bootstrap.index("## SOUL.md") < bootstrap.index(
         "## USER.md\n\nName: Sam"
     )
     assert tools.startswith("# Tool Usage Notes")
+    assert skills.startswith("# Skills\n")  # built-in skills (layer 7)
 
 
 def test_identity_has_runtime_workspace_and_untrusted_rule(ws):
@@ -123,7 +128,7 @@ def test_empty_and_missing_files_are_skipped(tmp_path):
     (tmp_path / "SOUL.md").write_text("   \n")
     prompt = ContextBuilder(tmp_path).build_system_prompt()
     assert "## SOUL.md" not in prompt
-    assert len(prompt.split(SECTION_SEPARATOR)) == 2  # identity + tool notes only
+    assert len(prompt.split(SECTION_SEPARATOR)) == 3  # identity + tool notes + skills only
 
 
 def test_soul_edits_change_the_prompt(ws):
@@ -147,11 +152,18 @@ def test_wrap_runtime_context_lines():
 
 def test_append_runtime_context_to_text_and_parts():
     blocks = [RuntimeContextBlock("a", "A"), RuntimeContextBlock("b", "B")]
-    assert append_runtime_context("hi", blocks) == "hi\n\nA\n\nB"
-    assert append_runtime_context("", blocks) == "A\n\nB"
-    assert append_runtime_context("hi", []) == "hi"
+    assert append_runtime_context("hi", blocks) == (
+        "hi\n\nA\n\nB",
+        {"version": 1, "sources": ["a", "b"], "suffix": "A\n\nB"},
+    )
+    assert append_runtime_context("", blocks)[0] == "A\n\nB"
+    assert append_runtime_context("hi", []) == ("hi", None)
     parts = [{"type": "text", "text": "hi"}]
-    assert append_runtime_context(parts, blocks) == [*parts, {"type": "text", "text": "A"}, {"type": "text", "text": "B"}]
+    added = [{"type": "text", "text": "A"}, {"type": "text", "text": "B"}]
+    assert append_runtime_context(parts, blocks) == (
+        [*parts, *added],
+        {"version": 1, "sources": ["a", "b"], "blocks": added},
+    )
 
 
 @pytest.mark.parametrize(
@@ -182,6 +194,15 @@ def test_build_messages_shape(ws):
     msgs = ContextBuilder(ws).build_messages([], "hello", channel="cli", runtime_context_blocks=[block])
     assert [m["role"] for m in msgs] == ["system", "user"]
     assert msgs[1]["content"] == "hello\n\n[T]"
+    # Internal marker for the session; providers drop ``_meta`` before sending.
+    assert msgs[1]["_meta"] == {"runtime_context": {"version": 1, "sources": ["time"], "suffix": "[T]"}}
+
+
+def test_merged_message_keeps_the_runtime_context_marker(ws):
+    block = RuntimeContextBlock("time", "[T]")
+    msgs = ContextBuilder(ws).build_messages([{"role": "user", "content": "q1"}], "q2", runtime_context_blocks=[block])
+    assert msgs[-1]["content"] == "q1\n\nq2\n\n[T]"
+    assert msgs[-1]["_meta"]["runtime_context"]["suffix"] == "[T]"
 
 
 def test_history_is_kept_between_system_and_new_message(ws):
@@ -212,7 +233,7 @@ def test_cli_prompt_command_prints_system_prompt_and_creates_files(capsys, tmp_p
     captured = capsys.readouterr()
     assert captured.out.strip() == ContextBuilder(ws).build_system_prompt(channel="cli").strip()
     assert f"[created {ws / 'SOUL.md'}]" in captured.err
-    assert sorted(p.name for p in ws.iterdir()) == ["AGENTS.md", "SOUL.md", "USER.md"]
+    assert sorted(p.name for p in ws.iterdir()) == ["AGENTS.md", "SOUL.md", "USER.md", "memory", "skills"]
 
 
 def test_cli_ask_sends_edited_soul_to_the_model(tmp_path):

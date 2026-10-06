@@ -14,6 +14,13 @@ import httpx
 
 from nanoclaw.agent.tools.base import Tool, ToolResult
 from nanoclaw.agent.tools.schema import object_schema
+from nanoclaw.security.network import (
+    PinnedDNSAsyncTransport,
+    UnsafeURLRequestError,
+    httpx_env_proxy_mounts,
+    resolve_url_target,
+    validate_url_target,
+)
 
 _DEFAULT_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_2) AppleWebKit/537.36"
 MAX_REDIRECTS = 5
@@ -36,17 +43,21 @@ def _normalize(text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
-def _validate_url(url: str) -> tuple[bool, str]:
-    """Scheme and domain check only. Blocking private-network addresses is layer 9."""
-    try:
-        p = urlparse(url)
-    except ValueError as e:
-        return False, str(e)
-    if p.scheme not in ("http", "https"):
-        return False, f"Only http/https allowed, got '{p.scheme or 'none'}'"
-    if not p.netloc:
-        return False, "Missing domain"
-    return True, ""
+def _validate_url_safe(url: str) -> tuple[bool, str]:
+    """Scheme, domain and resolved-address check: private/internal addresses are blocked."""
+    return validate_url_target(url)
+
+
+def _fetch_client_kwargs(timeout: float, inner: httpx.AsyncBaseTransport | None) -> dict[str, Any]:
+    """Connect only to checked addresses; honour proxy environment variables.
+
+    (nanobot ``_fetch_client_kwargs``, without the configured-proxy option)
+    """
+    kwargs: dict[str, Any] = {"timeout": timeout, "transport": PinnedDNSAsyncTransport(inner=inner)}
+    mounts = httpx_env_proxy_mounts()
+    if mounts:
+        kwargs["mounts"] = mounts
+    return kwargs
 
 
 def _error_json(error: str, url: str) -> ToolResult:
@@ -90,11 +101,11 @@ class WebFetchTool(Tool):
     ) -> str:
         url = url.strip(" \t\r\n`\"'")
         max_chars = maxChars or self.max_chars
-        ok, error = _validate_url(url)
+        ok, error = _validate_url_safe(url)
         if not ok:
             return _error_json(f"URL validation failed: {error}", url)
         try:
-            async with httpx.AsyncClient(timeout=30.0, transport=self._transport) as client:
+            async with httpx.AsyncClient(**_fetch_client_kwargs(30.0, self._transport)) as client:
                 r, redirect_error = await self._get_with_redirects(client, url)
             if redirect_error:
                 return _error_json(redirect_error, url)
@@ -135,17 +146,29 @@ class WebFetchTool(Tool):
     async def _get_with_redirects(
         self, client: httpx.AsyncClient, url: str
     ) -> tuple[httpx.Response | None, str | None]:
-        """Follow redirects one at a time, re-checking each target (nanobot does the same)."""
+        """Follow redirects one at a time, checking every target before requesting it.
+
+        (nanobot ``_get_with_safe_redirects``)
+        """
         current = url
         for _ in range(MAX_REDIRECTS + 1):
-            ok, error = _validate_url(current)
+            ok, error, _ = resolve_url_target(current)
             if not ok:
                 return None, f"Redirect blocked: {error}"
-            response = await client.get(current, headers={"User-Agent": self.user_agent}, follow_redirects=False)
+            try:
+                response = await client.get(current, headers={"User-Agent": self.user_agent}, follow_redirects=False)
+            except UnsafeURLRequestError as exc:
+                return None, f"Redirect blocked: {exc}"
             location = response.headers.get("location")
             if not (300 <= response.status_code < 400 and location):
                 return response, None
-            current = urljoin(str(response.url), location)
+            next_url = urljoin(str(response.url), location)
+            ok, error = _validate_url_safe(next_url)
+            if not ok:
+                await response.aclose()
+                return None, f"Redirect blocked: {error}"
+            await response.aclose()
+            current = next_url
         return None, f"Too many redirects: exceeded limit of {MAX_REDIRECTS}"
 
     def _extract_readable_html(self, html_content: str, extract_mode: str) -> str:

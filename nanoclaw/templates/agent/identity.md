@@ -15,7 +15,7 @@ NanoClaw's agent workspace is at: {{ agent_workspace_path }}
 - Custom skills: skills/{% raw %}{skill-name}{% endraw %}/SKILL.md
 {% endif %}
 
-Only memory-consolidation tasks may edit the profile and long-term memory files listed above.
+Only Dream memory-consolidation tasks may edit the profile and long-term memory files listed above.
 
 {{ platform_policy }}
 {% if channel == 'telegram' or channel == 'qq' or channel == 'discord' %}

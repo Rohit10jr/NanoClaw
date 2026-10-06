@@ -3,7 +3,7 @@
 Mirrors nanobot's ``ContextGovernor.normalize_tool_result``
 (agent/context_governance.py) and ``maybe_persist_tool_result``
 (utils/helpers.py). A result longer than ``max_chars`` is saved in full to
-``<workspace>/.nanoclaw/tool-results/`` and the model gets a preview (start
+``<workspace>/.nanoclaw/tool-results/<session>/`` and the model gets a preview (start
 and end) plus the file path, so it can ``read_file`` the rest. Without a
 workspace the result is truncated instead.
 """
@@ -12,11 +12,16 @@ from __future__ import annotations
 
 import hashlib
 import re
+import shutil
+import time
 from pathlib import Path
 
 from nanoclaw.agent.messages import is_blank, truncate_text
 
 TOOL_RESULTS_DIR = ".nanoclaw/tool-results"
+# Other sessions' folders are removed after a week, and beyond 32 folders.
+TOOL_RESULT_RETENTION_SECS = 7 * 24 * 60 * 60
+TOOL_RESULT_MAX_BUCKETS = 32
 
 # read_file pages its own output (128k cap plus a "Use offset=N to continue"
 # footer), so it is never cut or offloaded; cutting it would lose the footer.
@@ -54,6 +59,32 @@ def render_tool_result_reference(
     return result
 
 
+def _bucket_mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def cleanup_tool_result_buckets(root: Path, current_bucket: Path) -> None:
+    """Delete old session folders: older than a week, or beyond the newest 32.
+
+    The current session's folder is never deleted. (nanobot ``_cleanup_tool_result_buckets``)
+    """
+    siblings = [path for path in root.iterdir() if path.is_dir() and path != current_bucket]
+    cutoff = time.time() - TOOL_RESULT_RETENTION_SECS
+    for path in siblings:
+        if _bucket_mtime(path) < cutoff:
+            shutil.rmtree(path, ignore_errors=True)
+    keep = max(TOOL_RESULT_MAX_BUCKETS - 1, 0)
+    siblings = [path for path in siblings if path.exists()]
+    if len(siblings) <= keep:
+        return
+    siblings.sort(key=_bucket_mtime, reverse=True)
+    for path in siblings[keep:]:
+        shutil.rmtree(path, ignore_errors=True)
+
+
 def maybe_persist_tool_result(
     workspace: Path | None,
     bucket: str,
@@ -66,8 +97,13 @@ def maybe_persist_tool_result(
     if workspace is None or max_chars <= 0 or len(content) <= max_chars:
         return content
 
-    directory = workspace / TOOL_RESULTS_DIR / safe_filename(bucket)
+    root = workspace / TOOL_RESULTS_DIR
+    directory = root / safe_filename(bucket)
     directory.mkdir(parents=True, exist_ok=True)
+    try:
+        cleanup_tool_result_buckets(root, directory)
+    except OSError:
+        pass
     # The name includes a hash of the content, so the same tool-call ID with
     # different output can never share a file: every reference in the history
     # keeps pointing at the output it previewed. Identical output reuses the

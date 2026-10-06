@@ -120,7 +120,11 @@ message *"I reached the maximum number of tool call iterations (N)..."* is used.
 
 **Helper prompts are never saved.** The two extra user messages above are added
 to that one request only, not to `messages`. The saved history contains only
-what the user and model actually said.
+what the user and model actually said. *(Updated in layer 5: before each
+request, adjacent user messages are merged into one with the runtime-context
+block kept last, as nanobot's context governance does. So the "please answer"
+prompt reaches the model inside the user's message, not as a second one. See
+`05-sessions.md`.)*
 
 **A model error leaves history usable.** The run stops with `stop_reason =
 "error"` and the error text as `final_content`, and the placeholder
@@ -142,15 +146,15 @@ saved to a file with a preview instead, and `read_file` is never cut. See
 
 | nanobot feature | Where | Why it exists |
 |---|---|---|
-| Hooks (`before_iteration`, `before_execute_tool`, `on_stream`, ...) | `agent/hook.py`, used throughout `_run_core` | Plugins and UIs observe or change each step |
+| Hooks (`before_iteration`, `before_execute_tool`, `on_stream`, ...) | `agent/hook.py`, used throughout `_run_core` | Plugins and UIs observe or change each step *(layer 10 added one slice: the `on_progress` callback for progress lines)* |
 | Mid-turn injections | `_try_drain_injections` | Fold a user's follow-up message into the running turn |
 | Checkpoints | `_emit_checkpoint` | Resume after a crash mid-turn |
 | Length recovery | `build_length_recovery_message`, `_MAX_LENGTH_RECOVERIES` | Ask the model to continue a reply cut off by `max_tokens`, then join the parts |
 | Parallel tools | `execution.py` `_partition_tool_batches`, `Tool.concurrency_safe` | Run read-only tools at the same time |
-| Repeated-call throttling | `repeated_external_lookup_error`, workspace-violation counting | Stop the model hammering the same URL or forbidden path |
-| SSRF / workspace violation classification | `execution.py` `_classify_violation` | Treat security blocks specially (layer 9 territory) |
-| Argument casting + full schema validation | `Tool.cast_params`, `validate_params`, `tools/schema.py` | `"5"` → `5`, type checks; **comes in layer 3** |
-| Context governance + compaction | `agent/context_governance.py` | Keep requests inside the context window (**layer 6**). Its tool-result offloading was ported in layer 3 |
+| Repeated-call throttling | `repeated_external_lookup_error`, workspace-violation counting | Stop the model hammering the same URL or forbidden path *(the forbidden-path part done in layer 9; repeated lookups: phase 2)* |
+| SSRF / workspace violation classification | `execution.py` `_classify_violation` | Treat security blocks specially *(done in layer 9: `agent/tools/violations.py`)* |
+| Argument casting + full schema validation | `Tool.cast_params`, `validate_params`, `tools/schema.py` | `"5"` → `5`, type checks; **comes in layer 3** (done) |
+| Context governance + compaction | `agent/context_governance.py` | Keep requests inside the context window (**layer 6**). Its tool-result offloading was ported in layer 3, the adjacent-user merge in layer 5, compaction before a turn in layer 6; the rest is phase 2 |
 | Streaming, reasoning events | hooks, `IncrementalThinkExtractor` | Live output in UIs |
 | Provider-state continuation | `ProviderConversationStateController` | OpenAI Responses API server-side state |
 | Usage estimation + per-round usage | `_usage_or_estimate`, `round_usages` | Cost tracking when providers don't report usage |
@@ -159,7 +163,8 @@ saved to a file with a preview instead, and `read_file` is never cut. See
 ## Try it
 
 `nanoclaw ask` now runs through the runner. It has no tools until layer 3, so
-it behaves like before, but every reply goes through the full loop:
+it behaves like before, but every reply goes through the full loop
+*(since layer 5 `ask` goes through `AgentLoop`, which calls the runner)*:
 
 ```bash
 uv run nanoclaw ask "hello"

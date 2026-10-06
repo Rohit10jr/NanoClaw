@@ -1,9 +1,9 @@
 """Building the system prompt and the message list for a turn.
 
 Mirrors nanobot/agent/context.py (``ContextBuilder``). The system prompt is
-assembled from Markdown: rendered templates plus the user-editable files in the
-workspace (``AGENTS.md``, ``SOUL.md``, ``USER.md``). Memory (layer 6) and
-skills (layer 7) will add more sections.
+assembled from Markdown: rendered templates, the user-editable files in the
+workspace (``AGENTS.md``, ``SOUL.md``, ``USER.md``), long-term memory
+(``memory/MEMORY.md``), skills, and the summary of compacted conversation.
 """
 
 from __future__ import annotations
@@ -13,7 +13,14 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from nanoclaw.runtime_context import RuntimeContextBlock, append_runtime_context
+from nanoclaw.runtime_context import (
+    RUNTIME_CONTEXT_MESSAGE_META,
+    RuntimeContextBlock,
+    append_runtime_context,
+)
+from nanoclaw.agent.memory import MemoryStore
+from nanoclaw.agent.skills import SkillsLoader
+from nanoclaw.session.summary import SessionSummary
 from nanoclaw.utils.templates import load_bundled_template, render_template
 
 SECTION_SEPARATOR = "\n\n---\n\n"
@@ -30,16 +37,42 @@ class ContextBuilder:
 
     def __init__(self, workspace: Path) -> None:
         self.workspace = workspace
+        self.memory = MemoryStore(workspace)
+        self.skills = SkillsLoader(workspace)
 
     # --- system prompt -------------------------------------------------------
 
-    def build_system_prompt(self, *, channel: str | None = None) -> str:
-        """Identity, then the workspace files, then the tool usage notes."""
+    def build_system_prompt(
+        self,
+        *,
+        channel: str | None = None,
+        session_summary: SessionSummary | None = None,
+        include_memory: bool = True,
+    ) -> str:
+        """Identity, workspace files, tool usage notes, memory, skills, then the conversation summary."""
         parts = [self._get_identity(channel=channel)]
         bootstrap = self._load_bootstrap_files()
         if bootstrap:
             parts.append(bootstrap)
         parts.append(render_template("agent/tool_contract.md"))
+        if include_memory:
+            memory = self.memory.read_memory()
+            if memory and not self._is_template_content(memory, "memory/MEMORY.md"):
+                parts.append(f"# Memory\n\n## Long-term Memory\n{memory}")
+        active_skills = self.skills.get_always_skills()
+        if active_skills:
+            active_content = self.skills.load_skills_for_context(active_skills)
+            if active_content:
+                parts.append(f"# Active Skills\n\n{active_content}")
+        skills_summary = self.skills.build_skills_summary(exclude=set(active_skills))
+        if skills_summary:
+            parts.append(render_template("agent/skills_section.md", skills_summary=skills_summary))
+        if session_summary and session_summary["text"] != "(nothing)":
+            parts.append(
+                "[Archived Context Summary]\n\n"
+                f"Previous conversation summary (last active {session_summary['last_active']}):\n"
+                f"{session_summary['text']}"
+            )
         return SECTION_SEPARATOR.join(parts)
 
     def _get_identity(self, channel: str | None = None) -> str:
@@ -88,32 +121,50 @@ class ContextBuilder:
         *,
         runtime_context_blocks: Sequence[RuntimeContextBlock] | None = None,
     ) -> dict[str, Any]:
-        """The user's new message, with runtime context (e.g. the time) appended."""
-        content = append_runtime_context(current_message, list(runtime_context_blocks or ()))
-        return {"role": "user", "content": content}
+        """The user's new message, with runtime context (e.g. the time) appended.
+
+        Skills named as ``$skill-name`` in the message are appended too, unless
+        the caller already included that block.
+        """
+        blocks = list(runtime_context_blocks or ())
+        skill_context = self.skills.build_explicit_skill_runtime_context(current_message)
+        if skill_context is not None and skill_context not in blocks:
+            blocks.append(skill_context)
+        content, marker = append_runtime_context(current_message, blocks)
+        current: dict[str, Any] = {"role": "user", "content": content}
+        if marker is not None:
+            # Internal: the session saves it; providers drop ``_meta``.
+            current["_meta"] = {RUNTIME_CONTEXT_MESSAGE_META: marker}
+        return current
 
     def build_messages(
         self,
         history: list[dict[str, Any]],
-        current_message: str,
+        current_message: str | None,
         *,
         channel: str | None = None,
         runtime_context_blocks: Sequence[RuntimeContextBlock] | None = None,
+        session_summary: SessionSummary | None = None,
     ) -> list[dict[str, Any]]:
         """``[system, *history, current user message]``.
 
         If the history already ends with a user message (for example, the
         previous turn failed before the model answered), the new message is
-        merged into it so two user messages are never sent in a row.
+        merged into it so two user messages are never sent in a row. With
+        ``current_message=None`` (used when archiving) there is no new message.
         """
         messages: list[dict[str, Any]] = [
-            {"role": "system", "content": self.build_system_prompt(channel=channel)},
+            {"role": "system", "content": self.build_system_prompt(channel=channel, session_summary=session_summary)},
             *history,
         ]
+        if current_message is None:
+            return messages
         current = self.build_current_message(current_message, runtime_context_blocks=runtime_context_blocks)
         if messages[-1].get("role") == "user":
             merged = dict(messages[-1])
             merged["content"] = self._merge_message_content(merged.get("content"), current["content"])
+            if isinstance(current.get("_meta"), dict):
+                merged["_meta"] = {**(merged.get("_meta") or {}), **current["_meta"]}
             return [*messages[:-1], merged]
         return [*messages, current]
 

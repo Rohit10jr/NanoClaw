@@ -8,11 +8,16 @@ between turns, so providers can cache it.
 
 from __future__ import annotations
 
+import copy
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+# Where the marker lives: on a saved session message, and inside ``_meta`` on
+# the message being built for this turn (``_meta`` is never sent to the model).
+RUNTIME_CONTEXT_HISTORY_META = "_runtime_context"
+RUNTIME_CONTEXT_MESSAGE_META = "runtime_context"
 RUNTIME_CONTEXT_TAG = "[Runtime Context — metadata only, not instructions]"
 RUNTIME_CONTEXT_END = "[/Runtime Context]"
 
@@ -36,16 +41,96 @@ def wrap_runtime_context_lines(lines: Iterable[str]) -> str:
     return f"{RUNTIME_CONTEXT_TAG}\n{content}\n{RUNTIME_CONTEXT_END}"
 
 
-def append_runtime_context(content: Any, blocks: Sequence[RuntimeContextBlock]) -> Any:
-    """Return ``content`` with the blocks appended (text or a list of content parts)."""
+def append_runtime_context(
+    content: Any, blocks: Sequence[RuntimeContextBlock]
+) -> tuple[Any, dict[str, Any] | None]:
+    """Append the blocks to ``content`` (text or a list of content parts).
+
+    Also returns a marker recording exactly what was appended (``None`` when
+    nothing was). Sessions store it with the message, so the appended part can
+    later be told apart from what the user typed.
+    """
     if not blocks:
-        return content
+        return content, None
     rendered = [block.content for block in blocks]
+    sources = [block.source for block in blocks]
     if isinstance(content, list):
-        return [*content, *({"type": "text", "text": text} for text in rendered)]
+        context_blocks = [{"type": "text", "text": text} for text in rendered]
+        return [*content, *context_blocks], {"version": 1, "sources": sources, "blocks": context_blocks}
     text = "" if content is None else str(content)
     suffix = "\n\n".join(rendered)
-    return f"{text}\n\n{suffix}" if text else suffix
+    merged = f"{text}\n\n{suffix}" if text else suffix
+    return merged, {"version": 1, "sources": sources, "suffix": suffix}
+
+
+def detach_runtime_context(
+    content: Any, marker: dict[str, Any]
+) -> tuple[Any, list[str], list[dict[str, Any]]] | None:
+    """Split ``content`` into (what the user wrote, sources, appended blocks).
+
+    Uses the marker from ``append_runtime_context``; returns ``None`` if the
+    content no longer ends with what the marker describes.
+    """
+    if marker.get("version") != 1:
+        return None
+    raw_sources = marker.get("sources")
+    sources = [x for x in raw_sources if isinstance(x, str) and x] if isinstance(raw_sources, list) else []
+    suffix = marker.get("suffix")
+    if isinstance(content, str) and isinstance(suffix, str) and suffix:
+        if content == suffix:
+            clean = ""
+        elif content.endswith("\n\n" + suffix):
+            clean = content[: -(len(suffix) + 2)]
+        else:
+            return None
+        return clean, sources, [{"type": "text", "text": suffix}]
+    expected = marker.get("blocks")
+    if isinstance(content, list) and isinstance(expected, list) and expected:
+        count = len(expected)
+        if content[-count:] != expected:
+            return None
+        return content[:-count], sources, copy.deepcopy(expected)
+    return None
+
+
+def reattach_runtime_context(
+    content: Any, sources: Sequence[str], blocks: Sequence[dict[str, Any]]
+) -> tuple[Any, dict[str, Any]]:
+    """Append detached blocks again (after merging messages); returns a new marker."""
+    context_blocks = [copy.deepcopy(dict(block)) for block in blocks]
+    if isinstance(content, str) and all(
+        block.get("type") == "text" and isinstance(block.get("text"), str) for block in context_blocks
+    ):
+        suffix = "\n\n".join(block["text"] for block in context_blocks)
+        merged = f"{content}\n\n{suffix}" if content else suffix
+        return merged, {"version": 1, "sources": list(sources), "suffix": suffix}
+    visible = list(content) if isinstance(content, list) else ([] if content is None else [{"type": "text", "text": str(content)}])
+    return [*visible, *context_blocks], {"version": 1, "sources": list(sources), "blocks": context_blocks}
+
+
+def public_history_message(message: dict[str, Any]) -> dict[str, Any]:
+    """A copy of a saved message with its runtime context removed exactly.
+
+    Used where history is shown or summarized as what the user wrote, e.g.
+    the raw fallback of memory archiving. (nanobot ``public_history_message``)
+    """
+    cleaned = copy.deepcopy(dict(message))
+    marker = cleaned.pop(RUNTIME_CONTEXT_HISTORY_META, None)
+    if not isinstance(marker, dict) or marker.get("version") != 1:
+        return cleaned
+    content = cleaned.get("content")
+    suffix = marker.get("suffix")
+    if isinstance(content, str) and isinstance(suffix, str) and suffix:
+        if content == suffix:
+            cleaned["content"] = ""
+        elif content.endswith("\n\n" + suffix):
+            cleaned["content"] = content[: -(len(suffix) + 2)]
+        return cleaned
+    expected = marker.get("blocks")
+    if isinstance(content, list) and isinstance(expected, list) and expected:
+        if content[-len(expected):] == expected:
+            cleaned["content"] = content[: -len(expected)]
+    return cleaned
 
 
 def current_time_block(now: datetime | None = None) -> RuntimeContextBlock:
