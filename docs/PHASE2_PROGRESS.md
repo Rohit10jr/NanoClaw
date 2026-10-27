@@ -115,7 +115,7 @@ Legend: ⏳ in progress · ✅ done and verified · ⛔ blocked
 | Task | Scope (files) | Sub-agent | Verification | Status |
 |---|---|---|---|---|
 | 19.1 Subagent manager v2 | `agent/subagent.py` (tasks, outcomes, status hook, partial results, send/cancel/check, inbox via injections), child sessions `subagent:<id>`, `subagent_status`, report template | sub-agent (worktree), phase A | | ⏳ |
-| 19.2 The `subagent` tool | `agent/tools/subagent.py` replaces `spawn`; prompts, templates, skills, hints, CLI, docs | sub-agent (worktree), phase B | | |
+| 19.2 The `subagent` tool | 19.1 also takes the tool and the tests; 19.2 the model-facing text (prompts, templates, skills, help) and docs | sub-agent (worktree), in parallel with 19.1 | | ⏳ |
 | Integration, mutation checks, docs, PR | | | | |
 
 ## Blockers and open items
