@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import codecs
 import difflib
+import hashlib
 import mimetypes
 import re
 from dataclasses import dataclass
@@ -17,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from nanoclaw.agent.tools.base import Tool, ToolResult
+from nanoclaw.agent.tools.file_state import FileStates, current_file_states
 from nanoclaw.agent.tools.schema import object_schema
 from nanoclaw.security.workspace_policy import resolve_allowed_path
 
@@ -30,8 +32,20 @@ class _FsTool(Tool):
     ``PermissionError``), which each tool returns as an error.
     """
 
-    def __init__(self, workspace: Path | None = None, *, restrict_to_workspace: bool = False) -> None:
+    def __init__(
+        self,
+        workspace: Path | None = None,
+        *,
+        restrict_to_workspace: bool = False,
+        file_states: FileStates | None = None,
+    ) -> None:
         self._workspace = workspace
+        # Explicit state is used by isolated runners like Dream/subagents.
+        # Main AgentLoop tools leave this unset and resolve state from the
+        # current async task, which keeps shared tool instances session-safe.
+        # (nanobot filesystem.py:71-105)
+        self._explicit_file_states = file_states
+        self._fallback_file_states = FileStates()
         self._allowed_dir = workspace if restrict_to_workspace and workspace is not None else None
         if workspace is not None:
             from nanoclaw.agent.skills import BUILTIN_SKILLS_DIR
@@ -42,6 +56,12 @@ class _FsTool(Tool):
             self._extra_read_allowed_files = [resolved / "memory" / "history.jsonl"]
         else:
             self._extra_read_allowed_dirs, self._extra_read_allowed_files = [], []
+
+    @property
+    def _file_states(self) -> FileStates:
+        if self._explicit_file_states is not None:
+            return self._explicit_file_states
+        return current_file_states(self._fallback_file_states)
 
     def _resolve_read(self, path: str) -> Path:
         restricted = self._allowed_dir is not None
@@ -160,10 +180,18 @@ class ReadFileTool(_FsTool):
             path={"type": "string", "description": "The file path to read"},
             offset={"type": "integer", "description": "1-based line to start from (default 1)", "minimum": 1},
             limit={"type": "integer", "description": "Maximum lines to return (default 2000)", "minimum": 1},
+            force={"type": "boolean", "description": "Return an unchanged range again", "default": False},
             required=["path"],
         )
 
-    async def execute(self, path: str | None = None, offset: int = 1, limit: int | None = None, **kwargs: Any) -> str:
+    async def execute(
+        self,
+        path: str | None = None,
+        offset: int = 1,
+        limit: int | None = None,
+        force: bool = False,
+        **kwargs: Any,
+    ) -> str:
         try:
             if not path:
                 return ToolResult.error("Error reading file: Unknown path")
@@ -193,6 +221,13 @@ class ReadFileTool(_FsTool):
             raw = fp.read_bytes()
             if not raw:
                 return f"(Empty file: {path})"
+            # Same range, same bytes, and the earlier result still in the
+            # model's input: say so instead of sending it again (nanobot :340).
+            content_hash = hashlib.sha256(raw).hexdigest()
+            if not force and self._file_states.is_unchanged(
+                fp, offset=offset, limit=limit, content_hash=content_hash,
+            ):
+                return f"[File unchanged since last read: {path}]"
             text = _decode_bom_text(raw)
             if text is None:
                 try:
@@ -244,6 +279,9 @@ class ReadFileTool(_FsTool):
                 result += f"\n\n(Showing lines {offset}-{end} of {total}. Use offset={end + 1} to continue.)"
             else:
                 result += f"\n\n(End of file — {total} lines total)"
+            self._file_states.record_read(
+                fp, offset=offset, limit=limit, content_hash=content_hash, result=result,
+            )
             return result
         except PermissionError as e:
             return ToolResult.error(f"Error: {e}")
@@ -288,6 +326,7 @@ class WriteFileTool(_FsTool):
             # newline="" writes the text as given: no "\n" -> "\r\n" on
             # Windows (nanobot ae6801d, filesystem.py:580).
             fp.write_text(content, encoding="utf-8", newline="")
+            self._file_states.record_write(fp)
             return f"Successfully wrote {len(content)} characters to {fp}"
         except PermissionError as e:
             return ToolResult.error(f"Error: {e}")
@@ -623,6 +662,7 @@ class EditFileTool(_FsTool):
                 if old_text == "":
                     fp.parent.mkdir(parents=True, exist_ok=True)
                     fp.write_text(new_text, encoding="utf-8", newline="")  # nanobot ae6801d
+                    self._file_states.record_write(fp)
                     return self._summary(fp, "", new_text, created=True)
                 return self._file_not_found_msg(path, fp)
 
@@ -636,6 +676,7 @@ class EditFileTool(_FsTool):
                 if content.strip():
                     return ToolResult.error(f"Error: Cannot create file — {path} already exists and is not empty.")
                 fp.write_text(new_text, encoding="utf-8", newline="")  # nanobot ae6801d
+                self._file_states.record_write(fp)
                 return self._summary(fp, content, new_text)
 
             uses_crlf = b"\r\n" in raw
@@ -724,6 +765,7 @@ class EditFileTool(_FsTool):
 
             out = new_content.replace("\n", "\r\n") if uses_crlf else new_content
             fp.write_bytes(out.encode("utf-8"))
+            self._file_states.record_write(fp)
             return self._summary(fp, content, new_content)
         except PermissionError as e:
             return ToolResult.error(f"Error: {e}")

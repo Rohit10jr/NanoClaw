@@ -9,7 +9,8 @@ failure (a bad edit, or a write error) leaves every file as it was.
 Paths go through the same workspace policy as the other file tools
 (``_FsTool._resolve_write``). NanoClaw differences: the result is a plain
 string (nanobot returns a ``FileEditResult`` carrying diffs for its activity
-events) and writes are not recorded in a file-state store.
+events). Like nanobot, a successful write is recorded in the file state, so
+the next ``read_file`` of a patched file returns its contents.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from nanoclaw.agent.tools.base import ToolResult
+from nanoclaw.agent.tools.file_state import FileStates
 from nanoclaw.agent.tools.filesystem import _count_changed_lines, _FsTool
 from nanoclaw.agent.tools.schema import object_schema
 
@@ -74,8 +76,9 @@ class ApplyPatchTool(_FsTool):
         *,
         restrict_to_workspace: bool = False,
         write_check: Callable[[str, Path], str | None] | None = None,
+        file_states: FileStates | None = None,
     ) -> None:
-        super().__init__(workspace, restrict_to_workspace=restrict_to_workspace)
+        super().__init__(workspace, restrict_to_workspace=restrict_to_workspace, file_states=file_states)
         self._write_check = write_check
 
     @property
@@ -259,6 +262,8 @@ class ApplyPatchTool(_FsTool):
                         p.write_bytes(data)
                 raise
 
+            for p in writes:
+                self._file_states.record_write(p)
             return "Patch applied:\n" + "\n".join(summaries)
         except _GuardRefusal as exc:
             return ToolResult.error(str(exc))

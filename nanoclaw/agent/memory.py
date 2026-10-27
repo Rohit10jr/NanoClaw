@@ -31,6 +31,7 @@ from loguru import logger
 from nanoclaw.agent.messages import build_assistant_message, strip_think, truncate_text
 from nanoclaw.agent.tools import Tool, ToolRegistry, ToolResult
 from nanoclaw.agent.tools.apply_patch import ApplyPatchTool
+from nanoclaw.agent.tools.file_state import FileStates
 from nanoclaw.agent.tools.filesystem import EditFileTool, ReadFileTool, WriteFileTool
 from nanoclaw.events import NO_EVENTS, CompactionReason, ContextCompactionEvent, EventSink
 from nanoclaw.runtime_context import public_history_message
@@ -334,10 +335,12 @@ class MemoryStore:
             return f"Error: Path {raw} is outside allowed directory {skills_dir}{WORKSPACE_BOUNDARY_NOTE}"
 
         tools = ToolRegistry()
-        tools.register(_PathGuard(ReadFileTool(workspace), workspace, readable))
-        tools.register(_PathGuard(EditFileTool(workspace), workspace, writable))
-        tools.register(ApplyPatchTool(workspace, write_check=writable))
-        tools.register(_PathGuard(WriteFileTool(workspace), workspace, writable))
+        # Dream's own file-read state (nanobot memory.py:567).
+        file_states = FileStates()
+        tools.register(_PathGuard(ReadFileTool(workspace, file_states=file_states), workspace, readable))
+        tools.register(_PathGuard(EditFileTool(workspace, file_states=file_states), workspace, writable))
+        tools.register(ApplyPatchTool(workspace, write_check=writable, file_states=file_states))
+        tools.register(_PathGuard(WriteFileTool(workspace, file_states=file_states), workspace, writable))
         return tools
 
     @staticmethod

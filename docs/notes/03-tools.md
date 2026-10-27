@@ -62,7 +62,7 @@ of `path` is reported instead of silently ignored.
 
 ## The tools
 
-### `read_file(path, offset=1, limit=2000)`
+### `read_file(path, offset=1, limit=2000, force=false)`
 - Numbered lines: `12| some text`, so the model can quote exact lines to `edit_file`.
 - Footer tells the model what to do next:
   `(Showing lines 1-2000 of 5400. Use offset=2001 to continue.)` or
@@ -76,6 +76,14 @@ of `path` is reported instead of silently ignored.
 - *(Since layer 7)* A relative `skills/<name>/...` path missing from the
   workspace is read from the built-in skills folder (nanobot
   `_builtin_skill_read_path`); see `07-skills.md`.
+- *(Since layer 17)* A repeat read of the same range of an unchanged file
+  returns `[File unchanged since last read: <path>]` instead of the
+  contents, but only while the earlier result is still, unchanged, in the
+  input the model just answered (nanobot `agent/tools/file_state.py`).
+  After compaction, a truncation or a `/new`, the next read returns the
+  contents again; `force=true` always does. `write_file` and `edit_file`
+  forget the read. State is per session (bound by the loop), and each
+  subagent and Dream run has its own. See `agent/tools/file_state.py`.
 
 ### `write_file(path, content)`
 Creates parent folders; overwrites; replies `Successfully wrote N characters to <path>`.
@@ -246,7 +254,7 @@ blocked and the slip-through cases are tested in `tests/test_shell_tool.py`.
 | Workspace restriction, extra allowed dirs | `_FsTool._resolve_*`, `security/workspace_*.py` | Keep tools inside the workspace (**done in layer 9**; extra allowed dirs: phase 2) |
 | Private-network (SSRF) blocking | `security/network.py`, `_validate_url_safe` | Stop `web_fetch` reaching `localhost` or cloud metadata (**done in layer 9**) |
 | Sandbox (bubblewrap / macOS seatbelt) | `tools/sandbox.py` | OS-level isolation for `exec` (**phase 2**, decided in layer 9) |
-| "File unchanged since last read" | `file_state.py` | Saves tokens when the model rereads a file |
+| "File unchanged since last read" | `file_state.py` | Saves tokens when the model rereads a file (**done in layer 17**) |
 | `edit_file` `line_hint`, `expected_replacements` | `filesystem.py` | Pick a match by line number; guard the number of replacements (**done in layer 17**) |
 | `apply_patch`, `grep`/`find_files` | `tools/apply_patch.py`, `tools/search.py` | Multi-file patches (**`apply_patch` done in layer 17**); code search without ripgrep (ripgrep `rg`, `tools/rg.py`: **done in layer 17**) |
 | Background shell sessions | `exec_session.py`, `yield_time_ms` | Long-running commands the model polls (**done in layer 16**) |
@@ -265,6 +273,11 @@ blocked and the slip-through cases are tested in `tests/test_shell_tool.py`.
   rollback, the 20-edit limit, tool descriptions) and
   `tests/test_edit_file_line_hint.py` (`occurrence`, `line_hint`,
   `expected_replacements`).
+- `tests/test_file_state.py` *(layer 17)*: the "[File unchanged since last
+  read]" stub only while the earlier result is in the model's input (kept,
+  summarized, truncated, orphaned, compacted away), `force`, ranges, writes,
+  per-session, subagent and loop state (nanobot `test_file_state_store.py`,
+  `test_runner_file_reads.py`, the dedup parts of `test_read_enhancements.py`).
 - `tests/test_shell_tool.py`: real bash (PowerShell variants on Windows); output format, exit codes, timeout
   killing child processes, secrets not visible, deny list (blocked,
   allowed, and slip-through cases; since the end of layer 6 also writes to

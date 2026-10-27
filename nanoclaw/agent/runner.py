@@ -22,13 +22,21 @@ Since layer 15 every model request goes through
 repaired and merged for the model, measured, and compacted when it no longer
 fits ``context_window_tokens``, also between tool calls (nanobot runner.py:877).
 A compaction's summary comes back as ``AgentRunResult.summary_checkpoint``.
+
+Since layer 17 each ``read_file`` call runs inside ``file_read_context``
+(agent/tools/file_state.py) with the tool results of the request the model
+just answered, so a repeat read is answered with "[File unchanged since last
+read: ...]" only while the earlier result is really in the model's input
+(nanobot execution.py:62-72, :159-162).
 """
 
 from __future__ import annotations
 
 import asyncio
 import copy
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Mapping
+from contextlib import nullcontext
+from functools import cache
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -60,6 +68,7 @@ from nanoclaw.agent.messages import (
 )
 from nanoclaw.agent.progress_hook import AgentProgressHook
 from nanoclaw.agent.tools import ToolRegistry, is_tool_error
+from nanoclaw.agent.tools.file_state import file_read_context
 from nanoclaw.agent.tools.registry import with_retry_hint
 from nanoclaw.agent.tools.violations import classify_violation, is_ssrf_violation
 from nanoclaw.events import NO_EVENTS, EventSink, RetryWaitEvent
@@ -502,9 +511,11 @@ class AgentRunner:
                 results: list[Any] = []
                 new_events: list[dict[str, str]] = []
                 completed_tool_results: list[dict[str, Any]] = []
+                read_results = self._model_tool_results(messages_for_model)
                 for call in response.tool_calls:
                     raw, event = await self._execute_tool_call(
-                        spec, call, workspace_violation_counts, hook=hook, context=context
+                        spec, call, workspace_violation_counts, hook=hook, context=context,
+                        read_results=read_results,
                     )
                     results.append(raw)
                     new_events.append(event)
@@ -888,6 +899,31 @@ class AgentRunner:
             response.finish_reason = "stop"
         return dropped, not valid, original_finish
 
+    @staticmethod
+    def _model_tool_results(model_messages: list[dict[str, Any]]) -> Callable[[], Mapping[str, str]]:
+        """The tool results in the request the model just answered, by call id.
+
+        Handed to each ``read_file`` call (``file_read_context``), so a repeat
+        read only returns ``[File unchanged since last read: ...]`` while the
+        earlier result is really in the model's input: not after compaction
+        summarized it away, nor after it was truncated or replaced by the
+        pending-read notice. Indexed once, on the first check in a batch.
+        (nanobot execution.py:62-72; NanoClaw has no provider-native
+        compaction, so there is no ``compacted_tool_results`` set to exclude.)
+        """
+
+        @cache
+        def read_results() -> dict[str, str]:
+            return {
+                message["tool_call_id"]: message["content"]
+                for message in model_messages
+                if message.get("role") == "tool"
+                and isinstance(message.get("tool_call_id"), str)
+                and isinstance(message.get("content"), str)
+            }
+
+        return read_results
+
     async def _execute_tool_call(
         self,
         spec: AgentRunSpec,
@@ -896,6 +932,7 @@ class AgentRunner:
         *,
         hook: AgentHook | None = None,
         context: AgentHookContext | None = None,
+        read_results: Callable[[], Mapping[str, str]] | None = None,
     ) -> tuple[Any, dict[str, str]]:
         """Run one call; return its result and its tool event.
 
@@ -938,7 +975,13 @@ class AgentRunner:
         assert tool is not None
         await hook.before_execute_tool(context, call, tool, params)
         try:
-            result = await tool.execute(**params)
+            # read_file sees what the model's input holds (nanobot execution.py:159-162).
+            with (
+                file_read_context(call.id, read_results)
+                if call.name == "read_file" and read_results is not None
+                else nullcontext()
+            ):
+                result = await tool.execute(**params)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
