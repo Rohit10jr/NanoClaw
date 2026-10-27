@@ -40,6 +40,8 @@ from nanoclaw.runtime_context import (
     RuntimeContextBlock,
     append_runtime_context,
     current_time_block,
+    iteration_limit_block,
+    record_iteration_limit,
 )
 from nanoclaw.session import Session, SessionManager
 from nanoclaw.session.recovery import PENDING_USER_TURN_KEY, restore_pending_interruption
@@ -233,6 +235,10 @@ class AgentLoop:
                 persisted_early = True
             else:
                 blocks.append(current_time_block())
+                # The previous user turn hit the iteration limit: say so, once
+                # (nanobot loop.py:663 registers this provider; user turns only, :2253).
+                if not ephemeral and (limit_block := iteration_limit_block(session.metadata)) is not None:
+                    blocks.append(limit_block)
                 # Skills named as $skill-name are part of the saved message too (nanobot
                 # adds them while resolving runtime context, before saving).
                 skill_context = self.context.skills.build_explicit_skill_runtime_context(content)
@@ -282,6 +288,10 @@ class AgentLoop:
                         "output_tokens": result.usage.output_tokens,
                         "total_tokens": result.usage.total_tokens,
                     }
+                # Only user turns set or clear the iteration-limit flag; a
+                # subagent follow-up leaves it alone (nanobot loop.py:2385).
+                if subagent is None:
+                    record_iteration_limit(session.metadata, result.stop_reason)
                 self._save_turn(session, result.messages, skip)
                 session.metadata.pop(PENDING_USER_TURN_KEY, None)
                 self.sessions.save(session)

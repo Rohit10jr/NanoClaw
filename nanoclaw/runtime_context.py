@@ -148,3 +148,40 @@ def current_time_block(now: datetime | None = None) -> RuntimeContextBlock:
     label = utc if zone in (utc, "UTC") else f"{zone}, {utc}"
     line = f"Current Time: {now:%Y-%m-%d %H:%M} ({now:%A}) ({label})"
     return RuntimeContextBlock(source="time", content=wrap_runtime_context_lines([line]))
+
+
+# Set when a user turn ended at the tool-iteration limit (nanobot
+# session/turn_continuation.py:32 ``_ITERATION_LIMIT_META``).
+ITERATION_LIMIT_META = "_stopped_at_iteration_limit"
+
+
+def record_iteration_limit(metadata: dict[str, Any], stop_reason: str) -> None:
+    """Remember that a user turn stopped at the iteration limit; forget it otherwise.
+
+    (nanobot session/turn_continuation.py:44 ``record_iteration_limit``; NanoClaw
+    has no internal continuations, so ``continuation_pending`` is always false.)
+    """
+    if stop_reason == "max_iterations":
+        metadata[ITERATION_LIMIT_META] = True
+    else:
+        metadata.pop(ITERATION_LIMIT_META, None)
+
+
+def iteration_limit_block(metadata: dict[str, Any]) -> RuntimeContextBlock | None:
+    """Tell the next user turn that the previous one was cut off, so the model
+    follows the new request instead of resuming the old work.
+
+    (nanobot session/turn_continuation.py:54 ``iteration_limit_context``, a
+    runtime-context provider that nanobot skips for temporary sessions and
+    internal continuations; the caller here only asks on saved user turns.)
+    """
+    if not metadata.get(ITERATION_LIMIT_META):
+        return None
+    return RuntimeContextBlock(
+        source="iteration_limit",
+        content=wrap_runtime_context_lines([
+            "The previous turn stopped at the tool-iteration limit without finishing its work.",
+            "Follow the current request. Resume unfinished work only if the user asks for it.",
+            "Completed tool calls and their results remain in the history; do not repeat them blindly.",
+        ]),
+    )
