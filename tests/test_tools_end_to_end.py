@@ -2,17 +2,20 @@
 
 import re
 
-from conftest import requires_posix_shell
+from conftest import WINDOWS
 from nanoclaw.agent.runner import AgentRunner, AgentRunSpec
 from nanoclaw.agent.tools import build_default_tools
 from nanoclaw.providers import FakeProvider, LLMResponse, ToolCallRequest
+
+
+# PowerShell has no grep; Select-String's .Line is the matching line alone.
+GREP_PORT = "(Select-String -Path config.ini -Pattern port).Line" if WINDOWS else "grep port config.ini"
 
 
 def tool_turn(name, args, call_id):
     return LLMResponse(content=None, tool_calls=[ToolCallRequest(call_id, name, args)], finish_reason="tool_calls")
 
 
-@requires_posix_shell
 async def test_model_reads_edits_and_verifies_a_file(tmp_path):
     (tmp_path / "config.ini").write_text("[server]\nport = 8080\nhost = localhost\n", encoding="utf-8")
     fake = FakeProvider(
@@ -20,7 +23,7 @@ async def test_model_reads_edits_and_verifies_a_file(tmp_path):
             tool_turn("list_dir", {"path": "."}, "c1"),
             tool_turn("read_file", {"path": "config.ini"}, "c2"),
             tool_turn("edit_file", {"path": "config.ini", "old_text": "port = 8080", "new_text": "port = 9090"}, "c3"),
-            tool_turn("exec", {"command": "grep port config.ini"}, "c4"),
+            tool_turn("exec", {"command": GREP_PORT}, "c4"),
             "Changed the port to 9090.",
         ]
     )
@@ -39,7 +42,7 @@ async def test_model_reads_edits_and_verifies_a_file(tmp_path):
     assert tool_outputs["c1"] == "📄 config.ini"
     assert tool_outputs["c2"].startswith("1| [server]\n2| port = 8080")
     assert tool_outputs["c3"] == "Patch applied:\n- update config.ini (+1/-1)"
-    assert re.fullmatch(r"port = 9090\n\nExit code: 0\nElapsed: \d+\.\ds", tool_outputs["c4"])
+    assert re.fullmatch(r"port = 9090\n\nExit code: 0\nElapsed: \d+\.\ds", tool_outputs["c4"].replace("\r\n", "\n"))
 
 
 async def test_bad_arguments_reach_the_model_which_then_corrects_itself(tmp_path):

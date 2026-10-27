@@ -10,7 +10,7 @@ from unittest.mock import patch
 import httpx
 import pytest
 
-from conftest import requires_posix_shell, symlink_or_skip
+from conftest import WINDOWS, requires_posix_shell, symlink_or_skip
 from nanoclaw.__main__ import main
 from nanoclaw.agent.loop import AgentLoop
 from nanoclaw.agent.runner import AgentRunner, AgentRunSpec
@@ -237,7 +237,6 @@ async def test_pinned_transport_connects_to_the_checked_addresses(fake_dns):
 # --- exec: always-on checks ------------------------------------------------
 
 
-@requires_posix_shell
 async def test_exec_blocks_internal_urls_even_unrestricted(ws):
     tool = ExecTool(working_dir=ws)
     out = await tool.execute(command="curl -s http://169.254.169.254/latest/meta-data/")
@@ -247,8 +246,8 @@ async def test_exec_blocks_internal_urls_even_unrestricted(ws):
     assert "https://public.test/ok" in out
 
 
-@requires_posix_shell
 async def test_unrestricted_exec_and_files_can_leave_the_workspace(ws, outside):
+    # `cat` is Get-Content in PowerShell.
     assert "outside" in await ExecTool(working_dir=ws).execute(command=f"cat {outside}")
     assert "outside" in await ExecTool(working_dir=ws).execute(command="cat ../secret.txt")
     assert "outside" in await ReadFileTool(ws).execute(path=str(outside))
@@ -404,7 +403,9 @@ def test_exec_guard_allows_resolved_home_inside_workspace(ws, monkeypatch):
     assert ExecTool(working_dir=ws, restrict_to_workspace=True)._guard_command("cat ~/notes.txt", str(ws)) is None
 
 
-@requires_posix_shell
+@requires_posix_shell(
+    "PowerShell expands ~ from the account's profile folder, not from the HOME/USERPROFILE the test sets"
+)
 async def test_restricted_exec_allows_resolved_home_inside_workspace(ws, monkeypatch):
     monkeypatch.setenv("HOME", str(ws))
     monkeypatch.setenv("USERPROFILE", str(ws))  # where Windows looks for ~
@@ -412,17 +413,17 @@ async def test_restricted_exec_allows_resolved_home_inside_workspace(ws, monkeyp
     assert "inside" in out and "Command blocked" not in out
 
 
-@requires_posix_shell
 async def test_restricted_exec_working_dir(ws, tmp_path):
+    pwd = "(Get-Location).Path" if WINDOWS else "pwd"
     tool = ExecTool(working_dir=ws, restrict_to_workspace=True)
-    assert await tool.execute(command="pwd", working_dir=str(tmp_path)) == (
+    assert await tool.execute(command=pwd, working_dir=str(tmp_path)) == (
         "Error: working_dir is outside the configured workspace" + NOTE_SHELL
     )
     (ws / "sub").mkdir()
-    assert str(ws / "sub") in await tool.execute(command="pwd", working_dir="sub")
+    assert str(ws / "sub") in await tool.execute(command=pwd, working_dir="sub")
     # From a subfolder, the rest of the workspace is still allowed.
-    assert "inside" in await tool.execute(command=f"cat {ws}/notes.txt", working_dir="sub")
-    assert "Error" not in await ExecTool(working_dir=ws).execute(command="pwd", working_dir=str(tmp_path))
+    assert "inside" in await tool.execute(command=f"cat {ws / 'notes.txt'}", working_dir="sub")
+    assert "Error" not in await ExecTool(working_dir=ws).execute(command=pwd, working_dir=str(tmp_path))
 
 
 async def test_deny_list_still_applies_unrestricted(ws):
@@ -473,7 +474,6 @@ async def test_repeated_workspace_violations_escalate(ws, outside):
     assert f"You have tried to access '{target}' (or an equivalent path) 3 times" in tool_messages[2]
 
 
-@requires_posix_shell
 async def test_exec_counts_toward_the_same_escalation(ws, outside):
     third = calls(("read_file", {"path": str(outside)}), ("exec", {"command": f"cat {outside}"}))
     tool_messages = await _escalation_messages(ws, outside, third)

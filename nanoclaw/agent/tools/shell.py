@@ -19,10 +19,16 @@ Deliberate differences from nanobot:
   restricted mode, as in nanobot.
 * No OS sandbox (bubblewrap/seatbelt) yet, no media-folder exception, no
   Web UI loopback exception and no workspace scopes (later layers).
-* POSIX only for now: ``_spawn`` runs bash (or ``sh``/``zsh``); Windows
-  (PowerShell, cmd, Job objects, taskkill, its environment) is task 16.4. The
-  seams are ``_resolve_shell``, ``_spawn``, ``_kill_process_tree``,
-  ``_build_env`` and the process-tree owner hooks.
+* If Windows can't create a Job object for a session, the command still
+  runs, without one, and a kill falls back to ``taskkill /T /F``; nanobot
+  fails the command instead.
+
+On Windows (task 16.4, ported from nanobot) a command runs in PowerShell
+(``pwsh``, else ``powershell``), or in cmd.exe with ``shell="cmd"``; an exec
+session's process tree is owned by a Job object (``_windows_job.py``), and
+``taskkill /T /F`` kills a tree that has none. The environment is a curated
+set of Windows variables, PATH included (``_build_env``). Not yet run on
+Windows (docs/WINDOWS.md).
 """
 
 from __future__ import annotations
@@ -33,9 +39,11 @@ import re
 import shlex
 import shutil
 import signal
+import subprocess
+import sys
 from contextlib import suppress
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Literal, Protocol, cast
 from urllib.parse import unquote
 
@@ -57,6 +65,7 @@ from nanoclaw.agent.tools.schema import object_schema
 from nanoclaw.security.network import contains_internal_url
 from nanoclaw.security.workspace_policy import is_path_within
 
+_IS_WINDOWS = sys.platform == "win32"
 _PROCESS_TREE_OWNER_ATTR = "_nanoclaw_process_tree_owner"
 
 # nanobot shell.py ExecTool.__init__. Lower-cased commands are searched for
@@ -83,7 +92,7 @@ DEFAULT_DENY_PATTERNS = [
 
 
 class _ProcessTreeOwner(Protocol):
-    """Something that owns a process tree (nanobot: a Windows Job object; task 16.4)."""
+    """Something that owns a process tree: on Windows, a Job object (``_windows_job.WindowsJob``)."""
 
     creation_flags: int
 
@@ -136,7 +145,7 @@ class _PreparedCommand:
 
 
 def _exec_parameters(max_runtime: int, max_runtime_limit: int) -> dict[str, Any]:
-    """The exec tool's argument schema (nanobot shell.py:103, POSIX wording)."""
+    """The exec tool's argument schema (nanobot shell.py:103)."""
     return object_schema(
         command={"type": "string", "description": "The shell command to execute"},
         cmd={"type": "string", "description": "Compatibility alias for command"},
@@ -161,7 +170,11 @@ def _exec_parameters(max_runtime: int, max_runtime_limit: int) -> dict[str, Any]
         },
         shell={
             "type": ["string", "null"],
-            "description": "Shell override; omit for bash, or pass 'sh' or 'zsh'.",
+            "description": (
+                "Shell override; omit for PowerShell, or pass 'cmd' for cmd.exe."
+                if _IS_WINDOWS
+                else "Shell override; omit for bash, or pass 'sh' or 'zsh'."
+            ),
         },
         login={
             "type": ["boolean", "null"],
@@ -420,7 +433,11 @@ class ExecTool(Tool):
             parent_path = os.environ.get("PATH", env.get("PATH", ""))
             env["PATH"] = self._compose_path(parent_path)
         elif self.path_prepend or self.path_append:
-            command = self._wrap_path_export(command, env)
+            if _IS_WINDOWS:
+                # Windows passes PATH in the environment (_build_env), so it is extended there.
+                env["PATH"] = self._compose_path(env.get("PATH", ""))
+            else:
+                command = self._wrap_path_export(command, env)
 
         shell_program, shell_error = self._resolve_shell(shell)
         if shell_error:
@@ -471,15 +488,19 @@ class ExecTool(Tool):
     ) -> asyncio.subprocess.Process:
         """Launch an argument vector directly or a command string through a shell (nanobot shell.py:503).
 
-        ``process_tree`` puts the command in its own session/process group so
-        a kill reaches its children too. POSIX only; Windows is task 16.4.
+        ``process_tree`` makes the command's whole process tree killable: on
+        POSIX it gets its own session/process group; on Windows it starts
+        suspended inside a Job object, which owns every process it starts.
         """
         if isinstance(command, list):
             executable = shutil.which(command[0], path=env.get("PATH", ""))
             if executable is None:
                 raise FileNotFoundError(f"Executable not found: {command[0]}")
+            windows_job = None
             process = None
             try:
+                if process_tree and sys.platform == "win32":
+                    windows_job = ExecTool._try_create_windows_job()
                 process = await asyncio.create_subprocess_exec(
                     executable, *command[1:],
                     stdin=stdin,
@@ -487,10 +508,74 @@ class ExecTool(Tool):
                     stderr=asyncio.subprocess.PIPE,
                     cwd=cwd,
                     env=env,
-                    start_new_session=process_tree,
+                    creationflags=windows_job.creation_flags if windows_job else 0,
+                    start_new_session=process_tree and sys.platform != "win32",
                 )
+                if windows_job is not None:
+                    windows_job.assign_and_resume(process.pid)
+                    setattr(process, _PROCESS_TREE_OWNER_ATTR, windows_job)
                 return process
             except BaseException:
+                if windows_job is not None:
+                    windows_job.terminate()
+                if process is not None:
+                    await ExecTool._kill_process(process)
+                raise
+        if _IS_WINDOWS:
+            windows_job = None
+            process = None
+            creation_flags = 0
+            if process_tree and sys.platform == "win32":
+                windows_job = ExecTool._try_create_windows_job()
+                if windows_job is not None:
+                    creation_flags = windows_job.creation_flags
+            # Default to PowerShell so single-line and multi-line commands
+            # share the same shell semantics. cmd.exe is reachable via the
+            # explicit shell="cmd" parameter (see _resolve_shell).
+            default_program = shutil.which("pwsh") or shutil.which("powershell") or "powershell"
+            program = shell_program or default_program
+            program_name = PureWindowsPath(program).name.lower()
+            try:
+                if program_name in ("cmd", "cmd.exe"):
+                    # create_subprocess_shell runs COMSPEC /c <command>, keeping cmd's own quoting.
+                    cmd_env = {**env, "COMSPEC": program}
+                    process = await asyncio.create_subprocess_shell(
+                        command,
+                        stdin=stdin,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                        cwd=cwd,
+                        env=cmd_env,
+                        creationflags=creation_flags,
+                    )
+                else:
+                    command = ExecTool._normalize_powershell_command(command)
+                    # UTF-8 for captured output, native-command input and
+                    # Out-File redirection; a native command's exit code
+                    # becomes PowerShell's own.
+                    command = (
+                        "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)\n"
+                        "if ($PSVersionTable.PSVersion.Major -lt 6) { $OutputEncoding = [Console]::OutputEncoding }\n"
+                        "$PSDefaultParameterValues['Out-File:Encoding'] = 'utf8'\n"
+                        f"{command}\n"
+                        "if ($LASTEXITCODE -ne $null) { exit $LASTEXITCODE }"
+                    )
+                    process = await asyncio.create_subprocess_exec(
+                        program, "-NoProfile", "-NonInteractive", "-Command", command,
+                        stdin=stdin,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                        cwd=cwd,
+                        env=env,
+                        creationflags=creation_flags,
+                    )
+                if windows_job is not None:
+                    windows_job.assign_and_resume(process.pid)
+                    setattr(process, _PROCESS_TREE_OWNER_ATTR, windows_job)
+                return process
+            except BaseException:
+                if windows_job is not None:
+                    windows_job.terminate()
                 if process is not None:
                     await ExecTool._kill_process(process)
                 raise
@@ -520,12 +605,65 @@ class ExecTool(Tool):
         )
 
     @staticmethod
+    def _normalize_powershell_command(command: str) -> str:
+        """Prefix a quoted Windows executable path with ``&`` (nanobot shell.py:620).
+
+        PowerShell reads ``"C:\\Tools\\x.exe" -v`` as a string followed by an
+        unexpected token; ``& "C:\\Tools\\x.exe" -v`` calls the program.
+        """
+        stripped = command.lstrip()
+        if not stripped or stripped[0] not in {"'", '"'}:
+            return command
+
+        quote = stripped[0]
+        end = stripped.find(quote, 1)
+        if end == -1 or (end + 1 < len(stripped) and not stripped[end + 1].isspace()):
+            return command
+
+        executable = stripped[1:end]
+        looks_like_windows_executable = (
+            bool(re.match(r"^[A-Za-z]:[\\/]", executable))
+            or executable.startswith(r"\\")
+            or executable.lower().endswith((".exe", ".cmd", ".bat", ".ps1"))
+        )
+        if not looks_like_windows_executable:
+            return command
+
+        leading = command[: len(command) - len(stripped)]
+        return f"{leading}& {stripped}"
+
+    @staticmethod
     def _resolve_shell(shell: str | None) -> tuple[str | None, str | None]:
-        """Validate a ``shell`` override (nanobot shell.py:643, POSIX branch; Windows is task 16.4)."""
+        """Validate a ``shell`` override (nanobot shell.py:643)."""
         if not shell:
             return None, None
         if "\0" in shell or "\n" in shell or "\r" in shell:
             return None, ToolResult.error("Error: shell contains invalid characters")
+        if _IS_WINDOWS:
+            win_allowed = {"powershell", "powershell.exe", "pwsh", "pwsh.exe", "cmd", "cmd.exe"}
+            path = Path(shell).expanduser()
+            if path.is_absolute():
+                name = path.name.lower()
+                if name not in win_allowed:
+                    return None, ToolResult.error(
+                        f"Error: unsupported shell {shell!r}. "
+                        "Allowed: powershell, pwsh, cmd"
+                    )
+                if not path.is_file():
+                    return None, ToolResult.error(f"Error: shell is not found: {shell}")
+                return str(path), None
+            if "/" in shell or "\\" in shell:
+                return None, ToolResult.error("Error: shell must be a shell name or absolute path")
+            if shell.lower() not in win_allowed:
+                return None, ToolResult.error(
+                    f"Error: unsupported shell {shell!r}. "
+                    "Allowed: powershell, pwsh, cmd"
+                )
+            if shell.lower() in ("cmd", "cmd.exe"):
+                resolved = os.environ.get("COMSPEC") or shutil.which("cmd") or "cmd"
+                return resolved, None
+            resolved = shutil.which(shell) or shell
+            return resolved, None
         allowed = {"sh", "bash", "zsh"}
         path = Path(shell).expanduser()
         if path.is_absolute():
@@ -568,6 +706,20 @@ class ExecTool(Tool):
         try:
             if owner is not None:
                 owner.terminate()
+            elif _IS_WINDOWS:
+                # No Job object owns the tree: taskkill walks it from the root's pid.
+                if process.returncode is None:
+                    with suppress(OSError, asyncio.TimeoutError):
+                        await asyncio.wait_for(
+                            asyncio.to_thread(
+                                subprocess.run,
+                                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                                check=False,
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL,
+                            ),
+                            timeout=5.0,
+                        )
             else:
                 try:
                     os.killpg(process.pid, signal.SIGKILL)
@@ -585,8 +737,28 @@ class ExecTool(Tool):
 
     @staticmethod
     def _process_tree_owner(process: asyncio.subprocess.Process) -> _ProcessTreeOwner | None:
-        # _spawn is the only writer for this private ownership marker (none on POSIX yet).
+        # _spawn is the only writer for this private ownership marker (Windows only).
         return cast(_ProcessTreeOwner | None, vars(process).get(_PROCESS_TREE_OWNER_ATTR))
+
+    @staticmethod
+    def _create_windows_job() -> _ProcessTreeOwner:
+        from nanoclaw.agent.tools._windows_job import WindowsJob
+
+        return WindowsJob.create()
+
+    @staticmethod
+    def _try_create_windows_job() -> _ProcessTreeOwner | None:
+        """A new Job object, or None if Windows refuses one.
+
+        NanoClaw difference: nanobot lets the error fail the command. Here
+        the command runs without a job, and ``_kill_process_tree`` falls back
+        to ``taskkill /T /F``, which misses children whose parent has exited.
+        """
+        try:
+            return ExecTool._create_windows_job()
+        except OSError as exc:
+            logger.warning("Could not create a Windows Job object ({}); killing falls back to taskkill", exc)
+            return None
 
     @staticmethod
     def _drop_process_tree_owner(process: asyncio.subprocess.Process) -> None:
@@ -602,13 +774,41 @@ class ExecTool(Tool):
         ExecTool._drop_process_tree_owner(process)
 
     def _build_env(self) -> dict[str, str]:
-        """A minimal environment, as in nanobot (Unix; nanobot shell.py:770).
+        """A minimal environment, as in nanobot (nanobot shell.py:770).
 
         Only these variables (plus ``allowed_env_keys`` that are set) are
         passed, so API keys and other secrets in the agent's own environment
-        are never visible to commands the model runs. bash supplies a default
-        PATH; ``login=True`` lets bash/zsh source the user's profile.
+        are never visible to commands the model runs. On Unix bash supplies a
+        default PATH; ``login=True`` lets bash/zsh source the user's profile.
+
+        On Windows, which has no login-profile mechanism, a curated set of
+        system variables (PATH included) is passed instead.
         """
+        if _IS_WINDOWS:
+            sr = os.environ.get("SYSTEMROOT", r"C:\Windows")
+            env = {
+                "SYSTEMROOT": sr,
+                "COMSPEC": os.environ.get("COMSPEC", f"{sr}\\system32\\cmd.exe"),
+                "USERPROFILE": os.environ.get("USERPROFILE", ""),
+                "HOMEDRIVE": os.environ.get("HOMEDRIVE", "C:"),
+                "HOMEPATH": os.environ.get("HOMEPATH", "\\"),
+                "TEMP": os.environ.get("TEMP", f"{sr}\\Temp"),
+                "TMP": os.environ.get("TMP", f"{sr}\\Temp"),
+                "PATHEXT": os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD"),
+                "PATH": os.environ.get("PATH", f"{sr}\\system32;{sr}"),
+                "PYTHONUNBUFFERED": "1",
+                "APPDATA": os.environ.get("APPDATA", ""),
+                "LOCALAPPDATA": os.environ.get("LOCALAPPDATA", ""),
+                "ProgramData": os.environ.get("ProgramData", ""),
+                "ProgramFiles": os.environ.get("ProgramFiles", ""),
+                "ProgramFiles(x86)": os.environ.get("ProgramFiles(x86)", ""),
+                "ProgramW6432": os.environ.get("ProgramW6432", ""),
+            }
+            for key in self.allowed_env_keys:
+                val = os.environ.get(key)
+                if val is not None:
+                    env[key] = val
+            return env
         env = {
             "HOME": os.environ.get("HOME", "/tmp"),
             "LANG": os.environ.get("LANG", "C.UTF-8"),

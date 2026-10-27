@@ -11,17 +11,19 @@ tests/agent/test_subagent_lifecycle.py); the rest are NanoClaw's own.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import random
 import subprocess
 import sys
 import textwrap
+import time
 from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
 
-from conftest import requires_posix_shell
+from conftest import WINDOWS, pid_running
 from nanoclaw.__main__ import _make_loop
 from nanoclaw.agent.loop import AgentLoop
 from nanoclaw.agent.subagent import SubagentManager
@@ -35,8 +37,6 @@ from nanoclaw.providers import FakeProvider, LLMResponse, ToolCallRequest
 from nanoclaw.session import SessionManager
 from nanoclaw.utils.llm_runtime import LLMRuntime
 
-needs_proc = pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="process check reads /proc")
-
 EXEC_TOOLS = {"exec", "exec_session", "list_exec_sessions"}
 
 
@@ -46,26 +46,34 @@ def call(name, args, call_id="c1"):
     )
 
 
-def sleeper() -> str:
-    """A ``sleep 30`` command no other process has: its argument is unique."""
-    return f"sleep 30.{random.randrange(10**6):06d}"
+class Sleeper:
+    """A 30-second Python command that writes its pid to a file first.
+
+    The same text runs in bash and in PowerShell (where _spawn adds ``&``
+    before the quoted interpreter path), so the tests below run on every OS;
+    the pid file is how they find the process (``pid_running``).
+    """
+
+    def __init__(self, folder: Path):
+        self.pid_file = folder / f"sleeper-{random.randrange(10**9)}.pid"
+        code = (
+            f"import os,pathlib,time; pathlib.Path(r'{self.pid_file}').write_text(str(os.getpid())); "
+            "time.sleep(30)"
+        )
+        self.command = f'"{sys.executable}" -c "{code}"'
+
+    def pid(self, timeout: float = 10.0) -> int:
+        """The sleeper's pid, once it has written it; fails if it never started."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with contextlib.suppress(OSError, ValueError):
+                return int(self.pid_file.read_text())
+            time.sleep(0.02)
+        raise AssertionError(f"the sleeper never started ({self.pid_file} is missing)")
 
 
-def live_processes(command: str) -> list[int]:
-    """Pids whose command line is ``command`` split on spaces, zombies excluded."""
-    wanted = command.split()
-    pids = []
-    for entry in Path("/proc").iterdir():
-        if not entry.name.isdigit():
-            continue
-        try:
-            argv = (entry / "cmdline").read_bytes().split(b"\0")
-            state = (entry / "stat").read_text().rsplit(")", 1)[1].split()[0]
-        except OSError:
-            continue
-        if [a.decode(errors="replace") for a in argv if a] == wanted and state != "Z":
-            pids.append(int(entry.name))
-    return pids
+def running(sleeper: Sleeper) -> bool:
+    return pid_running(sleeper.pid())
 
 
 async def wait_until(predicate, timeout=5.0):
@@ -77,9 +85,14 @@ async def wait_until(predicate, timeout=5.0):
     return True
 
 
-def started_session(command: str, call_id: str = "c1") -> LLMResponse:
-    """An exec call that returns while ``command`` still runs (a session)."""
-    return call("exec", {"command": command, "yield_time_ms": 300}, call_id)
+# Long enough for the sleeper to write its pid before exec returns (Python
+# starts more slowly on Windows), short enough to return while it still runs.
+YIELD_MS = 2000 if WINDOWS else 300
+
+
+def started_session(sleeper: Sleeper, call_id: str = "c1") -> LLMResponse:
+    """An exec call that returns while ``sleeper`` still runs (a session)."""
+    return call("exec", {"command": sleeper.command, "yield_time_ms": YIELD_MS}, call_id)
 
 
 @pytest.fixture
@@ -208,38 +221,34 @@ async def test_exec_close_runs_even_when_subagent_close_fails(tmp_path):
     loop._exec_session_manager.close_all.assert_awaited_once()
 
 
-@requires_posix_shell
-@needs_proc
 async def test_aclose_ends_a_running_exec_session(ws, tmp_path):
-    command = sleeper()
-    loop = make_loop(ws, tmp_path, [started_session(command), "started"])
+    sleeper = Sleeper(ws)
+    loop = make_loop(ws, tmp_path, [started_session(sleeper), "started"])
     result = await loop.process_direct("go")
     tool_result = next(m["content"] for m in result.messages if m["role"] == "tool")
     assert "Process running. session_id:" in tool_result
-    assert live_processes(command)
+    assert running(sleeper)
     assert loop._has_pending_work()
 
     await loop.aclose()
 
-    assert await wait_until(lambda: not live_processes(command))
+    assert await wait_until(lambda: not running(sleeper))
     assert not loop._exec_session_manager.has_pending_work
 
 
-@requires_posix_shell
-@needs_proc
 async def test_new_ends_only_that_sessions_exec_sessions(ws, tmp_path):
-    mine, other = sleeper(), sleeper()
+    mine, other = Sleeper(ws), Sleeper(ws)
     loop = make_loop(ws, tmp_path, [started_session(mine), "a", started_session(other), "b"])
     try:
         await loop.process_direct("go", session_key="cli:a")
         await loop.process_direct("go", session_key="cli:b")
-        assert live_processes(mine) and live_processes(other)
+        assert running(mine) and running(other)
 
         reply = await loop.process_direct("/new", session_key="cli:a")
 
         assert reply.final_content == "New session started."
-        assert await wait_until(lambda: not live_processes(mine))
-        assert live_processes(other)
+        assert await wait_until(lambda: not running(mine))
+        assert running(other)
         assert [s.owner_session_key for s in await loop._exec_session_manager.list(owner_session_key="cli:b")] == [
             "cli:b"
         ]
@@ -247,19 +256,17 @@ async def test_new_ends_only_that_sessions_exec_sessions(ws, tmp_path):
         await loop.aclose()
 
 
-@requires_posix_shell
-@needs_proc
 async def test_stop_counts_and_ends_exec_sessions(ws, tmp_path):
     """nanobot ``_cancel_active_tasks`` adds ``terminate_by_owner``'s count
     (loop.py:983), so /stop reports the ended sessions."""
-    command = sleeper()
-    loop = make_loop(ws, tmp_path, [started_session(command), "started"])
+    sleeper = Sleeper(ws)
+    loop = make_loop(ws, tmp_path, [started_session(sleeper), "started"])
     try:
         await loop.process_direct("go", session_key="cli:direct")
         msg = InboundMessage(channel="cli", sender_id="user", chat_id="direct", content="/stop")
         out = await cmd_stop(CommandContext(msg=msg, session=None, key="cli:direct", raw="/stop", loop=loop))
         assert out.content == "Stopped 1 task(s)."
-        assert await wait_until(lambda: not live_processes(command))
+        assert await wait_until(lambda: not running(sleeper))
         out = await cmd_stop(CommandContext(msg=msg, session=None, key="cli:direct", raw="/stop", loop=loop))
         assert out.content == "No active task to stop."
     finally:
@@ -337,17 +344,15 @@ async def test_each_child_gets_its_own_exec_manager(ws):
     assert not sm._exec_managers and not sm.has_pending_work
 
 
-@requires_posix_shell
-@needs_proc
 async def test_child_processes_end_when_the_child_finishes(ws):
-    command = sleeper()
+    sleeper = Sleeper(ws)
     sm = SubagentManager(ws)
-    provider = FakeProvider([started_session(command), "child done"])
+    provider = FakeProvider([started_session(sleeper), "child done"])
     seen = []
     original = sm._cleanup_exec
 
     async def spy(task_id):
-        seen.append(bool(live_processes(command)))
+        seen.append(bool(running(sleeper)))
         return await original(task_id)
 
     sm._cleanup_exec = spy
@@ -355,19 +360,17 @@ async def test_child_processes_end_when_the_child_finishes(ws):
 
     assert result == "child done"
     assert seen == [True]  # still running when the child's run ended
-    assert await wait_until(lambda: not live_processes(command))
+    assert await wait_until(lambda: not running(sleeper))
     assert not sm.has_pending_work
 
 
-@requires_posix_shell
-@needs_proc
 async def test_background_child_processes_end_before_its_report(ws):
-    command = sleeper()
+    sleeper = Sleeper(ws)
     sm = SubagentManager(ws)
-    await sm.spawn("t", runtime=runtime(FakeProvider([started_session(command), "child done"])))
+    await sm.spawn("t", runtime=runtime(FakeProvider([started_session(sleeper), "child done"])))
     report = await asyncio.wait_for(sm.bus.consume_inbound(), 5)
     assert "child done" in report.content
-    assert not live_processes(command)
+    assert not running(sleeper)
 
 
 class BlockingProvider(FakeProvider):
@@ -384,23 +387,21 @@ class BlockingProvider(FakeProvider):
         return await super().chat(*args, **kwargs)
 
 
-@requires_posix_shell
-@needs_proc
 @pytest.mark.parametrize("how", ["cancel_by_session", "close"])
 async def test_cancelled_child_processes_end(ws, how):
-    command = sleeper()
+    sleeper = Sleeper(ws)
     sm = SubagentManager(ws)
-    provider = BlockingProvider([started_session(command)])
+    provider = BlockingProvider([started_session(sleeper)])
     await sm.spawn("t", session_key="cli:a", runtime=runtime(provider))
     await asyncio.wait_for(provider.blocked.wait(), 5)
-    assert live_processes(command)
+    assert running(sleeper)
 
     if how == "close":
         await sm.close()
     else:
         assert await sm.cancel_by_session("cli:a") == 1
 
-    assert not live_processes(command)
+    assert not running(sleeper)
     assert not sm.has_pending_work
     assert sm.bus.inbound.empty()  # a cancelled child does not report
 
@@ -488,7 +489,6 @@ def test_exec_disabled_registers_no_exec_tools(ws):
     assert {"read_file", "spawn", "web_fetch"} <= set(loop.tools.tool_names)
 
 
-@requires_posix_shell
 async def test_configured_deny_pattern_blocks_a_command(ws, tmp_path):
     config = Config.model_validate({"tools": {"exec": {"denyPatterns": [r"\bforbidden\b"]}}})
     loop = _make_loop(FakeProvider([call("exec", {"command": "echo forbidden"}), "ok"]), ws, config=config)
@@ -503,13 +503,10 @@ async def test_configured_deny_pattern_blocks_a_command(ws, tmp_path):
 # --- nanoclaw ask, as a real process -----------------------------------------
 
 
-@requires_posix_shell
-@needs_proc
 def test_ask_leaves_no_exec_process_behind(tmp_path):
     """``nanoclaw ask`` whose model starts a long command that outlives the
     exec call: once the command exits, the process is gone."""
-    command = sleeper()
-    pid_file = tmp_path / "pid"
+    sleeper = Sleeper(tmp_path)
     script = textwrap.dedent(
         f"""
         import sys
@@ -520,7 +517,7 @@ def test_ask_leaves_no_exec_process_behind(tmp_path):
             content=None,
             tool_calls=[ToolCallRequest(
                 id="c1", name="exec",
-                arguments={{"command": "echo $$ > {pid_file}; exec {command}", "yield_time_ms": 300}},
+                arguments={{"command": {sleeper.command!r}, "yield_time_ms": {YIELD_MS}}},
             )],
             finish_reason="tool_calls",
         )
@@ -532,9 +529,7 @@ def test_ask_leaves_no_exec_process_behind(tmp_path):
 
     assert done.returncode == 0, done.stderr
     assert done.stdout.strip() == "started"
-    pid = int(pid_file.read_text())
-    assert pid > 0  # the command really started
-    assert not live_processes(command)
+    assert not pid_running(sleeper.pid())  # it really started, and is gone
 
 
 
@@ -565,36 +560,32 @@ def make_chat(ws, tmp_path, script, inputs):
     return Chat(loop, console=console, read_input=read_input, render_markdown=False), console.file
 
 
-@requires_posix_shell
-@needs_proc
 @pytest.mark.parametrize("leave", ["exit", KeyboardInterrupt()], ids=["exit", "ctrl-c"])
 async def test_leaving_the_chat_ends_exec_sessions(ws, tmp_path, leave):
-    command = sleeper()
+    sleeper = Sleeper(ws)
     seen = []
 
     async def check_then_leave():
-        seen.append(bool(live_processes(command)))
+        seen.append(bool(running(sleeper)))
         if isinstance(leave, BaseException):
             raise leave
         return leave
 
-    chat, _ = make_chat(ws, tmp_path, [started_session(command), "started"], ["go", check_then_leave])
+    chat, _ = make_chat(ws, tmp_path, [started_session(sleeper), "started"], ["go", check_then_leave])
     await chat.run()
     assert seen == [True]
-    assert not live_processes(command)
+    assert not running(sleeper)
 
 
-@requires_posix_shell
-@needs_proc
 async def test_chat_stop_ends_the_sessions_exec_sessions(ws, tmp_path):
-    command = sleeper()
+    sleeper = Sleeper(ws)
     seen = []
 
     async def check():
-        seen.append(bool(live_processes(command)))
+        seen.append(bool(running(sleeper)))
         return "exit"
 
-    chat, out = make_chat(ws, tmp_path, [started_session(command), "started"], ["go", "/stop", check])
+    chat, out = make_chat(ws, tmp_path, [started_session(sleeper), "started"], ["go", "/stop", check])
     await chat.run()
     assert seen == [False]
     assert "Stopped 1 task(s)." in out.getvalue()
