@@ -309,11 +309,11 @@ async def test_summarize_transcript_caps_the_summary(ws, tmp_path, store):
 
 def test_memory_section_only_when_edited(ws):
     builder = ContextBuilder(ws)
-    assert "# Memory" not in builder.build_system_prompt()
+    assert "likes tea" not in builder.build_system_prompt()
     (ws / "memory/MEMORY.md").write_text("- likes tea\n")
     prompt = builder.build_system_prompt()
-    assert "---\n\n# Memory\n\n## Long-term Memory\n- likes tea\n\n\n---\n\n# Skills\n" in prompt
-    assert prompt.index("# Tool Usage Notes") < prompt.index("# Memory")
+    assert "---\n\n- likes tea\n\n\n---\n\n# Skills\n" in prompt  # bare, as nanobot 32f5cc7
+    assert prompt.index("# Tool Usage Notes") < prompt.index("- likes tea")
 
 
 def test_summary_section(ws):

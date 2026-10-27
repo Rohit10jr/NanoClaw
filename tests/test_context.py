@@ -49,7 +49,7 @@ def test_load_bundled_template_missing_is_none():
 
 def test_templates_render_without_leftover_jinja():
     out = render_template("agent/platform_policy.md", system="Windows")
-    assert out.startswith("## Platform Policy (Windows)")
+    assert out.startswith("- Do not assume GNU tools")
     assert "{%" not in out and "{{" not in out
 
 
@@ -99,14 +99,40 @@ def test_channel_format_hint(ws, channel, expected):
 
 
 @pytest.mark.parametrize(
-    ("system", "heading", "runtime_start"),
-    [("Windows", "## Platform Policy (Windows)", "Windows "), ("Darwin", "## Platform Policy (POSIX)", "macOS ")],
+    ("system", "policy", "runtime_start"),
+    [
+        ("Windows", "- Do not assume GNU tools like `grep`, `sed`, or `awk` exist.", "Windows "),
+        ("Darwin", "- Prefer UTF-8 and standard shell tools.", "macOS "),
+    ],
 )
-def test_platform_policy(ws, monkeypatch, system, heading, runtime_start):
+def test_platform_policy_sits_under_runtime(ws, monkeypatch, system, policy, runtime_start):
+    # nanobot 32f5cc7: the policy bullets follow the runtime line directly,
+    # with no heading of their own and no "You are running on ..." sentence.
     monkeypatch.setattr(platform, "system", lambda: system)
     prompt = ContextBuilder(ws).build_system_prompt()
-    assert heading in prompt
-    assert f"## Runtime\n{runtime_start}" in prompt
+    runtime_line = prompt.split("\n")[1]
+    assert runtime_line.startswith(runtime_start)
+    assert prompt.startswith(f"## Runtime\n{runtime_line}\n{policy}\n")
+    assert "Platform Policy" not in prompt
+    assert "You are running on" not in prompt
+
+
+def test_template_memory_is_skipped(ws):
+    # nanobot tests/agent/test_context_prompt_cache.py::test_template_memory_md_is_skipped
+    prompt = ContextBuilder(ws).build_system_prompt()
+    assert "# Long-term Memory" not in prompt
+    assert "History log: memory/history.jsonl" in prompt
+    assert "This file is automatically updated by NanoClaw" not in prompt
+
+
+def test_edited_memory_is_injected_without_extra_heading(ws):
+    # nanobot ...::test_customized_memory_md_is_injected: MEMORY.md carries its
+    # own "# Long-term Memory" heading, so it appears exactly once.
+    (ws / "memory" / "MEMORY.md").write_text("# Long-term Memory\n\n## Preferences\n- User prefers dark mode\n")
+    prompt = ContextBuilder(ws).build_system_prompt()
+    assert prompt.count("# Long-term Memory") == 1
+    assert "# Memory\n" not in prompt
+    assert f"{SECTION_SEPARATOR}# Long-term Memory\n\n## Preferences\n- User prefers dark mode\n{SECTION_SEPARATOR}" in prompt
 
 
 def test_unedited_user_and_agents_are_skipped_but_soul_is_kept(ws):

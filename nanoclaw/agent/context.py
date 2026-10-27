@@ -57,8 +57,10 @@ class ContextBuilder:
         parts.append(render_template("agent/tool_contract.md"))
         if include_memory:
             memory = self.memory.read_memory()
+            # Bare: MEMORY.md already starts with "# Long-term Memory", so no
+            # extra heading (nanobot/agent/context.py:113-116).
             if memory and not self._is_template_content(memory, "memory/MEMORY.md"):
-                parts.append(f"# Memory\n\n## Long-term Memory\n{memory}")
+                parts.append(memory)
         active_skills = self.skills.get_always_skills()
         if active_skills:
             active_content = self.skills.load_skills_for_context(active_skills)
