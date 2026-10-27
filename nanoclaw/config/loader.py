@@ -164,6 +164,11 @@ def refresh_config_file(config_path: Path | None = None) -> bool:
         defaults.pop("providers")
     # The detected timezone belongs to the loaded config, not to the defaults.
     defaults["agents"]["defaults"]["timezone"] = config.agents.defaults.timezone
+    # A legacy ``tools.exec.timeout`` already sets the runtime; adding
+    # ``maxRuntime`` beside it would make the file invalid ("not both").
+    raw_exec = raw.get("tools", {}).get("exec") if isinstance(raw.get("tools"), dict) else None
+    if isinstance(raw_exec, dict) and "timeout" in raw_exec:
+        defaults["tools"]["exec"].pop("maxRuntime")
     merged = merge_missing_defaults(raw, defaults)
     if merged == raw:
         return False
