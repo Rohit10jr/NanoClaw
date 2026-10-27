@@ -15,6 +15,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+
 TRUNCATED_SUFFIX = "\n... (truncated)"
 TRUNCATED_PREFIX = "... (earlier part truncated)\n"
 # nanobot caches the vocabulary under its data directory.
@@ -30,7 +32,8 @@ def get_token_encoding() -> Any | None:
         import tiktoken
 
         return tiktoken.get_encoding("cl100k_base")
-    except Exception:
+    except Exception as exc:
+        logger.warning("Token encoding unavailable ({}); using UTF-8 byte estimates until restart.", exc)
         return None
 
 

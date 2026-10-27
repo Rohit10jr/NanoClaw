@@ -7,17 +7,22 @@ import httpx
 import pytest
 from loguru import logger
 
+from conftest import REAL_GET_TOKEN_ENCODING
 from nanoclaw.agent.context import ContextBuilder
+from nanoclaw.agent.loop import AgentLoop
 from nanoclaw.agent.memory import MemoryArchiver, MemoryStore
+from nanoclaw.agent.runner import AgentRunner, AgentRunSpec
 from nanoclaw.agent.subagent import SubagentManager
 from nanoclaw.agent.tool_results import normalize_tool_result
-from nanoclaw.agent.tools import is_tool_error
+from nanoclaw.agent.tools import ToolRegistry, is_tool_error
+from nanoclaw.agent.tools.violations import classify_violation
 from nanoclaw.agent.tools.web import WebFetchTool, WebSearchTool, _redact_url_for_log
 from nanoclaw.cli.log_control import configure_console_logging, set_nanoclaw_logs
-from nanoclaw.providers import FakeProvider, LLMResponse
+from nanoclaw.providers import FakeProvider, LLMResponse, ToolCallRequest
 from nanoclaw.session import SessionManager
 from nanoclaw.utils.llm_runtime import LLMRuntime
 from nanoclaw.utils.templates import sync_workspace_templates
+from toy_tools import EchoTool
 
 SOURCE = [{"role": "user", "content": "I like tea"}, {"role": "assistant", "content": "Noted."}]
 HISTORY = [{"role": "system", "content": "SYS"}, *SOURCE]
@@ -242,3 +247,116 @@ def test_tool_result_persist_failure_falls_back_to_truncation(tmp_path, logs):
     out = normalize_tool_result("exec", "c1", "x" * 500, workspace=workspace, max_chars=100, bucket="cli:direct")
     assert len(out) <= 200 and out.startswith("x")
     assert messages(logs, "ERROR") == ["Tool result persist failed for c1 in cli:direct; using raw result"]
+
+
+# --- agent runner and loop ----------------------------------------------------------------
+
+
+def echo_registry():
+    registry = ToolRegistry()
+    registry.register(EchoTool())
+    return registry
+
+
+def wants_tools(*calls):
+    return LLMResponse(content=None, tool_calls=list(calls), finish_reason="tool_calls")
+
+
+async def run_spec(provider, **kwargs):
+    spec = AgentRunSpec(
+        initial_messages=[{"role": "user", "content": "hi"}], tools=echo_registry(), provider=provider, **kwargs
+    )
+    return await AgentRunner().run(spec)
+
+
+async def test_runner_logs_nothing_by_default():
+    records, sink = _capture()
+    try:
+        result = await run_spec(FakeProvider(["", "", ""]), session_key="cli:direct")
+    finally:
+        logger.remove(sink)
+    assert result.stop_reason == "empty_final_response"
+    assert records == []
+
+
+async def test_empty_response_retry_is_warned(logs):
+    result = await run_spec(FakeProvider(["", "", "Recovered."]), session_key="cli:direct")
+    assert result.final_content == "Recovered."
+    assert messages(logs, "WARNING") == [
+        "Empty response on turn 0 for cli:direct (1/2); retrying",
+        "Empty response on turn 1 for cli:direct after 2 retries; attempting finalization",
+    ]
+
+
+async def test_malformed_tool_calls_are_warned(logs):
+    nameless = ToolCallRequest(id="bad", name="", arguments={})
+    result = await run_spec(FakeProvider([wants_tools(nameless), wants_tools(nameless), "Plain answer."]))
+    assert result.final_content == "Plain answer."
+    dropped = "Dropped 1 malformed tool call(s) with missing/non-string name from LLM response (finish_reason='tool_calls')"
+    assert messages(logs, "WARNING") == [
+        dropped,
+        "Retrying LLM request after all 1 malformed tool call(s) were dropped",
+        dropped,
+        "Malformed tool calls persisted after retry; falling back to no-tools request",
+    ]
+
+
+async def test_max_iterations_is_warned(tmp_path, ws, logs):
+    script = [wants_tools(ToolCallRequest(id=f"c{i}", name="echo", arguments={"text": "x"})) for i in range(2)]
+    loop = AgentLoop(
+        FakeProvider([*script, "Summary."]),
+        ws,
+        tools=echo_registry(),
+        sessions=SessionManager(ws, sessions_root=tmp_path / "sessions"),
+        max_iterations=2,
+    )
+    result = await loop.process_direct("hello there")
+    assert result.stop_reason == "max_iterations"
+    assert messages(logs, "INFO") == ["Processing message from cli:user: hello there"]
+    assert messages(logs, "WARNING") == ["Max iterations (2) reached"]
+
+
+async def test_dream_with_nothing_to_process_is_logged(tmp_path, ws, logs):
+    loop = AgentLoop(FakeProvider([]), ws, sessions=SessionManager(ws, sessions_root=tmp_path / "sessions"))
+    await loop.run_dream()
+    info = messages(logs, "INFO")
+    assert info[0].startswith("Registered ") and "'spawn'" in info[0]
+    assert info[1:] == ["Dream: nothing to process"]
+
+
+def test_token_encoding_unavailable_is_warned(monkeypatch, logs):
+    import tiktoken
+
+    def broken(name):
+        raise OSError("offline")
+
+    monkeypatch.setattr(tiktoken, "get_encoding", broken)
+    REAL_GET_TOKEN_ENCODING.cache_clear()
+    try:
+        assert REAL_GET_TOKEN_ENCODING() is None
+    finally:
+        REAL_GET_TOKEN_ENCODING.cache_clear()
+    assert messages(logs, "WARNING") == [
+        "Token encoding unavailable (offline); using UTF-8 byte estimates until restart."
+    ]
+
+
+def test_repeated_workspace_violation_is_warned(tmp_path, logs):
+    target = tmp_path / "secret.txt"
+    counts: dict[str, int] = {}
+    outs = [
+        classify_violation(
+            raw_text="Error: path is outside the configured workspace",
+            soft_payload="soft",
+            tool_name="read_file",
+            arguments={"path": str(target)},
+            workspace_violation_counts=counts,
+        )
+        for _ in range(3)
+    ]
+    assert outs[:2] == ["soft", "soft"] and outs[2].startswith("Error: refusing repeated workspace-bypass")
+    signature = f"violation:{target.resolve().as_posix()}".lower()
+    assert messages(logs, "WARNING") == [
+        f"Escalating repeated workspace bypass attempt {signature} (attempt 3)",
+        "Tool read_file hit workspace boundary repeatedly; escalating hint",
+    ]
