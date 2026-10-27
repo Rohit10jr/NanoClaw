@@ -7,6 +7,8 @@ each provider translates to and from its own wire format.
 
 from __future__ import annotations
 
+from loguru import logger
+
 import asyncio
 import json
 import re
@@ -563,10 +565,20 @@ class LLMProvider(ABC):
                 return response
 
             if persistent and identical_error_count >= self._PERSISTENT_IDENTICAL_ERROR_LIMIT:
+                logger.warning(
+                    "Stopping persistent retry after {} identical transient errors: {}",
+                    identical_error_count,
+                    (response.content or "")[:120].lower(),
+                )
                 if on_retry_wait:
                     await on_retry_wait(f"Persistent retry stopped after {identical_error_count} identical errors.")
                 return response
             if not persistent and attempt > len(delays):
+                logger.warning(
+                    "LLM request failed after {} attempts, giving up: {}",
+                    attempt,
+                    (response.content or "")[:120].lower(),
+                )
                 if on_retry_wait:
                     await on_retry_wait(f"Model request failed after {attempt} attempts, giving up.")
                 return response
@@ -576,6 +588,14 @@ class LLMProvider(ABC):
             delay = retry_after + RETRY_AFTER_BUFFER if retry_after else base_delay
             if persistent:
                 delay = min(delay, self._PERSISTENT_MAX_DELAY)
+            # nanobot base.py:1754
+            logger.warning(
+                "LLM transient error (attempt {}{}), retrying in {}s: {}",
+                attempt,
+                "+" if persistent and attempt > len(delays) else f"/{len(delays)}",
+                int(round(delay)),
+                (response.content or "")[:120].lower(),
+            )
             await self._sleep_with_heartbeat(
                 delay, attempt=attempt, persistent=persistent, on_retry_wait=on_retry_wait
             )

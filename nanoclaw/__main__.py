@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 from nanoclaw import __version__
+from nanoclaw.cli.log_control import configure_console_logging, set_nanoclaw_logs
 from nanoclaw.agent.context import ContextBuilder
 from nanoclaw.agent.loop import AgentLoop, ContextWindowExceededError
 from nanoclaw.config import (
@@ -73,6 +74,7 @@ def _make_loop(
         context_window_tokens=defaults.context_window_tokens,
         restrict_to_workspace=restrict or config.tools.restrict_to_workspace,
         compaction=defaults.compaction,
+        provider_retry_mode=defaults.provider_retry_mode,
     )
 
 
@@ -270,13 +272,22 @@ def main(argv: list[str] | None = None, provider: LLMProvider | None = None) -> 
         default=None,
         help="config file (default: $NANOCLAW_CONFIG or ~/.nanoclaw/config.json)",
     )
+    # Commands that run the agent take --logs (nanobot agent --logs/--no-logs,
+    # cli/agent.py:67; off by default).
+    with_logs = argparse.ArgumentParser(add_help=False)
+    with_logs.add_argument(
+        "--logs",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="show nanoclaw runtime logs on stderr (default: off)",
+    )
     workspace_help = "directory the agent works in (default: agents.defaults.workspace, ~/.nanoclaw/workspace)"
     restrict_help = (
         "keep file tools and shell commands inside the workspace "
         "(also tools.restrictToWorkspace or NANOCLAW_RESTRICT_TO_WORKSPACE=1)"
     )
     chat = commands.add_parser(
-        "chat", parents=[common], help="chat with the agent in the terminal (type exit or press Ctrl+C to quit)"
+        "chat", parents=[common, with_logs], help="chat with the agent in the terminal (type exit or press Ctrl+C to quit)"
     )
     chat.add_argument(
         "-s", "--session", default=DEFAULT_SESSION, help=f"conversation to continue (default: {DEFAULT_SESSION})"
@@ -287,7 +298,7 @@ def main(argv: list[str] | None = None, provider: LLMProvider | None = None) -> 
         "--markdown", action=argparse.BooleanOptionalAction, default=True, help="render replies as Markdown (default: on)"
     )
     ask = commands.add_parser(
-        "ask", parents=[common], help="send one message and exit; the conversation continues across calls"
+        "ask", parents=[common, with_logs], help="send one message and exit; the conversation continues across calls"
     )
     ask.add_argument("prompt")
     ask.add_argument(
@@ -297,7 +308,7 @@ def main(argv: list[str] | None = None, provider: LLMProvider | None = None) -> 
     ask.add_argument("-w", "--workspace", type=Path, default=None, help=workspace_help)
     ask.add_argument("--restrict", action="store_true", help=restrict_help)
     compact = commands.add_parser(
-        "compact", parents=[common], help="summarize the conversation so far into a short checkpoint"
+        "compact", parents=[common, with_logs], help="summarize the conversation so far into a short checkpoint"
     )
     compact.add_argument(
         "-s", "--session", default=DEFAULT_SESSION, help=f"conversation to compact (default: {DEFAULT_SESSION})"
@@ -305,7 +316,7 @@ def main(argv: list[str] | None = None, provider: LLMProvider | None = None) -> 
     compact.add_argument("-w", "--workspace", type=Path, default=None, help=workspace_help)
     dream = commands.add_parser(
         "dream",
-        parents=[common],
+        parents=[common, with_logs],
         help="update long-term memory (memory/MEMORY.md, USER.md, SOUL.md) from the history journal",
     )
     dream.add_argument("-w", "--workspace", type=Path, default=None, help=workspace_help)
@@ -330,6 +341,9 @@ def main(argv: list[str] | None = None, provider: LLMProvider | None = None) -> 
         parser.print_help()
         return 0
     set_config_path(args.config)
+    if getattr(args, "logs", False):
+        configure_console_logging(sys.stderr)  # INFO and above, like nanobot's CLI sink
+    set_nanoclaw_logs(getattr(args, "logs", False))
     if args.command == "config":
         return _config_command(args.config_action)
 
