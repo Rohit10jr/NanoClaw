@@ -692,6 +692,23 @@ Note: [`notes/16-shell.md`](notes/16-shell.md). Links point at nanobot `c4dac64`
 | `SubagentManager` per-child exec managers, `close`, `has_pending_work` (`agent/subagent.py`) | [`agent/subagent.py:106, 274, 318, 999`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/subagent.py#L318) | Same; child sessions owned by the parent's key |
 | Windows paths in `_OUTSIDE_PATH_PATTERN`, `_normalize_violation_target` (`agent/tools/violations.py`) | [`utils/runtime.py:136`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/utils/runtime.py#L136) | NanoClaw only (nanobot has the gap) |
 
+## Layer 17 — More tools: `apply_patch`, `rg`, file state, MCP
+
+Note: [`notes/17-more-tools.md`](notes/17-more-tools.md). Links point at nanobot `c4dac64`.
+
+| NanoClaw | nanobot (`c4dac64`) | How it compares |
+|---|---|---|
+| `nanoclaw/agent/tools/apply_patch.py` `ApplyPatchTool` | [`agent/tools/apply_patch.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/tools/apply_patch.py) | 78 cases identical; plain-text result; `write_check` hook for Dream |
+| `EditFileTool` `line_hint`, `expected_replacements`, `_match_end_line`, `_match_covers_line`; tool descriptions (`agent/tools/filesystem.py`) | [`agent/tools/filesystem.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/tools/filesystem.py) | Same |
+| `nanoclaw/agent/tools/rg.py` `RgTool` | [`agent/tools/rg.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/tools/rg.py) | 45 cases identical; no `tools.file.enable` |
+| `nanoclaw/agent/tools/file_state.py` `FileStates`, `FileStateStore`, `file_read_context`, `bind_file_states` | [`agent/tools/file_state.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/tools/file_state.py) | Same |
+| `ReadFileTool` `force` and the unchanged stub; `record_write` in `write_file`, `edit_file`, `apply_patch` | [`agent/tools/filesystem.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/tools/filesystem.py), [`apply_patch.py:243`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/tools/apply_patch.py#L243) | Same |
+| `AgentRunner._model_tool_results`, `read_results` (`agent/runner.py`); per-session state in `AgentLoop` | [`agent/runner.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/runner.py), [`agent/loop.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/loop.py) | 19 runs identical; no provider-side compaction set |
+| `nanoclaw/agent/tools/mcp.py` `MCPProvider`, `connect_mcp_servers`, `open_single_server`, `_OwnedMCPConnection`, `MCPToolWrapper`, `_normalize_schema_for_openai`, `_limit_tool_name`, `_redact_url` | [`agent/tools/mcp.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/tools/mcp.py) | Tools only; definitions 10/10, calls 19/20 identical (images differ) |
+| `MCPServerConfig` as `tools.mcpServers` (`config/schema.py`) | [`config/schema.py:414`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/config/schema.py#L414) | Same fields; `useProxy` and OAuth accepted, not used |
+| `ToolRegistry.get_definitions` order and cache (`agent/tools/registry.py`) | [`agent/tools/registry.py:97`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/tools/registry.py#L97) | Same |
+| `env_proxy_applies_to_url` (`security/network.py`) | [`security/network.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/security/network.py) | Same |
+
 [nb-pta]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/providers/base.py#L118
 [nb-tcr]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/providers/base.py#L72
 [nb-tcr-hvn]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/providers/base.py#L81

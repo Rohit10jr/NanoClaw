@@ -32,6 +32,7 @@ recovery, governance) for later.
 | 14 | Message bus, session workers, `/stop`, injections | done |
 | 15 | Crash recovery, compaction before every model request | done |
 | 16 | Shell: background exec sessions, Windows PowerShell | done |
+| 17 | More tools: `apply_patch`, `rg`, unchanged-file reads, MCP servers | done |
 
 Phase 1 (the core agent) is complete. Phase 2 builds the production backend
 (layers 11–25; progress in [`docs/PHASE2_PROGRESS.md`](docs/PHASE2_PROGRESS.md)).
