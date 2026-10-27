@@ -79,8 +79,8 @@ Legend: ⏳ in progress · ✅ done and verified · ⛔ blocked
 |---|---|---|---|---|
 | 16.1 Exec sessions | new `agent/tools/exec_session.py`, `shell_output.py`; `shell.py` `exec` through sessions (POSIX) | sub-agent (worktree), phase A | 44 scenarios through both: 41 identical, 3 deliberate (guard always on); checked by main session | ✅ |
 | 16.2 Exec settings, Windows paths in violations | `config/schema.py` `tools.exec`, `tools/violations.py` | sub-agent (worktree), phase A | 16 config files loaded through both: identical; nanobot has the same Windows-path gap (NanoClaw fix) | ✅ |
-| 16.3 Wiring | loop (`/new`, shutdown, pending work), subagents, config → tools, tool hints, chat | sub-agent (worktree), phase B | | ⏳ |
-| 16.4 Windows shell | PowerShell/cmd, Windows environment, `taskkill` tree kill | sub-agent (worktree), phase C | | |
+| 16.3 Wiring | loop (`/new`, shutdown, pending work), subagents, config → tools, tool hints, chat | sub-agent (worktree), phase B | 21 loop-level checks through both `AgentLoop`s with real processes: identical; `ask` leaves no process behind | ✅ |
+| 16.4 Windows shell | PowerShell/cmd, Windows environment, `taskkill` tree kill | sub-agent (worktree), phase C | | ⏳ |
 | Mutation checks, docs, PR | | | | |
 
 ## Blockers and open items
