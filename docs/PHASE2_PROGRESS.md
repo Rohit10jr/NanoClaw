@@ -25,6 +25,16 @@ Legend: ⏳ in progress · ✅ done and verified · ⛔ blocked
 | Docs | note 11, CODE_MAP, ROADMAP, README, WINDOWS, UPSTREAM_BUGS, stale lines | main session | — | ✅ |
 | PR | `p2/layer-11` → `main` | main session | PR #3 | ✅ |
 
+## Layer 12 — foundations (`p2/layer-12`) ⏳
+
+| Task | Scope (files) | Sub-agent | Verification | Status |
+|---|---|---|---|---|
+| 12.1 Config file | new `nanoclaw/config/`, `__main__.py`, `providers/factory.py`, iteration defaults (200), `nanoclaw config` | sub-agent (worktree) | | ⏳ |
+| 12.2 Logging | loguru, `cli/log_control.py`, log calls in memory/session/subagent/skills/tools | sub-agent (worktree) | | ⏳ |
+| 12.3 Retries and usage | `providers/base.py`, `openai_compat.py`, `runner.py`, memory model calls, `LLMUsage` | sub-agent (worktree) | | ⏳ |
+| Integration | wire `providerRetryMode` and `--logs`; merges | main session | | |
+| Comparison, mutation checks, docs, PR | | main session | | |
+
 ## Blockers and open items
 
 | Item | Status |
