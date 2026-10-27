@@ -84,7 +84,7 @@ guard only in restricted mode, as nanobot.
 
 ## Tests
 
-Layer 17 adds 273 tests (1,634 → 1,907): `test_apply_patch_tool.py`,
+Layer 17 adds 352 tests (1,634 → 1,986): `test_apply_patch_tool.py`,
 `test_edit_file_line_hint.py`, `test_rg_tool.py`, `test_file_state.py`,
 `test_mcp_tool.py`, `test_mcp_probe.py`, `test_mcp_transient_retry.py`,
 `test_mcp_connection.py`, `test_mcp_reconnect_crash.py`,
@@ -94,4 +94,28 @@ from nanobot's.
 
 ### Mutation checks
 
-MUTATION_RESULTS
+274 rules were broken on purpose:
+
+| Area | Rules | Caught at once | Gaps closed with tests | Equivalent | Result |
+|---|---|---|---|---|---|
+| `apply_patch`, `edit_file` options, Dream | 65 | 47 | 16 | 2 | 63 caught |
+| `rg` | 19 | 17 | 2 | 0 | 19 caught |
+| File state and its wiring | 46 | 32 | 11 | 3 | 43 caught |
+| MCP, tool order, settings, CLI | 144 | 87 | 52 | 5 | 139 caught |
+
+79 new tests close the gaps, for example: `apply_patch` without its
+"not found" check corrupted the file; CRLF and final-newline cases; `rg`
+ignoring `exec.enable` when called directly; the same offset with another
+`limit` returning the "unchanged" note; a one-session file-state store;
+MCP transport choice, the 64-character name boundary, the 1-second retry
+wait, exception groups during close, `chat` connecting servers before the
+first turn; `env_proxy_applies_to_url` cases.
+
+Equivalent (10): checks that can't be reached (a directory fails to read
+before the file check; a remote `$ref` is never resolved; a failed `which()`
+falls back to the same name), normalizations that change nothing
+(`splitlines()` already handles CRLF), and paths where only `read_file` or tool
+messages can carry the value. Two timing tests failed only while three suites
+ran at once on four CPUs; the split `wait_for` test no longer asserts on the
+wall clock.
+

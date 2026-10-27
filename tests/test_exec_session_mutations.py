@@ -310,12 +310,12 @@ async def test_wait_for_matches_text_split_across_polls(tmp_path):
             command="sleep 1; printf 'ab'; sleep 0.8; printf 'cd'; sleep 30", yield_time_ms=0,
         )
         assert "ab" not in initial
-        started = time.monotonic()
+        # A missed match would end at the timeout with "Wait target not
+        # observed", so no wall-clock assertion is needed (it failed under load).
         result = await ExecSessionTool(manager=manager).execute(
-            session_id=_session_id(initial), wait_for="bc", timeout_ms=6000,
+            session_id=_session_id(initial), wait_for="bc", timeout_ms=10000,
         )
         assert "Wait target not observed" not in result
-        assert time.monotonic() - started < 5
     finally:
         await manager.close_all()
 
