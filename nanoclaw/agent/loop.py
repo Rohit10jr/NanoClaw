@@ -29,7 +29,12 @@ from nanoclaw.agent.context_governance import merge_adjacent_user_messages_for_m
 from nanoclaw.agent.memory import COMPACTION_NANOBOT, Consolidator, MemoryStore
 from nanoclaw.agent.messages import EMPTY_FINAL_RESPONSE_MESSAGE, is_blank
 from nanoclaw.agent.runner import AgentRunner, AgentRunResult, AgentRunSpec, ProgressCallback
-from nanoclaw.agent.subagent import SUBAGENT_RESULT_EVENT, SubagentManager, SubagentResult
+from nanoclaw.agent.subagent import (
+    DEFAULT_MAX_CONCURRENT_SUBAGENTS,
+    SUBAGENT_RESULT_EVENT,
+    SubagentManager,
+    SubagentResult,
+)
 from nanoclaw.agent.tools import ToolRegistry, build_default_tools
 from nanoclaw.agent.tools.context import RequestContext, bind_request_context, reset_request_context
 from nanoclaw.agent.tools.spawn import SpawnTool
@@ -89,8 +94,10 @@ class AgentLoop:
         model: str | None = None,
         tools: ToolRegistry | None = None,
         sessions: SessionManager | None = None,
-        max_iterations: int = 20,
+        # nanobot config max_tool_iterations (schema.py:180); phase 2 decision 7.
+        max_iterations: int = 200,
         max_tool_result_chars: int = 16_000,
+        max_concurrent_subagents: int = DEFAULT_MAX_CONCURRENT_SUBAGENTS,
         max_tokens: int = 4096,
         temperature: float = 0.7,
         context_window_tokens: int = DEFAULT_CONTEXT_WINDOW_TOKENS,
@@ -112,6 +119,7 @@ class AgentLoop:
             workspace,
             max_tool_result_chars=max_tool_result_chars,
             max_iterations=max_iterations,
+            max_concurrent_subagents=max_concurrent_subagents,
             restrict_to_workspace=restrict_to_workspace,
         )
         if tools is None:

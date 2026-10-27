@@ -42,7 +42,8 @@ _BLOCKED_NETWORKS = [
 _URL_RE = re.compile(r"https?://[^\s\"'`;|<>]+", re.IGNORECASE)
 _allowed_networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
 
-# NanoClaw has no config file; nanobot reads tools.ssrfWhitelist from its config.
+# Overrides config.json tools.ssrfWhitelist (nanobot loader.py:133 applies it
+# with configure_ssrf_whitelist at load time; NanoClaw's CLI does the same).
 SSRF_WHITELIST_ENV = "NANOCLAW_SSRF_WHITELIST"
 
 
@@ -57,7 +58,8 @@ def configure_ssrf_whitelist(cidrs: list[str]) -> None:
 
 
 def configure_ssrf_whitelist_from_env() -> None:
-    """Read ``NANOCLAW_SSRF_WHITELIST`` (comma-separated CIDR ranges)."""
+    """Read ``NANOCLAW_SSRF_WHITELIST`` (comma-separated CIDR ranges) alone,
+    without the config file (the CLI uses ``Config.tools.ssrf_whitelist``)."""
     raw = os.environ.get(SSRF_WHITELIST_ENV, "")
     configure_ssrf_whitelist([part.strip() for part in raw.split(",") if part.strip()])
 
