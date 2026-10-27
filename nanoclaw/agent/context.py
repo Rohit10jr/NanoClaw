@@ -1,9 +1,11 @@
 """Building the system prompt and the message list for a turn.
 
 Mirrors nanobot/agent/context.py (``ContextBuilder``). The system prompt is
-assembled from Markdown: rendered templates, the user-editable files in the
-workspace (``AGENTS.md``, ``SOUL.md``, ``USER.md``), long-term memory
-(``memory/MEMORY.md``), skills, and the summary of compacted conversation.
+assembled from Markdown: rendered templates, the user-editable files
+(``AGENTS.md`` from the project folder, ``SOUL.md`` and ``USER.md`` from the
+agent workspace), long-term memory (``memory/MEMORY.md``), skills, and the
+summary of compacted conversation. The project is the workspace unless
+``--project`` names another folder.
 """
 
 from __future__ import annotations
@@ -47,14 +49,30 @@ class ContextBuilder:
         *,
         channel: str | None = None,
         session_summary: SessionSummary | None = None,
+        workspace: Path | None = None,
         include_memory: bool = True,
     ) -> str:
-        """Identity, workspace files, tool usage notes, memory, skills, then the conversation summary."""
-        parts = [self._get_identity(channel=channel)]
-        bootstrap = self._load_bootstrap_files()
+        """Identity, workspace files, tool usage notes, memory, skills, then the conversation summary.
+
+        ``workspace`` is the turn's project folder (nanobot: the scope's
+        ``project_path``); None means the agent workspace. AGENTS.md comes
+        from the project, SOUL.md, USER.md, memory and skills from the agent
+        workspace, and a ``# Current Project`` section names the project when
+        it differs (nanobot context.py:88-111).
+        """
+        root = workspace or self.workspace
+        parts = [self._get_identity(channel=channel, workspace=root)]
+        bootstrap = self._load_bootstrap_files(root)
         if bootstrap:
             parts.append(bootstrap)
         parts.append(render_template("agent/tool_contract.md"))
+        project_path = root.expanduser().resolve()
+        if project_path != self.workspace.expanduser().resolve():
+            parts.append(
+                "# Current Project\n\n"
+                f"Working directory: {project_path}\n"
+                "Use it as the default root for project files and relative tool paths."
+            )
         if include_memory:
             memory = self.memory.read_memory()
             # Bare: MEMORY.md already starts with "# Long-term Memory", so no
@@ -66,7 +84,7 @@ class ContextBuilder:
             active_content = self.skills.load_skills_for_context(active_skills)
             if active_content:
                 parts.append(f"# Active Skills\n\n{active_content}")
-        skills_summary = self.skills.build_skills_summary(exclude=set(active_skills))
+        skills_summary = self.skills.build_skills_summary(exclude=set(active_skills), workspace=root)
         if skills_summary:
             parts.append(render_template("agent/skills_section.md", skills_summary=skills_summary))
         if session_summary and session_summary["text"] != "(nothing)":
@@ -77,8 +95,9 @@ class ContextBuilder:
             )
         return SECTION_SEPARATOR.join(parts)
 
-    def _get_identity(self, channel: str | None = None) -> str:
-        workspace_path = str(self.workspace.expanduser().resolve())
+    def _get_identity(self, channel: str | None = None, workspace: Path | None = None) -> str:
+        workspace_path = str((workspace or self.workspace).expanduser().resolve())
+        agent_workspace_path = str(self.workspace.expanduser().resolve())
         system = platform.system()
         runtime = (
             f"{'macOS' if system == 'Darwin' else system} {platform.machine()}, "
@@ -87,18 +106,19 @@ class ContextBuilder:
         return render_template(
             "agent/identity.md",
             workspace_path=workspace_path,
-            # nanobot can keep the agent's own files apart from a project
-            # folder; NanoClaw uses one folder for both (see the roadmap).
-            agent_workspace_path=workspace_path,
+            agent_workspace_path=agent_workspace_path,
             runtime=runtime,
             platform_policy=render_template("agent/platform_policy.md", system=system),
             channel=channel or "",
         )
 
-    def _load_bootstrap_files(self) -> str:
+    def _load_bootstrap_files(self, workspace: Path | None = None) -> str:
+        """Project instructions plus the agent's own profile files (nanobot context.py:177)."""
         parts: list[str] = []
+        project_root = workspace or self.workspace
+        sources = {"AGENTS.md": project_root, "SOUL.md": self.workspace, "USER.md": self.workspace}
         for filename in self.BOOTSTRAP_FILES:
-            file_path = self.workspace / filename
+            file_path = sources[filename] / filename
             if not file_path.exists():
                 continue
             content = file_path.read_text(encoding="utf-8")
@@ -147,6 +167,7 @@ class ContextBuilder:
         channel: str | None = None,
         runtime_context_blocks: Sequence[RuntimeContextBlock] | None = None,
         session_summary: SessionSummary | None = None,
+        workspace: Path | None = None,
     ) -> list[dict[str, Any]]:
         """``[system, *history, current user message]``.
 
@@ -156,7 +177,12 @@ class ContextBuilder:
         ``current_message=None`` (used when archiving) there is no new message.
         """
         messages: list[dict[str, Any]] = [
-            {"role": "system", "content": self.build_system_prompt(channel=channel, session_summary=session_summary)},
+            {
+                "role": "system",
+                "content": self.build_system_prompt(
+                    channel=channel, session_summary=session_summary, workspace=workspace
+                ),
+            },
             *history,
         ]
         if current_message is None:

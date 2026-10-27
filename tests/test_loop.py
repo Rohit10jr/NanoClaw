@@ -90,7 +90,7 @@ async def test_saved_user_message_has_runtime_context_marker(ws, tmp_path):
     await loop.process_direct("hello")
     user = loop.sessions.get_or_create("cli:direct").messages[0]
     marker = user["_runtime_context"]
-    assert marker["version"] == 1 and marker["sources"] == ["time"]
+    assert marker["version"] == 1 and marker["sources"] == ["time", "workspace_access"]
     assert user["content"] == "hello\n\n" + marker["suffix"]
     assert "_meta" not in user
 

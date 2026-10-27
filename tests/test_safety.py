@@ -494,7 +494,7 @@ async def test_escalation_counts_reset_each_run(ws, outside):
 
 
 def _restricted(registry):
-    return [registry.get(n).restrict_to_workspace if n == "exec" else registry.get(n)._allowed_dir is not None
+    return [registry.get(n).restrict_to_workspace if n == "exec" else registry.get(n)._restrict_to_workspace
             for n in ("read_file", "write_file", "edit_file", "list_dir", "exec")]
 
 

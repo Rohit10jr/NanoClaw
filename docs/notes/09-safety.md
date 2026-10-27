@@ -105,7 +105,7 @@ The count starts again with each run. Dream's own boundary errors use the same w
 | Local-service access for the Web UI | `allow_loopback`, `webui_allow_local_service_access` | Lets the Web UI's preview reach `localhost` | **Phase 2: Web UI** |
 | Trusting a proxy's DNS | `trust_remote_dns` | For image generation behind a trusted proxy | **Phase 2** |
 | Configured fetch proxy | `web.proxy` | A proxy just for `web_fetch` (environment proxies already work) | **Phase 2: configuration** |
-| Workspace scopes / separate project folder | `security/workspace_access.py` | Per-chat project folders, each with its own restriction | **Phase 2: Separate project folder** |
+| Workspace scopes / separate project folder | `security/workspace_access.py` | Per-chat project folders, each with its own restriction | **Done in layer 18 (task 18.2)**: `--project DIR`; restricted mode then means the project, plus reads of the agent's skills and `memory/history.jsonl` |
 | SSRF checks for MCP servers | `agent/tools/mcp.py` | Same guard for MCP connections | **Done in task 17.4** (URL check, per-request hook incl. redirects, DNS pinning) |
 | Repeated-lookup throttle | `repeated_external_lookup_error` | Stops the model repeating the same search or fetch | **Phase 2** (skipped since layer 2) |
 
@@ -148,7 +148,7 @@ stops if a package file changes. Two changes cannot fail because they change
 nothing today:
 
 - checking a redirect target before the next loop step checks it again (kept as in nanobot, as defence in depth);
-- the journal exception for restricted reads: the journal is always inside the workspace while NanoClaw has one workspace folder. It matters once a separate project folder exists (phase 2).
+- the journal exception for restricted reads: the journal is always inside the workspace while NanoClaw has one workspace folder. It matters once a separate project folder exists (phase 2). *(Layer 18: it does now; `tests/test_workspace_scope.py` covers it.)*
 
 ## Review against nanobot
 

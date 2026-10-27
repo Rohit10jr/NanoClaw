@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -28,9 +29,12 @@ from nanoclaw.events import AgentEvent, EventSink
 from nanoclaw.providers import LLMProvider
 from nanoclaw.providers.factory import provider_from_config
 from nanoclaw.security.network import configure_ssrf_whitelist
+from nanoclaw.security.workspace_access import WorkspaceScopeError, project_workspace_scope
 from nanoclaw.utils.templates import sync_workspace_templates
 
 CHANNEL = "cli"
+# The project folder for chat/ask/prompt when --project is not given.
+ENV_PROJECT = "NANOCLAW_PROJECT"
 # nanobot's terminal chat uses the same key.
 DEFAULT_SESSION = "cli:direct"
 
@@ -41,6 +45,26 @@ def _prepare_workspace(path: Path) -> Path:
     for name in sync_workspace_templates(workspace):
         print(f"[created {workspace / name}]", file=sys.stderr)
     return workspace
+
+
+def _project_dir(value: Path | None, workspace: Path) -> Path | None:
+    """``--project DIR`` or ``$NANOCLAW_PROJECT``: an existing directory,
+    relative to the current one; None (work in the workspace) when neither
+    is set. A bad folder stops the command with a readable message.
+
+    nanobot picks a project per chat in its WebUI and keeps it in the
+    session; NanoClaw takes it per run, for every session of the run.
+    """
+    if value is None:
+        env = os.environ.get(ENV_PROJECT, "").strip()
+        value = Path(env) if env else None
+    if value is None:
+        return None
+    try:
+        scope = project_workspace_scope(value, workspace=workspace, restrict_to_workspace=False)
+    except WorkspaceScopeError as exc:
+        raise SystemExit(f"--project {value}: {exc}") from None
+    return scope.project_path
 
 
 def _runtime_config() -> Config:
@@ -61,14 +85,22 @@ def _compaction() -> str:
 
 
 def _make_loop(
-    provider: LLMProvider, workspace: Path, *, restrict: bool = False, config: Config | None = None
+    provider: LLMProvider,
+    workspace: Path,
+    *,
+    restrict: bool = False,
+    config: Config | None = None,
+    project: Path | None = None,
 ) -> AgentLoop:
     """The agent loop with the configured settings (nanobot builds it from
     ``agents.defaults``, cli/agent.py) and ``tools.exec``. ``restrict``
     (``--restrict``) can only turn the workspace restriction on.
 
     The caller closes the loop (``aclose``) when done, which also ends the
-    exec sessions it started (nanobot ``agent -m``'s ``_close_runtime``)."""
+    exec sessions it started (nanobot ``agent -m``'s ``_close_runtime``).
+
+    ``project`` (``--project``) is the folder the agent works on; its own
+    files stay in ``workspace``."""
     config = config or _runtime_config()
     defaults = config.agents.defaults
     return AgentLoop(
@@ -84,6 +116,7 @@ def _make_loop(
         compaction=defaults.compaction,
         provider_retry_mode=defaults.provider_retry_mode,
         exec_config=config.tools.exec,
+        project=project,
     )
 
 
@@ -192,8 +225,9 @@ async def _ask(
     new: bool,
     restrict: bool = False,
     config: Config | None = None,
+    project: Path | None = None,
 ) -> int:
-    loop = _make_loop(provider, workspace, restrict=restrict, config=config)
+    loop = _make_loop(provider, workspace, restrict=restrict, config=config, project=project)
     mcp = _mcp_provider(loop, config)
     if new:
         await loop.new_session(session_key)
@@ -247,6 +281,7 @@ async def _chat(
     restrict: bool,
     markdown: bool,
     config: Config | None = None,
+    project: Path | None = None,
 ) -> int:
     """The interactive chat (nanobot ``agent`` in classic mode, over the bus).
 
@@ -259,7 +294,7 @@ async def _chat(
 
     console = make_console()
     config = config or _runtime_config()
-    loop = _make_loop(provider, workspace, restrict=restrict, config=config)
+    loop = _make_loop(provider, workspace, restrict=restrict, config=config, project=project)
     interactive = stdin_is_interactive()
     prompt: PromptInput | None = None
     if interactive:
@@ -395,8 +430,12 @@ def main(argv: list[str] | None = None, provider: LLMProvider | None = None) -> 
     )
     workspace_help = "directory the agent works in (default: agents.defaults.workspace, ~/.nanoclaw/workspace)"
     restrict_help = (
-        "keep file tools and shell commands inside the workspace "
+        "keep file tools and shell commands inside the workspace, or the project with --project "
         "(also tools.restrictToWorkspace or NANOCLAW_RESTRICT_TO_WORKSPACE=1)"
+    )
+    project_help = (
+        f"folder to work on, if not the workspace (also {ENV_PROJECT}); "
+        "memory, skills, SOUL.md and USER.md stay in the workspace, AGENTS.md is read from the project"
     )
     chat = commands.add_parser(
         "chat", parents=[common, with_logs], help="chat with the agent in the terminal (type exit or press Ctrl+C to quit)"
@@ -406,6 +445,7 @@ def main(argv: list[str] | None = None, provider: LLMProvider | None = None) -> 
     )
     chat.add_argument("-w", "--workspace", type=Path, default=None, help=workspace_help)
     chat.add_argument("--restrict", action="store_true", help=restrict_help)
+    chat.add_argument("-p", "--project", type=Path, default=None, help=project_help)
     chat.add_argument(
         "--markdown", action=argparse.BooleanOptionalAction, default=True, help="render replies as Markdown (default: on)"
     )
@@ -419,6 +459,7 @@ def main(argv: list[str] | None = None, provider: LLMProvider | None = None) -> 
     ask.add_argument("--new", action="store_true", help="forget the conversation and start over")
     ask.add_argument("-w", "--workspace", type=Path, default=None, help=workspace_help)
     ask.add_argument("--restrict", action="store_true", help=restrict_help)
+    ask.add_argument("-p", "--project", type=Path, default=None, help=project_help)
     compact = commands.add_parser(
         "compact", parents=[common, with_logs], help="summarize the conversation so far into a short checkpoint"
     )
@@ -438,6 +479,7 @@ def main(argv: list[str] | None = None, provider: LLMProvider | None = None) -> 
         "prompt", parents=[common], help="print the system prompt the model receives (no API key needed)"
     )
     show.add_argument("-w", "--workspace", type=Path, default=None, help=workspace_help)
+    show.add_argument("-p", "--project", type=Path, default=None, help=project_help)
     config_cmd = commands.add_parser("config", help="show or create the config file (config.json)")
     config_actions = config_cmd.add_subparsers(dest="config_action", required=True)
     config_actions.add_parser("path", parents=[common], help="print where the config file is")
@@ -463,16 +505,21 @@ def main(argv: list[str] | None = None, provider: LLMProvider | None = None) -> 
     # Trusted private ranges web_fetch may reach (nanobot tools.ssrfWhitelist,
     # applied at load time in nanobot loader.py:133).
     configure_ssrf_whitelist(config.tools.ssrf_whitelist)
-    workspace = _prepare_workspace(args.workspace or config.workspace_path)
+    workspace_arg = args.workspace or config.workspace_path
+    # Checked first, so a bad --project creates no workspace files.
+    project = _project_dir(args.project, workspace_arg) if args.command in ("chat", "ask", "prompt") else None
+    workspace = _prepare_workspace(workspace_arg)
 
     def get_provider() -> LLMProvider:
         return provider or provider_from_config(config)
 
     if args.command == "chat":
-        return asyncio.run(_chat(get_provider(), workspace, args.session, args.restrict, args.markdown, config))
+        return asyncio.run(
+            _chat(get_provider(), workspace, args.session, args.restrict, args.markdown, config, project=project)
+        )
     if args.command == "ask":
         return asyncio.run(
-            _ask(get_provider(), args.prompt, workspace, args.session, args.new, args.restrict, config)
+            _ask(get_provider(), args.prompt, workspace, args.session, args.new, args.restrict, config, project=project)
         )
     if args.command == "compact":
         return asyncio.run(_compact(get_provider(), workspace, args.session, config))
@@ -481,7 +528,7 @@ def main(argv: list[str] | None = None, provider: LLMProvider | None = None) -> 
     if args.command == "skills":
         return _skills(workspace)
     if args.command == "prompt":
-        print(ContextBuilder(workspace).build_system_prompt(channel=CHANNEL))
+        print(ContextBuilder(workspace).build_system_prompt(channel=CHANNEL, workspace=project))
         return 0
     parser.print_help()
     return 0

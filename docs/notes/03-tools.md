@@ -314,3 +314,26 @@ Checked and already matching: parameter validation and casting, `write_file`,
 `list_dir` (apart from documented difference #3), the deny list and its
 message, the minimal environment, output formatting and truncation in `exec`,
 the redirect loop and JSON result in `web_fetch`, and `web_search` formatting.
+
+## The project folder (layer 18, task 18.2)
+
+Since layer 18 "the workspace" in this note means the turn's **project
+folder**: the agent workspace, unless `--project DIR` (or `NANOCLAW_PROJECT`)
+names another folder (nanobot's WebUI project scope,
+`security/workspace_access.py`). The loop binds a `WorkspaceScope` for each
+turn and every tool asks `current_tool_workspace()` for it, as in nanobot:
+
+- file tools (`read_file`, `write_file`, `edit_file`, `list_dir`,
+  `apply_patch`) resolve relative paths against the project and show edited
+  paths relative to it; restricted mode keeps them inside the project, except
+  reads of the built-in and workspace `skills/` and the exact
+  `memory/history.jsonl` file (nanobot filesystem.py:85-95);
+- `exec` and `rg` run in the project by default, and restricted mode checks
+  `working_dir` and command paths against the project;
+- large tool results are saved under the project's `.nanoclaw/tool-results/`
+  (nanobot loop.py:1344 passes the project too);
+- subagents get the scope of the turn that spawned them; Dream always runs on
+  the agent workspace.
+
+Outside a turn (a tool used on its own, as in most tests) the tool's own
+workspace and `restrict_to_workspace` apply, as before.
