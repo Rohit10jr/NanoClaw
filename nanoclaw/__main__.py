@@ -4,27 +4,29 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import os
+import json
 import sys
 from pathlib import Path
 
 from nanoclaw import __version__
 from nanoclaw.agent.context import ContextBuilder
-from nanoclaw.agent.loop import DEFAULT_CONTEXT_WINDOW_TOKENS, AgentLoop, ContextWindowExceededError
-from nanoclaw.agent.memory import COMPACTION_MODES, COMPACTION_NANOBOT
-from nanoclaw.providers import LLMProvider, provider_from_env
-from nanoclaw.security.network import configure_ssrf_whitelist_from_env
+from nanoclaw.agent.loop import AgentLoop, ContextWindowExceededError
+from nanoclaw.config import (
+    Config,
+    ConfigEnvError,
+    ConfigLoadError,
+    get_config_path,
+    load_runtime_config,
+    set_config_path,
+)
+from nanoclaw.providers import LLMProvider
+from nanoclaw.providers.factory import provider_from_config
+from nanoclaw.security.network import configure_ssrf_whitelist
 from nanoclaw.utils.templates import sync_workspace_templates
 
-# nanobot's default is ~/.nanobot/workspace.
-DEFAULT_WORKSPACE = Path("~/.nanoclaw/workspace")
 CHANNEL = "cli"
 # nanobot's terminal chat uses the same key.
 DEFAULT_SESSION = "cli:direct"
-# nanobot's out-of-the-box agent settings (config AgentDefaults). The provider's
-# own defaults (0.7, 4096) only apply when no configuration is given.
-DEFAULT_TEMPERATURE = 0.1
-DEFAULT_MAX_TOKENS = 8192
 
 
 def _prepare_workspace(path: Path) -> Path:
@@ -35,41 +37,42 @@ def _prepare_workspace(path: Path) -> Path:
     return workspace
 
 
-def _context_window() -> int:
-    """``NANOCLAW_CONTEXT_WINDOW`` (tokens), else the default."""
-    value = os.environ.get("NANOCLAW_CONTEXT_WINDOW", "").strip()
+def _runtime_config() -> Config:
+    """config.json (or defaults) with ``${VAR}`` resolved and ``NANOCLAW_*`` applied.
+
+    A broken file or variable stops the command with a readable message.
+    """
     try:
-        return int(value) if value else DEFAULT_CONTEXT_WINDOW_TOKENS
-    except ValueError:
-        raise SystemExit(f"NANOCLAW_CONTEXT_WINDOW must be a whole number of tokens, got {value!r}")
-
-
-_TRUE_VALUES = {"1", "true", "yes", "on"}
-
-
-def _restrict_from_env() -> bool:
-    """``NANOCLAW_RESTRICT_TO_WORKSPACE`` (nanobot config ``tools.restrictToWorkspace``)."""
-    return os.environ.get("NANOCLAW_RESTRICT_TO_WORKSPACE", "").strip().lower() in _TRUE_VALUES
+        return load_runtime_config()
+    except (ConfigLoadError, ConfigEnvError) as exc:
+        raise SystemExit(str(exc)) from None
 
 
 def _compaction() -> str:
-    """``NANOCLAW_COMPACTION``: ``nanobot`` (default, like upstream) or ``fixed``
-    (docs/UPSTREAM_BUGS.md, bug 4)."""
-    value = os.environ.get("NANOCLAW_COMPACTION", "").strip().lower() or COMPACTION_NANOBOT
-    if value not in COMPACTION_MODES:
-        raise SystemExit(f"NANOCLAW_COMPACTION must be one of {', '.join(COMPACTION_MODES)}, got {value!r}")
-    return value
+    """``agents.defaults.compaction`` / ``NANOCLAW_COMPACTION``: ``nanobot``
+    (default, like upstream) or ``fixed`` (docs/UPSTREAM_BUGS.md, bug 4)."""
+    return _runtime_config().agents.defaults.compaction
 
 
-def _make_loop(provider: LLMProvider, workspace: Path, *, restrict: bool = False) -> AgentLoop:
+def _make_loop(
+    provider: LLMProvider, workspace: Path, *, restrict: bool = False, config: Config | None = None
+) -> AgentLoop:
+    """The agent loop with the configured settings (nanobot builds it from
+    ``agents.defaults``, cli/agent.py). ``restrict`` (``--restrict``) can only
+    turn the workspace restriction on."""
+    config = config or _runtime_config()
+    defaults = config.agents.defaults
     return AgentLoop(
         provider,
         workspace,
-        temperature=DEFAULT_TEMPERATURE,
-        max_tokens=DEFAULT_MAX_TOKENS,
-        context_window_tokens=_context_window(),
-        restrict_to_workspace=restrict,
-        compaction=_compaction(),
+        max_iterations=defaults.max_tool_iterations,
+        max_tool_result_chars=defaults.max_tool_result_chars,
+        max_concurrent_subagents=defaults.max_concurrent_subagents,
+        temperature=defaults.temperature,
+        max_tokens=defaults.max_tokens,
+        context_window_tokens=defaults.context_window_tokens,
+        restrict_to_workspace=restrict or config.tools.restrict_to_workspace,
+        compaction=defaults.compaction,
     )
 
 
@@ -83,9 +86,15 @@ async def _print_progress_to_stderr(content: str, *, tool_hint: bool = False, **
 
 
 async def _ask(
-    provider: LLMProvider, prompt: str, workspace: Path, session_key: str, new: bool, restrict: bool = False
+    provider: LLMProvider,
+    prompt: str,
+    workspace: Path,
+    session_key: str,
+    new: bool,
+    restrict: bool = False,
+    config: Config | None = None,
 ) -> int:
-    loop = _make_loop(provider, workspace, restrict=restrict)
+    loop = _make_loop(provider, workspace, restrict=restrict, config=config)
     if new:
         await loop.new_session(session_key)
     try:
@@ -134,14 +143,19 @@ async def _deliver_subagent_results(loop: AgentLoop) -> int:
 
 
 async def _chat(
-    provider: LLMProvider, workspace: Path, session_key: str, restrict: bool, markdown: bool
+    provider: LLMProvider,
+    workspace: Path,
+    session_key: str,
+    restrict: bool,
+    markdown: bool,
+    config: Config | None = None,
 ) -> int:
     """The interactive chat (nanobot ``agent`` in classic mode)."""
     from nanoclaw.cli.chat import Chat, install_exit_signal_handlers
     from nanoclaw.cli.terminal import PromptInput, make_console, print_above_prompt, stdin_is_interactive
 
     console = make_console()
-    loop = _make_loop(provider, workspace, restrict=restrict)
+    loop = _make_loop(provider, workspace, restrict=restrict, config=config)
     if stdin_is_interactive():
         read_input, print_async = PromptInput(), print_above_prompt
     else:
@@ -166,8 +180,8 @@ async def _chat(
     return 0
 
 
-async def _compact(provider: LLMProvider, workspace: Path, session_key: str) -> int:
-    summary = await _make_loop(provider, workspace).compact_session(session_key)
+async def _compact(provider: LLMProvider, workspace: Path, session_key: str, config: Config | None = None) -> int:
+    summary = await _make_loop(provider, workspace, config=config).compact_session(session_key)
     if summary == "":
         print("Nothing to compact.")
     elif summary is None:
@@ -201,9 +215,45 @@ def _skills(workspace: Path) -> int:
     return 0
 
 
-async def _dream(provider: LLMProvider, workspace: Path) -> int:
-    print(await _make_loop(provider, workspace).run_dream())
+async def _dream(provider: LLMProvider, workspace: Path, config: Config | None = None) -> int:
+    print(await _make_loop(provider, workspace, config=config).run_dream())
     return 0
+
+
+def _config_command(action: str | None) -> int:
+    """``nanoclaw config path|show|init``.
+
+    nanobot writes its config with ``onboard`` (cli/commands.py:155) and shows
+    it piecemeal in ``status`` (commands.py:644); NanoClaw keeps both small
+    under one command.
+    """
+    from nanoclaw.config.loader import config_to_json, mask_secrets, refresh_config_file, save_config
+
+    path = get_config_path()
+    if action == "path":
+        print(path)
+        return 0
+    if action == "show":
+        # The settings a run would use: the file (or defaults) with ${VAR}
+        # resolved and NANOCLAW_* applied, API keys masked.
+        config = _runtime_config()
+        source = str(path) if path.exists() else f"{path} (not found; defaults)"
+        print(f"# {source}", file=sys.stderr)
+        print(json.dumps(mask_secrets(config_to_json(config)), indent=2, ensure_ascii=False))
+        return 0
+    if action == "init":
+        try:
+            if not path.exists():
+                save_config(Config(), path)
+                print(f"Created config at {path}")
+            elif refresh_config_file(path):
+                print(f"Config refreshed at {path} (existing values preserved)")
+            else:
+                print(f"Config already up to date at {path}")
+        except ConfigLoadError as exc:
+            raise SystemExit(str(exc)) from None
+        return 0
+    return 2
 
 
 def main(argv: list[str] | None = None, provider: LLMProvider | None = None) -> int:
@@ -211,69 +261,100 @@ def main(argv: list[str] | None = None, provider: LLMProvider | None = None) -> 
     parser.add_argument("-V", "--version", action="version", version=f"nanoclaw {__version__}")
     commands = parser.add_subparsers(dest="command")
 
-    workspace_help = "directory the agent works in (default: ~/.nanoclaw/workspace)"
-    chat = commands.add_parser("chat", help="chat with the agent in the terminal (type exit or press Ctrl+C to quit)")
+    # Every command takes -c/--config (nanobot: --config on each command).
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument(
+        "-c",
+        "--config",
+        type=Path,
+        default=None,
+        help="config file (default: $NANOCLAW_CONFIG or ~/.nanoclaw/config.json)",
+    )
+    workspace_help = "directory the agent works in (default: agents.defaults.workspace, ~/.nanoclaw/workspace)"
+    restrict_help = (
+        "keep file tools and shell commands inside the workspace "
+        "(also tools.restrictToWorkspace or NANOCLAW_RESTRICT_TO_WORKSPACE=1)"
+    )
+    chat = commands.add_parser(
+        "chat", parents=[common], help="chat with the agent in the terminal (type exit or press Ctrl+C to quit)"
+    )
     chat.add_argument(
         "-s", "--session", default=DEFAULT_SESSION, help=f"conversation to continue (default: {DEFAULT_SESSION})"
     )
-    chat.add_argument("-w", "--workspace", type=Path, default=DEFAULT_WORKSPACE, help=workspace_help)
-    chat.add_argument(
-        "--restrict",
-        action="store_true",
-        help="keep file tools and shell commands inside the workspace (also NANOCLAW_RESTRICT_TO_WORKSPACE=1)",
-    )
+    chat.add_argument("-w", "--workspace", type=Path, default=None, help=workspace_help)
+    chat.add_argument("--restrict", action="store_true", help=restrict_help)
     chat.add_argument(
         "--markdown", action=argparse.BooleanOptionalAction, default=True, help="render replies as Markdown (default: on)"
     )
-    ask = commands.add_parser("ask", help="send one message and exit; the conversation continues across calls")
+    ask = commands.add_parser(
+        "ask", parents=[common], help="send one message and exit; the conversation continues across calls"
+    )
     ask.add_argument("prompt")
     ask.add_argument(
         "-s", "--session", default=DEFAULT_SESSION, help=f"conversation to continue (default: {DEFAULT_SESSION})"
     )
     ask.add_argument("--new", action="store_true", help="forget the conversation and start over")
-    ask.add_argument("-w", "--workspace", type=Path, default=DEFAULT_WORKSPACE, help=workspace_help)
-    ask.add_argument(
-        "--restrict",
-        action="store_true",
-        help="keep file tools and shell commands inside the workspace (also NANOCLAW_RESTRICT_TO_WORKSPACE=1)",
+    ask.add_argument("-w", "--workspace", type=Path, default=None, help=workspace_help)
+    ask.add_argument("--restrict", action="store_true", help=restrict_help)
+    compact = commands.add_parser(
+        "compact", parents=[common], help="summarize the conversation so far into a short checkpoint"
     )
-    compact = commands.add_parser("compact", help="summarize the conversation so far into a short checkpoint")
     compact.add_argument(
         "-s", "--session", default=DEFAULT_SESSION, help=f"conversation to compact (default: {DEFAULT_SESSION})"
     )
-    compact.add_argument("-w", "--workspace", type=Path, default=DEFAULT_WORKSPACE, help=workspace_help)
-    dream = commands.add_parser("dream", help="update long-term memory (memory/MEMORY.md, USER.md, SOUL.md) from the history journal")
-    dream.add_argument("-w", "--workspace", type=Path, default=DEFAULT_WORKSPACE, help=workspace_help)
-    skills = commands.add_parser("skills", help="list the skills the agent can use (no API key needed)")
-    skills.add_argument("-w", "--workspace", type=Path, default=DEFAULT_WORKSPACE, help=workspace_help)
-    show = commands.add_parser("prompt", help="print the system prompt the model receives (no API key needed)")
-    show.add_argument("-w", "--workspace", type=Path, default=DEFAULT_WORKSPACE, help=workspace_help)
+    compact.add_argument("-w", "--workspace", type=Path, default=None, help=workspace_help)
+    dream = commands.add_parser(
+        "dream",
+        parents=[common],
+        help="update long-term memory (memory/MEMORY.md, USER.md, SOUL.md) from the history journal",
+    )
+    dream.add_argument("-w", "--workspace", type=Path, default=None, help=workspace_help)
+    skills = commands.add_parser("skills", parents=[common], help="list the skills the agent can use (no API key needed)")
+    skills.add_argument("-w", "--workspace", type=Path, default=None, help=workspace_help)
+    show = commands.add_parser(
+        "prompt", parents=[common], help="print the system prompt the model receives (no API key needed)"
+    )
+    show.add_argument("-w", "--workspace", type=Path, default=None, help=workspace_help)
+    config_cmd = commands.add_parser("config", help="show or create the config file (config.json)")
+    config_actions = config_cmd.add_subparsers(dest="config_action", required=True)
+    config_actions.add_parser("path", parents=[common], help="print where the config file is")
+    config_actions.add_parser(
+        "show", parents=[common], help="print the settings in effect (file + NANOCLAW_* variables), keys masked"
+    )
+    config_actions.add_parser(
+        "init", parents=[common], help="write a default config file, or add missing settings to an existing one"
+    )
 
     args = parser.parse_args(argv)
-    # Trusted private ranges web_fetch may reach (nanobot tools.ssrfWhitelist).
-    configure_ssrf_whitelist_from_env()
+    if args.command is None:
+        parser.print_help()
+        return 0
+    set_config_path(args.config)
+    if args.command == "config":
+        return _config_command(args.config_action)
+
+    config = _runtime_config()
+    # Trusted private ranges web_fetch may reach (nanobot tools.ssrfWhitelist,
+    # applied at load time in nanobot loader.py:133).
+    configure_ssrf_whitelist(config.tools.ssrf_whitelist)
+    workspace = _prepare_workspace(args.workspace or config.workspace_path)
+
+    def get_provider() -> LLMProvider:
+        return provider or provider_from_config(config)
+
     if args.command == "chat":
-        workspace = _prepare_workspace(args.workspace)
-        restrict = args.restrict or _restrict_from_env()
-        return asyncio.run(
-            _chat(provider or provider_from_env(), workspace, args.session, restrict, args.markdown)
-        )
+        return asyncio.run(_chat(get_provider(), workspace, args.session, args.restrict, args.markdown, config))
     if args.command == "ask":
-        workspace = _prepare_workspace(args.workspace)
-        restrict = args.restrict or _restrict_from_env()
         return asyncio.run(
-            _ask(provider or provider_from_env(), args.prompt, workspace, args.session, args.new, restrict)
+            _ask(get_provider(), args.prompt, workspace, args.session, args.new, args.restrict, config)
         )
     if args.command == "compact":
-        workspace = _prepare_workspace(args.workspace)
-        return asyncio.run(_compact(provider or provider_from_env(), workspace, args.session))
+        return asyncio.run(_compact(get_provider(), workspace, args.session, config))
     if args.command == "dream":
-        workspace = _prepare_workspace(args.workspace)
-        return asyncio.run(_dream(provider or provider_from_env(), workspace))
+        return asyncio.run(_dream(get_provider(), workspace, config))
     if args.command == "skills":
-        return _skills(_prepare_workspace(args.workspace))
+        return _skills(workspace)
     if args.command == "prompt":
-        workspace = _prepare_workspace(args.workspace)
         print(ContextBuilder(workspace).build_system_prompt(channel=CHANNEL))
         return 0
     parser.print_help()

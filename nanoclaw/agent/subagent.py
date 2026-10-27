@@ -88,7 +88,7 @@ class SubagentManager:
         workspace: Path,
         *,
         max_tool_result_chars: int = 16_000,
-        max_iterations: int = 20,
+        max_iterations: int = 200,  # nanobot max_tool_iterations (config/schema.py:180)
         max_concurrent_subagents: int = DEFAULT_MAX_CONCURRENT_SUBAGENTS,
         restrict_to_workspace: bool = False,
     ) -> None:
