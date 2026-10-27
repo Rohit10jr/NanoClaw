@@ -73,10 +73,20 @@ Legend: ⏳ in progress · ✅ done and verified · ⛔ blocked
 | Docs | note 15, CODE_MAP, README, ROADMAP | main session | — | ✅ |
 | PR | `p2/layer-15` → `main` | main session | PR #7 | ✅ |
 
+## Layer 16 — shell: exec sessions, Windows PowerShell (`p2/layer-16`) ⏳
+
+| Task | Scope (files) | Sub-agent | Verification | Status |
+|---|---|---|---|---|
+| 16.1 Exec sessions | new `agent/tools/exec_session.py`, `shell_output.py`; `shell.py` `exec` through sessions (POSIX) | sub-agent (worktree), phase A | | ⏳ |
+| 16.2 Exec settings, Windows paths in violations | `config/schema.py` `tools.exec`, `tools/violations.py` | sub-agent (worktree), phase A | | ⏳ |
+| 16.3 Wiring | loop (`/new`, shutdown, pending work), subagents, config → tools, tool hints, chat | sub-agent (worktree), phase B | | |
+| 16.4 Windows shell | PowerShell/cmd, Windows environment, `taskkill` tree kill | sub-agent (worktree), phase C | | |
+| Mutation checks, docs, PR | | | | |
+
 ## Blockers and open items
 
 | Item | Status |
 |---|---|
 | Real-model tests need API keys as environment secrets | Open; FakeProvider only until then |
-| PRs #2–#4 merged; #5, #6 (layers 13, 14) open; later layers stacked on them | — |
+| PRs #2–#4 merged; #5–#7 (layers 13–15) open; later layers stacked on them | — |
 | Rewrite earlier commits to the user's author | After phase 2 (user decision) |
