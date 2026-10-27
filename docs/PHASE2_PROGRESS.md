@@ -60,7 +60,7 @@ Legend: ⏳ in progress · ✅ done and verified · ⛔ blocked
 | Upstream bug 7 | cancelled turn loses earlier rounds | main session | Confirmed in nanobot's own run | ✅ |
 | Mutation checks | 90 rules | sub-agent (worktree) | 88 caught, 2 equivalent (11 tests added) | ✅ |
 | Docs | note 14, CODE_MAP, README, notes 08, UPSTREAM_BUGS | main session | — | ✅ |
-| PR | `p2/layer-14` → `main` | main session | — | ⏳ |
+| PR | `p2/layer-14` → `main` | main session | PR #6 | ✅ |
 
 ## Blockers and open items
 
