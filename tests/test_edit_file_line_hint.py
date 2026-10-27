@@ -136,3 +136,28 @@ async def test_edit_file_line_hint_with_crlf_file(tmp_path):
     result = await EditFileTool(tmp_path).execute(path="win.txt", old_text="same", new_text="z", line_hint=2)
     assert "Patch applied:" in result
     assert target.read_bytes() == b"x\r\nz\r\ny\r\nsame\r\n"
+
+
+async def test_edit_file_line_hint_miss_lists_first_three_locations(tmp_path):
+    result, text = await _edit(
+        tmp_path, "same\nx\nsame\nsame\nsame\n", old_text="same", new_text="changed", line_hint=2
+    )
+    assert "old_text appears at line 1, line 3, line 4, ..." in result
+    assert text == "same\nx\nsame\nsame\nsame\n"
+
+
+def test_edit_file_schema_line_hint_and_expected_replacements():
+    properties = EditFileTool().parameters["properties"]
+    assert properties["line_hint"] == {
+        "type": ["integer", "null"],
+        "description": (
+            "Optional exact 1-based target line copied from read_file. "
+            "The selected old_text match must cover this line."
+        ),
+        "minimum": 1,
+    }
+    assert properties["expected_replacements"] == {
+        "type": ["integer", "null"],
+        "description": "Optional guard for the number of replacements that must be made.",
+        "minimum": 1,
+    }

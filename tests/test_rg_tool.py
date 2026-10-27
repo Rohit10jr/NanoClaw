@@ -293,3 +293,20 @@ async def test_search_for_deny_listed_text_runs_unrestricted(tmp_path):
     result = await RgTool(working_dir=str(tmp_path)).execute(args=["-F", "rm -rf", "."])
     assert "blocked" not in result
     assert "never run rm -rf here" in result
+
+
+def test_enabled_requires_exec_enable_even_when_rg_is_installed(monkeypatch):
+    monkeypatch.setattr("nanoclaw.agent.tools.rg.shutil.which", _fake_which(True))
+    assert RgTool.enabled(ExecToolConfig(enable=True))
+    assert not RgTool.enabled(ExecToolConfig(enable=False))
+
+
+def test_guard_honours_explicit_restrict_override(tmp_path):
+    command = "rg 'x; shutdown' ."
+    unrestricted = RgTool(working_dir=str(tmp_path))
+    blocked = unrestricted._guard_command(command, str(tmp_path), restrict_to_workspace=True)
+    assert blocked is not None and "blocked" in blocked.lower()
+
+    restricted = RgTool(working_dir=str(tmp_path), restrict_to_workspace=True)
+    assert restricted._guard_command(command, str(tmp_path)) is not None
+    assert restricted._guard_command(command, str(tmp_path), restrict_to_workspace=False) is None

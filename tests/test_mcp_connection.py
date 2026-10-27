@@ -466,3 +466,190 @@ async def test_concurrent_mcp_reconnect_reuses_fresh_session(
     assert closed == ["remote"]
 
 
+# ---------------------------------------------------------------------------
+# Pinned by mutation checks (layer 17)
+# ---------------------------------------------------------------------------
+
+
+class _Stack:
+    def __init__(self, name: str, closed: list[str]) -> None:
+        self.name = name
+        self._closed = closed
+
+    async def aclose(self) -> None:
+        self._closed.append(self.name)
+
+
+def _quote_def(name: str = "quote") -> SimpleNamespace:
+    return SimpleNamespace(name=name, description=f"{name} tool", inputSchema={"type": "object", "properties": {}})
+
+
+class _ScriptedSession:
+    """Fails with "Session terminated" when ``dead``, otherwise answers."""
+
+    def __init__(self, index: int, dead: bool) -> None:
+        self.index = index
+        self.dead = dead
+
+    async def call_tool(self, _name: str, arguments: dict[str, Any]) -> Any:
+        if self.dead:
+            raise McpError(ErrorData(code=-32000, message="Session terminated"))
+        return SimpleNamespace(content=[mcp_types.TextContent(type="text", text=f"session {self.index}")])
+
+
+@pytest.mark.asyncio
+async def test_connect_asks_only_for_servers_that_are_not_live(monkeypatch: pytest.MonkeyPatch):
+    provider, _registry = _make_provider(mcp_servers={"a": _stdio_server("a"), "b": _stdio_server("b")})
+    requested: list[set[str]] = []
+    closed: list[str] = []
+
+    async def _fake_connect(servers, _registry):
+        requested.append(set(servers))
+        return {name: _Stack(name, closed) for name in servers if name == "a" or len(requested) > 1}
+
+    monkeypatch.setattr("nanoclaw.agent.tools.mcp.connect_mcp_servers", _fake_connect)
+
+    await provider.connect()
+    await provider.connect()
+    await provider.connect()
+
+    assert requested == [{"a", "b"}, {"b"}]
+    assert provider.connected_server_names == {"a", "b"}
+    await provider.aclose()
+    assert sorted(closed) == ["a", "b"]
+
+
+@pytest.mark.asyncio
+async def test_connect_after_close_does_nothing(monkeypatch: pytest.MonkeyPatch):
+    provider, _registry = _make_provider()
+    attempts = 0
+
+    async def _fake_connect(servers, _registry):
+        nonlocal attempts
+        attempts += 1
+        return {}
+
+    monkeypatch.setattr("nanoclaw.agent.tools.mcp.connect_mcp_servers", _fake_connect)
+
+    await provider.aclose()
+    await provider.connect()
+
+    assert attempts == 0
+
+
+@pytest.mark.asyncio
+async def test_close_during_connect_closes_the_new_connections(monkeypatch: pytest.MonkeyPatch):
+    provider, _registry = _make_provider()
+    started, release = asyncio.Event(), asyncio.Event()
+    closed: list[str] = []
+
+    async def _fake_connect(servers, _registry):
+        started.set()
+        await release.wait()
+        return {name: _Stack(name, closed) for name in servers}
+
+    monkeypatch.setattr("nanoclaw.agent.tools.mcp.connect_mcp_servers", _fake_connect)
+
+    connecting = asyncio.create_task(provider.connect())
+    await started.wait()
+    closing = asyncio.create_task(provider.aclose())
+    await asyncio.sleep(0)
+    release.set()
+    await asyncio.gather(connecting, closing)
+
+    assert closed == ["test"]
+    assert provider.connected_server_names == set()
+
+
+def _reconnecting_provider(monkeypatch, sessions_dead: list[bool], tools_per_connect=None):
+    provider, registry = _make_provider(mcp_servers={"remote": _stdio_server("remote")})
+    closed: list[str] = []
+    count = 0
+
+    async def _fake_connect(servers, registry):
+        nonlocal count
+        stacks = {}
+        for name in servers:
+            count += 1
+            session = _ScriptedSession(count, sessions_dead[count - 1])
+            names = tools_per_connect[count - 1] if tools_per_connect else ["quote"]
+            for tool_name in names:
+                registry.register(MCPToolWrapper(session, name, _quote_def(tool_name), tool_timeout=5))
+            stacks[name] = _Stack(f"{name}#{count}", closed)
+        return stacks
+
+    monkeypatch.setattr("nanoclaw.agent.tools.mcp.connect_mcp_servers", _fake_connect)
+    return provider, registry, closed, lambda: count
+
+
+@pytest.mark.asyncio
+async def test_reconnected_tools_can_reconnect_again(monkeypatch: pytest.MonkeyPatch):
+    provider, registry, closed, count = _reconnecting_provider(monkeypatch, [True, True, False])
+    await provider.connect()
+
+    first = await registry.get("mcp_remote_quote").execute()
+    assert first == "(MCP tool call failed: McpError)"
+    second_tool = registry.get("mcp_remote_quote")
+    assert await second_tool.execute() == "session 3"
+    assert count() == 3
+    assert closed == ["remote#1", "remote#2"]
+
+
+@pytest.mark.asyncio
+async def test_refresh_drops_tools_the_server_no_longer_offers(monkeypatch: pytest.MonkeyPatch):
+    provider, registry, _closed, _count = _reconnecting_provider(
+        monkeypatch, [True, False], tools_per_connect=[["quote"], ["other"]]
+    )
+    await provider.connect()
+    stale = registry.get("mcp_remote_quote")
+
+    await stale.execute()
+
+    assert registry.get("mcp_remote_quote") is None
+    assert registry.get("mcp_remote_other") is not None
+
+
+@pytest.mark.asyncio
+async def test_refresh_after_close_does_not_reconnect(monkeypatch: pytest.MonkeyPatch):
+    provider, registry, _closed, count = _reconnecting_provider(monkeypatch, [True, False])
+    await provider.connect()
+    stale = registry.get("mcp_remote_quote")
+    await provider.aclose()
+
+    assert await provider._refresh_terminated_server("remote", "mcp_remote_quote", stale) is None
+    assert count() == 1
+
+
+@pytest.mark.asyncio
+async def test_close_during_refresh_closes_the_new_connection(monkeypatch: pytest.MonkeyPatch):
+    provider, registry = _make_provider(mcp_servers={"remote": _stdio_server("remote")})
+    closed: list[str] = []
+    count = 0
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def _fake_connect(servers, registry):
+        nonlocal count
+        count += 1
+        if count == 2:
+            started.set()
+            await release.wait()
+        for name in servers:
+            registry.register(MCPToolWrapper(_ScriptedSession(count, count == 1), name, _quote_def(), tool_timeout=5))
+        return {name: _Stack(f"{name}#{count}", closed) for name in servers}
+
+    monkeypatch.setattr("nanoclaw.agent.tools.mcp.connect_mcp_servers", _fake_connect)
+    await provider.connect()
+    stale = registry.get("mcp_remote_quote")
+
+    refreshing = asyncio.create_task(provider._refresh_terminated_server("remote", "mcp_remote_quote", stale))
+    await started.wait()
+    closing = asyncio.create_task(provider.aclose())
+    await asyncio.sleep(0)
+    release.set()
+    refreshed, _ = await asyncio.gather(refreshing, closing)
+
+    assert refreshed is None
+    assert closed == ["remote#1", "remote#2"]
+    assert provider.connected_server_names == set()
+
+

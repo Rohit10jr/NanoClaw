@@ -58,9 +58,63 @@ def test_file_state_store_discards_reset_session() -> None:
     assert store.for_session("websocket:chat") is not previous
 
 
+def test_file_state_store_default_session_can_be_discarded() -> None:
+    store = FileStateStore()
+    previous = store.for_session(None)
+    assert store.for_session("") is previous
+
+    store.discard(None)
+
+    assert store.for_session(None) is not previous
+
+
 def test_file_state_store_requires_positive_capacity() -> None:
     with pytest.raises(ValueError, match="max_sessions must be positive"):
         FileStateStore(max_sessions=0)
+
+
+# ---------------------------------------------------------------------------
+# FileStates used directly (callers without a precomputed hash or a resolved path)
+# ---------------------------------------------------------------------------
+
+
+def test_file_states_hash_the_file_when_no_hash_is_given(tmp_path) -> None:
+    f = tmp_path / "data.txt"
+    f.write_text("alpha\n", encoding="utf-8")
+    states = FileStates()
+    with file_state.file_read_context("read-1", lambda: {}):
+        states.record_read(f, result="alpha")
+    with file_state.file_read_context("read-2", lambda: {"read-1": "alpha"}):
+        assert states.is_unchanged(f)
+        f.write_text("beta\n", encoding="utf-8")
+        assert not states.is_unchanged(f)
+
+
+def test_file_states_key_on_the_resolved_path(tmp_path, monkeypatch) -> None:
+    (tmp_path / "sub").mkdir()
+    f = tmp_path / "data.txt"
+    f.write_text("alpha\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    states = FileStates()
+    with file_state.file_read_context("read-1", lambda: {}):
+        states.record_read("sub/../data.txt", result="alpha")
+    assert states.get(f) is not None
+    with file_state.file_read_context("read-2", lambda: {"read-1": "alpha"}):
+        assert states.is_unchanged(f)
+
+
+def test_file_states_forget_a_receipt_whose_result_left_the_input(tmp_path) -> None:
+    f = tmp_path / "data.txt"
+    f.write_text("alpha\n", encoding="utf-8")
+    states = FileStates()
+    with file_state.file_read_context("read-1", lambda: {}):
+        states.record_read(f, result="alpha")
+    with file_state.file_read_context("read-2", lambda: {"read-1": "summarized"}):
+        assert not states.is_unchanged(f)
+    assert states.get(f) is None
+    # Even if the original text came back later, the receipt is gone.
+    with file_state.file_read_context("read-3", lambda: {"read-1": "alpha"}):
+        assert not states.is_unchanged(f)
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +172,24 @@ class TestReadDedup:
             second = await tool.execute(path=str(f), offset=6, limit=5)
         assert "line 6" in second
 
+    async def test_repeat_read_at_same_offset_returns_stub(self, tool, tmp_path):
+        f = tmp_path / "data.txt"
+        f.write_text("\n".join(f"line {i}" for i in range(1, 21)), encoding="utf-8")
+        with file_state.file_read_context("read-1", lambda: {}):
+            first = await tool.execute(path=str(f), offset=6, limit=5)
+        with file_state.file_read_context("read-2", lambda: {"read-1": first}):
+            second = await tool.execute(path=str(f), offset=6, limit=5)
+        assert second == f"[File unchanged since last read: {f}]"
+
+    async def test_different_limit_returns_full(self, tool, tmp_path):
+        f = tmp_path / "data.txt"
+        f.write_text("\n".join(f"line {i}" for i in range(1, 21)), encoding="utf-8")
+        with file_state.file_read_context("read-1", lambda: {}):
+            first = await tool.execute(path=str(f), offset=1, limit=5)
+        with file_state.file_read_context("read-2", lambda: {"read-1": first}):
+            second = await tool.execute(path=str(f), offset=1, limit=10)
+        assert "line 10" in second
+
     async def test_first_read_after_write_returns_full_content(self, tool, write_tool, tmp_path):
         f = tmp_path / "fresh.txt"
         result = await write_tool.execute(path=str(f), content="hello")
@@ -145,6 +217,22 @@ class TestReadDedup:
             await ApplyPatchTool(workspace=tmp_path, file_states=states).execute(
                 edits=[{"action": "replace", "path": "data.txt", "old_text": "alpha", "new_text": "beta"}]
             )
+        assert states.get(f) is None
+
+    @pytest.mark.parametrize("existing", [None, "\n\n"], ids=["created", "blank-file-filled"])
+    async def test_edit_file_creating_content_forgets_the_read(self, tmp_path, existing):
+        states = FileStates()
+        f = tmp_path / "data.txt"
+        f.write_text("alpha\n" if existing is None else existing, encoding="utf-8")
+        with file_state.file_read_context("read-1", lambda: {}):
+            await ReadFileTool(workspace=tmp_path, file_states=states).execute(path="data.txt")
+        assert states.get(f) is not None
+        if existing is None:
+            f.unlink()
+        result = await EditFileTool(workspace=tmp_path, file_states=states).execute(
+            path="data.txt", old_text="", new_text="beta\n"
+        )
+        assert f.read_text(encoding="utf-8") == "beta\n", result
         assert states.get(f) is None
 
     async def test_read_returns_changed_content_when_mtime_same(self, tmp_path):
@@ -499,3 +587,19 @@ async def test_loop_binds_session_state_and_new_session_discards_it(tmp_path):
 
     await loop.new_session("cli:a")
     assert loop._file_state_store.for_session("cli:a") is not states
+
+
+async def test_loop_keeps_states_of_interleaved_sessions_and_unbinds_after_turn(tmp_path):
+    (tmp_path / "data.txt").write_text("alpha\n", encoding="utf-8")
+    fake = FakeProvider([_read_call("r1"), "done", _read_call("r2"), "done", _read_call("r3"), "done"])
+    loop = AgentLoop(fake, tmp_path)
+    outside = FileStates()
+
+    await loop.process_direct("read it", session_key="cli:a")
+    assert file_state.current_file_states(outside) is outside
+    await loop.process_direct("read it", session_key="cli:b")
+    await loop.process_direct("read it again", session_key="cli:a")
+
+    tool_messages = [m for m in loop.sessions.get_or_create("cli:a").messages if m.get("role") == "tool"]
+    assert tool_messages[-1]["content"] == STUB
+    assert file_state.current_file_states(outside) is outside

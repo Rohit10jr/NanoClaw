@@ -251,3 +251,56 @@ async def test_probe_not_called_for_stdio():
     assert not called, "probe should not be called for stdio transport"
 
 
+@pytest.mark.asyncio
+async def test_probe_uses_port_443_for_https(monkeypatch: pytest.MonkeyPatch):
+    attempts: list[tuple[str, int]] = []
+    monkeypatch.setattr(
+        "nanoclaw.agent.tools.mcp.resolve_url_target",
+        lambda _url: (True, "", ("93.184.216.34",)),
+    )
+
+    async def _open_connection(host: str, port: int):
+        attempts.append((host, port))
+        raise ConnectionRefusedError
+
+    monkeypatch.setattr("nanoclaw.agent.tools.mcp.asyncio.open_connection", _open_connection)
+
+    assert await _probe_http_url("https://mcp.example.com/mcp") is False
+    assert attempts == [("93.184.216.34", 443)]
+
+
+# ---------------------------------------------------------------------------
+# env_proxy_applies_to_url (security/network.py): when the probe is skipped
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("env", "url", "expected"),
+    [
+        pytest.param({}, "https://mcp.example.com/mcp", False, id="no-proxy-configured"),
+        pytest.param({"HTTPS_PROXY": "http://p:1"}, "https://mcp.example.com/mcp", True, id="https-proxy"),
+        pytest.param({"HTTPS_PROXY": "http://p:1"}, "http://mcp.example.com/mcp", False, id="other-scheme-proxy"),
+        pytest.param({"ALL_PROXY": "http://p:1"}, "https://mcp.example.com/mcp", True, id="all-proxy"),
+        pytest.param({"ALL_PROXY": "http://p:1"}, "ftp://mcp.example.com/mcp", False, id="non-http-scheme"),
+        pytest.param(
+            {"HTTPS_PROXY": "http://p:1", "NO_PROXY": "example.com"},
+            "https://mcp.example.com/mcp", False, id="no-proxy-domain",
+        ),
+        pytest.param(
+            {"HTTPS_PROXY": "http://p:1", "NO_PROXY": "mcp.example.com:8443"},
+            "https://mcp.example.com:8443/mcp", False, id="no-proxy-host-port",
+        ),
+        pytest.param(
+            {"HTTP_PROXY": "http://p:1", "NO_PROXY": "[::1]"},
+            "http://[::1]:8080/mcp", False, id="no-proxy-ipv6-with-port",
+        ),
+    ],
+)
+def test_env_proxy_applies_to_url(monkeypatch: pytest.MonkeyPatch, env, url, expected):
+    from nanoclaw.security.network import env_proxy_applies_to_url
+
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    assert env_proxy_applies_to_url(url) is expected
+
+
