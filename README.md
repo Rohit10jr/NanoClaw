@@ -149,7 +149,10 @@ export NANOCLAW_SSRF_WHITELIST=100.64.0.0/10          # private ranges you trust
 ```
 
 These are guards, not a sandbox: run the agent somewhere you don't mind it
-working.
+working, or, on Linux, set `"tools": {"exec": {"sandbox": "bwrap"}}` in the
+config to run every shell command inside bubblewrap, where only the workspace
+is writable and nothing outside it but system folders is visible (this also
+turns on the workspace restriction).
 
 Shell commands, as in nanobot: a command still running after a second keeps
 running in the background (up to an hour by default) and the agent checks on

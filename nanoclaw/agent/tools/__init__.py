@@ -32,8 +32,11 @@ def build_default_tools(
     ``DEFAULT_EXEC_SESSION_MANAGER``, as in nanobot when none is given).
     ``exec_config`` is ``config.tools.exec`` (default: its defaults); with
     ``enable`` off none of the three is registered (nanobot ``enabled``,
-    shell.py:169, exec_session.py:788, :947). Its sandbox fields are not
-    read yet (layer 18).
+    shell.py:169, exec_session.py:788, :947). Its ``sandbox`` ("bwrap")
+    wraps every command in bubblewrap with ``sandboxRoBinds`` /
+    ``sandboxRwBinds`` (``sandbox.py``) and, as in nanobot, also restricts
+    the file tools to the workspace (``_FsTool.create``, filesystem.py:83);
+    the extra binds widen only ``exec``, never the file tools.
 
     ``rg`` (ripgrep through exec sessions) is added when exec is enabled and
     ``rg`` is on the exec PATH (nanobot ``RgTool.enabled``, rg.py).
@@ -55,12 +58,15 @@ def build_default_tools(
     from nanoclaw.config.schema import ExecToolConfig
 
     cfg = exec_config if exec_config is not None else ExecToolConfig()
+    # A configured shell sandbox restricts the file tools too (nanobot
+    # ``restrict = restrict_to_workspace or exec.sandbox``, filesystem.py:83).
+    fs_restrict = restrict_to_workspace or bool(cfg.sandbox)
     tools: list[Tool] = [
-        ReadFileTool(workspace, restrict_to_workspace=restrict_to_workspace, file_states=file_states),
-        WriteFileTool(workspace, restrict_to_workspace=restrict_to_workspace, file_states=file_states),
-        EditFileTool(workspace, restrict_to_workspace=restrict_to_workspace, file_states=file_states),
-        ApplyPatchTool(workspace, restrict_to_workspace=restrict_to_workspace, file_states=file_states),
-        ListDirTool(workspace, restrict_to_workspace=restrict_to_workspace, file_states=file_states),
+        ReadFileTool(workspace, restrict_to_workspace=fs_restrict, file_states=file_states),
+        WriteFileTool(workspace, restrict_to_workspace=fs_restrict, file_states=file_states),
+        EditFileTool(workspace, restrict_to_workspace=fs_restrict, file_states=file_states),
+        ApplyPatchTool(workspace, restrict_to_workspace=fs_restrict, file_states=file_states),
+        ListDirTool(workspace, restrict_to_workspace=fs_restrict, file_states=file_states),
     ]
     if cfg.enable:
         # nanobot ExecTool.create (shell.py:173).
@@ -78,6 +84,9 @@ def build_default_tools(
                 allow_patterns=list(cfg.allow_patterns),
                 deny_patterns=list(cfg.deny_patterns),
                 exec_session_manager=exec_session_manager,
+                sandbox=cfg.sandbox,
+                sandbox_ro_binds=list(cfg.sandbox_ro_binds),
+                sandbox_rw_binds=list(cfg.sandbox_rw_binds),
             )
 
         tools += [
