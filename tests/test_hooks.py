@@ -297,6 +297,17 @@ async def test_progress_hook_skips_text_when_streamed() -> None:
     assert [(e.content, e.tool_hint) for e in events] == [("", True)]
 
 
+async def test_streaming_progress_hook_never_publishes_the_text_as_progress() -> None:
+    """A streaming hook leaves the model's text to the stream even when no
+    delta arrived (nanobot: ``not self._on_stream and not streamed_content``)."""
+    events, sink = _recorder()
+    hook = AgentProgressHook(sink, streaming=True)
+    ctx = _ctx()
+    ctx.response = LLMResponse(content="Let me look.", tool_calls=[])
+    await hook.before_execute_tools(ctx)
+    assert [(e.content, e.tool_hint) for e in events] == [("", True)]
+
+
 async def test_progress_hook_publishes_tool_finish_payloads() -> None:
     events, sink = _recorder()
     hook = AgentProgressHook(sink)

@@ -268,6 +268,24 @@ async def test_new_segment_is_guarded_again_after_recovery(delays):
     assert rec.content == ["a", "b"]
 
 
+async def test_recovered_segment_without_text_can_still_be_retried(delays):
+    """Recovery resets the guard: a new segment that has shown nothing yet is
+    retried on any transient error, not only on another stall."""
+    provider = StreamScriptProvider(
+        [
+            ([("content", "a")], stall()),
+            ([], LLMResponse(content="503 overloaded", finish_reason="error")),
+            ([("content", "b")], LLMResponse(content="b")),
+        ]
+    )
+    rec = Recorder()
+    response = await provider.chat_stream_with_retry(messages=USER, **rec.callbacks(recover=True))
+    assert response.content == "b"
+    assert provider.calls == 3
+    assert rec.recoveries == 1
+    assert rec.content == ["a", "b"]
+
+
 async def test_stream_recover_callback_goes_to_providers_that_support_it(delays):
     class RecoveringProvider(StreamScriptProvider):
         supports_stream_recover_callback = True
