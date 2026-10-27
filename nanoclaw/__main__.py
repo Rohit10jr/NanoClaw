@@ -12,7 +12,10 @@ from nanoclaw import __version__
 from nanoclaw.cli.log_control import configure_console_logging, set_nanoclaw_logs
 from nanoclaw.agent.context import ContextBuilder
 from nanoclaw.agent.loop import AgentLoop, ContextWindowExceededError
+from nanoclaw.agent.runner import AgentRunResult
+from nanoclaw.bus.outbound_events import ProgressEvent, StreamDeltaEvent, StreamEndEvent
 from nanoclaw.config import (
+    ChannelsConfig,
     Config,
     ConfigEnvError,
     ConfigLoadError,
@@ -20,6 +23,7 @@ from nanoclaw.config import (
     load_runtime_config,
     set_config_path,
 )
+from nanoclaw.events import AgentEvent, EventSink
 from nanoclaw.providers import LLMProvider
 from nanoclaw.providers.factory import provider_from_config
 from nanoclaw.security.network import configure_ssrf_whitelist
@@ -78,13 +82,92 @@ def _make_loop(
     )
 
 
-async def _print_progress_to_stderr(content: str, *, tool_hint: bool = False, **_: object) -> None:
-    """Progress lines for ``ask``, on stderr so stdout holds only the reply.
+class _AskOutput:
+    """``ask``'s output for one turn: the reply on stdout, the rest on stderr.
 
-    nanobot's ``agent -m`` prints the same "↳" lines (cli/agent.py:199).
+    nanobot's ``agent -m`` streams everything to stdout through a
+    StreamRenderer (cli/agent.py:250-279). ``ask`` keeps stdout for the reply
+    so it can be piped: the reply streams as plain text only when stdout is a
+    terminal (``stream``), otherwise it is printed once at the end. Progress,
+    tool hints, retry waits and compaction are "↳" lines on stderr, reasoning
+    "✻" lines, filtered by ``channels`` like nanobot's ``_cli_progress``
+    (cli/agent.py:212-245). A streamed segment before tool calls is the
+    model's text before the tools: it stays on stdout (it was already shown).
     """
-    if content.strip():
-        print(f"  ↳ {content}", file=sys.stderr)
+
+    def __init__(self, channels: ChannelsConfig, *, stream: bool) -> None:
+        from nanoclaw.cli.stream import ReasoningBuffer
+
+        self.channels = channels
+        self.stream = stream
+        self.streamed_content = False
+        self._segment = ""
+        self._reasoning = ReasoningBuffer()
+
+    @property
+    def events(self) -> EventSink:
+        return EventSink(self.publish)
+
+    @staticmethod
+    def _err(line: str) -> None:
+        print(line, file=sys.stderr)
+
+    def _reasoning_line(self, text: str | None) -> None:
+        if text:
+            self._err(f"✻ {text}")
+
+    async def publish(self, event: AgentEvent) -> None:
+        from nanoclaw.cli.terminal import progress_event_text
+
+        if isinstance(event, StreamDeltaEvent):
+            # Like the renderer, nothing shows before the first visible text.
+            if not self._segment and not event.content.strip():
+                return
+            self._segment += event.content
+            sys.stdout.write(event.content)
+            sys.stdout.flush()
+            return
+        if isinstance(event, StreamEndEvent):
+            if self._segment and not self._segment.endswith("\n"):
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+            self.streamed_content, self._segment = bool(self._segment), ""
+            return
+        if (text := progress_event_text(event)) is not None:
+            if text.strip():
+                self._err(f"  ↳ {text}")
+            return
+        if not isinstance(event, ProgressEvent):
+            return
+        channels = self.channels
+        if event.reasoning_end or event.reasoning or event.reasoning_delta:
+            if not channels.show_reasoning:
+                self._reasoning.clear()
+            elif event.reasoning_end:
+                self._reasoning_line(self._reasoning.flush())
+            else:
+                self._reasoning_line(self._reasoning.add(event.content))
+            return
+        if event.tool_hint and not channels.send_tool_hints:
+            return
+        if not event.tool_hint and not channels.send_progress:
+            return
+        if event.content.strip():
+            self._err(f"  ↳ {event.content}")
+
+    def finish(self, result: AgentRunResult) -> int:
+        """Print the reply unless it streamed; errors go to stderr. Returns the exit status."""
+        if result.stop_reason == "error":
+            print(result.final_content, file=sys.stderr)
+            return 1
+        if not (self.streamed_content and self.stream):
+            print(result.final_content or "")
+        return 0
+
+
+def _ask_output(config: Config | None) -> _AskOutput:
+    channels = (config or _runtime_config()).channels
+    return _AskOutput(channels, stream=sys.stdout.isatty())
 
 
 async def _ask(
@@ -100,26 +183,22 @@ async def _ask(
     if new:
         await loop.new_session(session_key)
     try:
+        output = _ask_output(config)
         try:
             result = await loop.process_direct(
-                prompt, session_key=session_key, channel=CHANNEL, on_progress=_print_progress_to_stderr
+                prompt, session_key=session_key, channel=CHANNEL, events=output.events, streaming=output.stream
             )
         except ContextWindowExceededError as exc:
             print(f"Error: {exc}", file=sys.stderr)
             return 1
-        status = 0
-        if result.stop_reason == "error":
-            print(result.final_content, file=sys.stderr)
-            status = 1
-        else:
-            print(result.final_content or "")
+        status = output.finish(result)
         # Subagents started before an error still report.
-        return max(status, await _deliver_subagent_results(loop))
+        return max(status, await _deliver_subagent_results(loop, config))
     finally:
         await loop.close()
 
 
-async def _deliver_subagent_results(loop: AgentLoop) -> int:
+async def _deliver_subagent_results(loop: AgentLoop, config: Config | None = None) -> int:
     """Wait for background subagents and let the main agent report each result.
 
     nanobot's one-shot ``agent -m`` cancels them at exit and loses their
@@ -130,17 +209,15 @@ async def _deliver_subagent_results(loop: AgentLoop) -> int:
     status = 0
     while (report := await loop.next_subagent_result()) is not None:
         print(f"[subagent '{report.label}' finished]", file=sys.stderr)
+        output = _ask_output(config)
         try:
-            result = await loop.process_subagent_result(report, on_progress=_print_progress_to_stderr)
+            result = await loop.process_subagent_result(report, events=output.events, streaming=output.stream)
         except ContextWindowExceededError as exc:
             print(f"Error: {exc}", file=sys.stderr)
             status = 1
             continue
-        if result.stop_reason == "error":
-            print(result.final_content, file=sys.stderr)
-            status = 1
-        elif result.final_content and result.final_content.strip():
-            print(result.final_content)
+        if result.stop_reason == "error" or (result.final_content and result.final_content.strip()):
+            status = max(status, output.finish(result))
     return status
 
 
@@ -154,12 +231,13 @@ async def _chat(
 ) -> int:
     """The interactive chat (nanobot ``agent`` in classic mode)."""
     from nanoclaw.cli.chat import Chat, install_exit_signal_handlers
-    from nanoclaw.cli.terminal import PromptInput, make_console, print_above_prompt, stdin_is_interactive
+    from nanoclaw.cli.terminal import PromptInput, make_console, prompt_suspended, stdin_is_interactive
 
     console = make_console()
+    config = config or _runtime_config()
     loop = _make_loop(provider, workspace, restrict=restrict, config=config)
     if stdin_is_interactive():
-        read_input, print_async = PromptInput(), print_above_prompt
+        read_input, output_above_prompt = PromptInput(), prompt_suspended
     else:
         # Piped input (scripts, tests): plain lines, no prompt_toolkit.
         async def read_input() -> str:
@@ -168,7 +246,7 @@ async def _chat(
                 raise EOFError
             return line.rstrip("\n")
 
-        from nanoclaw.cli.chat import _print_directly as print_async
+        from nanoclaw.cli.chat import _output_directly as output_above_prompt
     install_exit_signal_handlers(console)
     chat = Chat(
         loop,
@@ -176,7 +254,8 @@ async def _chat(
         console=console,
         read_input=read_input,
         render_markdown=markdown,
-        print_async=print_async,
+        output_above_prompt=output_above_prompt,
+        channels=config.channels,
     )
     await chat.run()
     return 0

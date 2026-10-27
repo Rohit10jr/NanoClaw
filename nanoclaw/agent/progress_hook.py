@@ -1,10 +1,10 @@
 """The hook that turns runner callbacks into user-visible progress events.
 
 Copied from nanobot/agent/progress_hook.py. Without streaming it publishes
-the same two lines NanoClaw's runner sends through ``on_progress`` today
-(``AgentRunner._report_progress``): the model's text before tool calls, then
-the tool hints. With streaming it also publishes answer deltas, inline
-``<think>`` reasoning and stream ends.
+the model's text before tool calls, then the tool hints (the two lines the
+runner's ``on_progress`` callback received before layer 13). With streaming
+it also publishes answer deltas, inline ``<think>`` reasoning and stream ends.
+Since task 13.4 the runner and the loop's turns use it.
 """
 
 from __future__ import annotations

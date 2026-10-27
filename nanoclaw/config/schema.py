@@ -1,9 +1,9 @@
 """The ``config.json`` schema: a subset of nanobot ``config/schema.py``.
 
 Every field here has nanobot's JSON name, nesting and default, except where a
-comment says otherwise. nanobot's other sections (channels, gateway, api,
-modelPresets, mcpServers, ...) are not read: unknown keys are ignored, so a
-nanobot ``config.json`` loads unchanged.
+comment says otherwise. nanobot's other sections (gateway, api, modelPresets,
+mcpServers, the per-channel entries under channels, ...) are not read: unknown
+keys are ignored, so a nanobot ``config.json`` loads unchanged.
 
 Layout (camelCase in JSON)::
 
@@ -15,6 +15,7 @@ Layout (camelCase in JSON)::
                               "timezone", "timezoneMode",
                               "compaction"  # NanoClaw only
                               }},
+      "channels": {"sendProgress", "sendToolHints", "showReasoning"},
       "providers": {"<name>": {"apiKey", "apiBase"}, ...},
       "tools": {"restrictToWorkspace", "ssrfWhitelist"}
     }
@@ -144,6 +145,18 @@ def _default_providers() -> dict[str, ProviderConfig]:
     return {"custom": ProviderConfig()}
 
 
+class ChannelsConfig(Base):
+    """What the terminal shows while a turn works (nanobot schema.py:33 ``ChannelsConfig``, a subset).
+
+    nanobot's CLI reads these three (cli/agent.py:222-245); the per-channel
+    entries (telegram, slack, ...) and delivery settings are not read.
+    """
+
+    send_progress: bool = True  # schema.py:43, the model's text before tool calls
+    send_tool_hints: bool = True  # schema.py:44, e.g. read notes.txt
+    show_reasoning: bool = True  # schema.py:45, the model's reasoning
+
+
 class ToolsConfig(Base):
     """Tool settings (nanobot schema.py:430 ``ToolsConfig``, a subset)."""
 
@@ -155,6 +168,7 @@ class Config(Base):
     """Root configuration (nanobot schema.py:501, a subset)."""
 
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
+    channels: ChannelsConfig = Field(default_factory=ChannelsConfig)  # schema.py:507
     # nanobot declares ~40 named providers plus extra keys for custom ones
     # (schema.py:292). NanoClaw has one OpenAI-compatible provider, so any key
     # is accepted and the active one is picked by ``resolve_provider``.

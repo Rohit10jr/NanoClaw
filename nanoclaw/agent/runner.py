@@ -4,10 +4,17 @@ Mirrors nanobot/agent/runner.py (AgentRunner.run / _run_core) and
 nanobot/agent/tools/execution.py (execute_tool_calls). The runner is
 model-facing only: it knows nothing about sessions, channels or prompts.
 Its caller builds ``initial_messages`` and decides what to do with the result.
+
+Since layer 13 the runner reports what it does through an :class:`AgentHook`
+(``spec.hook``), called at the same points and in the same order as nanobot's
+runner, and every model request goes through ``chat_stream_with_retry``
+(deltas only reach the hook when it ``wants_streaming()``). Retry waits are
+published to ``spec.events`` as :class:`RetryWaitEvent`.
 """
 
 from __future__ import annotations
 
+import asyncio
 import copy
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -17,6 +24,7 @@ from typing import Any
 from loguru import logger
 
 from nanoclaw.agent.context_governance import merge_adjacent_user_messages_for_model
+from nanoclaw.agent.hook import AgentHook, AgentHookContext, AgentRunHookContext
 from nanoclaw.agent.messages import (
     BUDGET_EXHAUSTED_FINALIZATION_PROMPT,
     DEFAULT_ERROR_MESSAGE,
@@ -27,18 +35,23 @@ from nanoclaw.agent.messages import (
     build_assistant_message,
     build_malformed_tool_call_note,
     build_tool_message,
+    extract_reasoning,
     is_blank,
-    strip_think,
+    strip_reasoning_tags,
 )
+from nanoclaw.agent.progress_hook import AgentProgressHook
 from nanoclaw.agent.tool_results import normalize_tool_result
 from nanoclaw.agent.tools import ToolRegistry, is_tool_error
 from nanoclaw.agent.tools.registry import with_retry_hint
-from nanoclaw.agent.tools.violations import classify_violation
+from nanoclaw.agent.tools.violations import classify_violation, is_ssrf_violation
+from nanoclaw.events import NO_EVENTS, EventSink, RetryWaitEvent
 from nanoclaw.providers import LLMProvider, LLMResponse, LLMUsage, ToolCallRequest
-from nanoclaw.utils.tool_hints import format_tool_hints
+from nanoclaw.utils.progress_events import output_events
 
 # Called as on_progress(text) for the model's text before tool calls, and
-# on_progress(hint, tool_hint=True) with the tool hints (nanobot's progress events).
+# on_progress(hint, tool_hint=True) with the tool hints (nanobot's progress
+# events). Kept as a compatibility input: the runner wraps it in an
+# AgentProgressHook (see AgentRunSpec.on_progress).
 ProgressCallback = Callable[..., Awaitable[None]]
 
 # After this many empty replies in a row, ask once more with tools off.
@@ -69,11 +82,21 @@ class AgentRunSpec:
     finalize_on_max_iterations: bool = True
     # Replaces the default out-of-iterations message ({max_iterations} is filled in).
     max_iterations_message: str | None = None
-    # Progress reports while the run works (nanobot ``on_progress``); see ProgressCallback.
+    # Compatibility input (before layer 13 the runner's only output): used
+    # only when ``hook`` is None, wrapped as AgentProgressHook(output_events(
+    # on_progress=...)). See ProgressCallback.
     on_progress: ProgressCallback | None = None
     # "standard" or "persistent" (nanobot ``provider_retry_mode``); see
     # LLMProvider.chat_with_retry.
     provider_retry_mode: str = "standard"
+    # Lifecycle callbacks (nanobot runner.py:109). None: a non-streaming
+    # AgentProgressHook (fed by ``on_progress`` if given), so <think> blocks
+    # are still removed from the answer; nanobot's default is a bare
+    # AgentHook, but every nanobot caller passes a progress hook.
+    hook: AgentHook | None = None
+    # Where retry waits go, as RetryWaitEvent (nanobot runner.py:125
+    # ``events``, read by the provider's retry notifications, base.py:1357).
+    events: EventSink = NO_EVENTS
 
 
 @dataclass
@@ -81,7 +104,9 @@ class AgentRunResult:
     """What a run produced.
 
     ``stop_reason`` is one of ``completed``, ``error``,
-    ``empty_final_response`` or ``max_iterations``.
+    ``empty_final_response`` or ``max_iterations``. ``tool_events`` has one
+    ``{"name", "status", "detail"}`` dict per tool call of the run
+    (nanobot runner.py:142).
     """
 
     final_content: str | None
@@ -90,6 +115,7 @@ class AgentRunResult:
     usage: LLMUsage | None = None
     stop_reason: str = "completed"
     error: str | None = None
+    tool_events: list[dict[str, str]] = field(default_factory=list)
 
 
 def _add_usage(total: LLMUsage | None, new: LLMUsage | None) -> LLMUsage | None:
@@ -101,26 +127,122 @@ def _add_usage(total: LLMUsage | None, new: LLMUsage | None) -> LLMUsage | None:
     return total + new
 
 
+def _event_detail(prefix: str, text: str, limit: int = 160) -> str:
+    """nanobot tools/execution.py:296."""
+    return (prefix + text.replace("\n", " ").strip())[:limit]
+
+
+def _short_detail(text: str) -> str:
+    """One line of at most 120 characters (nanobot tools/execution.py:191)."""
+    return text.replace("\n", " ").strip()[:120]
+
+
+def _ok_detail(result: Any) -> str:
+    """The tool event detail for a successful call (nanobot tools/execution.py:210)."""
+    detail = ("" if result is None else str(result)).replace("\n", " ").strip()
+    if not detail:
+        return "(empty)"
+    return detail[:120] + "..." if len(detail) > 120 else detail
+
+
 class AgentRunner:
     """Runs one agent turn against a provider and a tool registry."""
 
     async def run(self, spec: AgentRunSpec) -> AgentRunResult:
-        # Work on a copy so the caller's list is never modified.
-        messages = copy.deepcopy(spec.initial_messages)
+        """Run hooks around the core loop, in nanobot's order (runner.py:308-372)."""
+        hook = spec.hook if spec.hook is not None else self._default_hook(spec)
+        has_run_hooks = hook.has_run_hooks()
+        messages: list[dict[str, Any]] = []
+        context = AgentRunHookContext(messages=[])
+        try:
+            try:
+                # Work on a copy so the caller's list is never modified.
+                messages = copy.deepcopy(spec.initial_messages)
+                context.messages = self._snapshot(messages) if has_run_hooks else []
+                await hook.before_run(context)
+                result = await self._run_core(spec, hook, messages)
+            except Exception as exc:
+                context.messages = self._snapshot(messages) if has_run_hooks else []
+                context.stop_reason = "error"
+                context.error = f"Error: {type(exc).__name__}: {exc}"
+                context.exception = exc
+                await hook.on_error(context)
+                raise
+            else:
+                context.messages = self._snapshot(result.messages) if has_run_hooks else []
+                context.final_content = result.final_content
+                context.tools_used = list(result.tools_used)
+                context.usage = result.usage
+                context.stop_reason = result.stop_reason
+                context.error = result.error
+                context.tool_events = copy.deepcopy(result.tool_events)
+                context.exception = None
+                if context.error is not None:
+                    await hook.on_error(context)
+                await hook.after_run(context)
+                return result
+        except asyncio.CancelledError as exc:
+            context.stop_reason = "cancelled"
+            context.error = None
+            context.exception = exc
+            if has_run_hooks:
+                context.messages = self._snapshot(messages)
+            raise
+        finally:
+            if context.exception is None:
+                await hook.on_finally(context)
+            else:
+                try:
+                    await hook.on_finally(context)
+                except Exception:
+                    logger.opt(exception=True).error(
+                        "AgentHook.on_finally error after {}",
+                        context.stop_reason or "run exception",
+                    )
+
+    @staticmethod
+    def _default_hook(spec: AgentRunSpec) -> AgentHook:
+        """The hook for a spec without one: progress lines to ``on_progress``, if given."""
+        return AgentProgressHook(output_events(on_progress=spec.on_progress), session_key=spec.session_key)
+
+    @staticmethod
+    def _snapshot(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Run-hook copy of the messages (nanobot runner.py:164 ``_run_context_snapshot``)."""
+        return copy.deepcopy(messages) if messages else []
+
+    async def _run_core(
+        self,
+        spec: AgentRunSpec,
+        hook: AgentHook,
+        messages: list[dict[str, Any]],
+    ) -> AgentRunResult:
+        """The iterations (nanobot runner.py:472-858)."""
         tools_used: list[str] = []
+        tool_events: list[dict[str, str]] = []
         usage: LLMUsage | None = None
         empty_retries = 0
         # Per-run throttle for repeated attempts at the same outside target.
         workspace_violation_counts: dict[str, int] = {}
 
         for iteration in range(spec.max_iterations):
-            response, request_usage = await self._request_model(spec, messages)
-            usage = _add_usage(usage, request_usage)
+            context = AgentHookContext(iteration=iteration, messages=messages, session_key=spec.session_key)
+            await hook.before_iteration(context)
+            response, raw_usage = await self._request_model(spec, messages, hook, context)
+            context.response = response
+            context.tool_calls = list(response.tool_calls)
+            # Reasoning out, inline <think> stripped (nanobot runner.py:516-531).
+            reasoning_text, response.content = extract_reasoning(response.reasoning_content, response.content)
+            context.usage = raw_usage
+            usage = _add_usage(usage, raw_usage)
+            if reasoning_text and not context.streamed_reasoning:
+                await hook.emit_reasoning(reasoning_text)
+                await hook.emit_reasoning_end()
+                context.streamed_reasoning = True
 
-            # 1. The model wants tools: run them and go round again.
+            # 1. The model wants tools: run them and go round again (runner.py:533-621).
             if response.should_execute_tools:
-                if spec.on_progress is not None:
-                    await self._report_progress(spec.on_progress, response)
+                if hook.wants_streaming():
+                    await hook.on_stream_end(context, resuming=True)
                 messages.append(
                     build_assistant_message(
                         response.content,
@@ -128,20 +250,32 @@ class AgentRunner:
                         reasoning_content=response.reasoning_content,
                     )
                 )
+                await hook.before_execute_tools(context)
+                results: list[Any] = []
+                new_events: list[dict[str, str]] = []
                 for call in response.tool_calls:
-                    raw, ok = await self._execute_tool_call(spec, call, workspace_violation_counts)
+                    raw, event = await self._execute_tool_call(
+                        spec, call, workspace_violation_counts, hook=hook, context=context
+                    )
+                    results.append(raw)
+                    new_events.append(event)
                     content = normalize_tool_result(
                         call.name,
                         call.id,
-                        raw,
+                        "" if raw is None else str(raw),
                         workspace=spec.workspace,
                         max_chars=spec.max_tool_result_chars,
                         bucket=spec.session_key or "default",
                     )
                     messages.append(build_tool_message(call.id, call.name, content))
-                    if ok:
-                        tools_used.append(call.name)
+                tool_events.extend(new_events)
+                tools_used.extend(
+                    call.name for call, event in zip(response.tool_calls, new_events) if event["status"] == "ok"
+                )
+                context.tool_results = results
+                context.tool_events = list(new_events)
                 empty_retries = 0
+                await hook.after_iteration(context)
                 continue
 
             # Tool calls that arrive with a cut-off or filtered reply may be
@@ -152,10 +286,10 @@ class AgentRunner:
                     response.finish_reason,
                     spec.session_key or "default",
                 )
-            content = response.content
+            clean = hook.finalize_content(context, response.content)
 
-            # 2. Empty reply: retry, then ask once more with tools off.
-            if response.finish_reason not in _NO_RETRY_FINISH_REASONS and is_blank(content):
+            # 2. Empty reply: retry, then ask once more with tools off (runner.py:632-672).
+            if response.finish_reason not in _NO_RETRY_FINISH_REASONS and is_blank(clean):
                 empty_retries += 1
                 if empty_retries < _MAX_EMPTY_RETRIES:
                     logger.warning(
@@ -165,6 +299,9 @@ class AgentRunner:
                         empty_retries,
                         _MAX_EMPTY_RETRIES,
                     )
+                    if hook.wants_streaming():
+                        await hook.on_stream_end(context, resuming=False)
+                    await hook.after_iteration(context)
                     continue
                 logger.warning(
                     "Empty response on turn {} for {} after {} retries; attempting finalization",
@@ -172,55 +309,61 @@ class AgentRunner:
                     spec.session_key or "default",
                     empty_retries,
                 )
+                if hook.wants_streaming():
+                    await hook.on_stream_end(context, resuming=False)
                 response = await self._request(
                     spec,
                     messages + [{"role": "user", "content": FINALIZATION_RETRY_PROMPT}],
                     with_tools=False,
                 )
                 usage = _add_usage(usage, response.usage)
-                content = response.content
+                context.response = response
+                context.usage = _add_usage(raw_usage, response.usage)
+                context.tool_calls = list(response.tool_calls)
+                clean = hook.finalize_content(context, response.content)
+
+            # The answer is complete: close the stream (runner.py:752; NanoClaw
+            # has no mid-turn injections, so it never continues).
+            if hook.wants_streaming():
+                await hook.on_stream_end(context, resuming=False)
 
             # 3. Model error: stop, keeping history well formed.
             if response.is_error:
-                final = content or DEFAULT_ERROR_MESSAGE
+                final = clean or DEFAULT_ERROR_MESSAGE
                 self._append_model_error_placeholder(messages)
-                return AgentRunResult(final, messages, tools_used, usage, "error", final)
+                context.final_content, context.error, context.stop_reason = final, final, "error"
+                await hook.after_iteration(context)
+                return AgentRunResult(final, messages, tools_used, usage, "error", final, tool_events)
 
             # 4. Still nothing to say.
-            if is_blank(content):
-                messages.append(build_assistant_message(EMPTY_FINAL_RESPONSE_MESSAGE))
-                return AgentRunResult(
-                    EMPTY_FINAL_RESPONSE_MESSAGE,
-                    messages,
-                    tools_used,
-                    usage,
-                    "empty_final_response",
-                    EMPTY_FINAL_RESPONSE_MESSAGE,
-                )
+            if is_blank(clean):
+                final = EMPTY_FINAL_RESPONSE_MESSAGE
+                messages.append(build_assistant_message(final))
+                context.final_content, context.error, context.stop_reason = final, final, "empty_final_response"
+                await hook.after_iteration(context)
+                return AgentRunResult(final, messages, tools_used, usage, "empty_final_response", final, tool_events)
 
             # 5. A normal final answer.
-            messages.append(
-                build_assistant_message(content, reasoning_content=response.reasoning_content)
-            )
-            return AgentRunResult(content, messages, tools_used, usage, "completed")
+            messages.append(build_assistant_message(clean, reasoning_content=response.reasoning_content))
+            context.final_content, context.stop_reason = clean, "completed"
+            await hook.after_iteration(context)
+            return AgentRunResult(clean, messages, tools_used, usage, "completed", None, tool_events)
 
         # Out of iterations: ask for a summary with tools off, else a fixed message.
-        final, finalize_usage = await self._finalize_after_max_iterations(spec, messages)
+        final, finalize_usage = await self._finalize_after_max_iterations(spec, hook, messages)
         usage = _add_usage(usage, finalize_usage)
         messages.append(build_assistant_message(final))
-        return AgentRunResult(final, messages, tools_used, usage, "max_iterations")
+        return AgentRunResult(final, messages, tools_used, usage, "max_iterations", None, tool_events)
 
-    @staticmethod
-    async def _report_progress(on_progress: ProgressCallback, response: LLMResponse) -> None:
-        """The model's text, then the tool hints, before the tools run.
+    def _retry_wait_callback(self, spec: AgentRunSpec) -> Callable[[str], Awaitable[None]] | None:
+        """Retry waits become RetryWaitEvent (nanobot providers/base.py:1357 ``_retry_notifications``)."""
+        if spec.events.publish is None:
+            return None
 
-        (nanobot ``AgentProgressHook.before_execute_tools``, without streaming)
-        """
-        thought = strip_think(response.content) if response.content else None
-        if thought:
-            await on_progress(thought)
-        hint = strip_think(format_tool_hints(response.tool_calls))
-        await on_progress(hint or "", tool_hint=True)
+        async def publish(content: str) -> None:
+            await spec.events.emit(RetryWaitEvent(content))
+
+        return publish
 
     async def _request(
         self,
@@ -228,12 +371,14 @@ class AgentRunner:
         messages: list[dict[str, Any]],
         *,
         with_tools: bool,
+        stream: dict[str, Any] | None = None,
     ) -> LLMResponse:
-        """One provider call, retried on transient errors.
+        """One provider call through ``chat_stream_with_retry``, retried on transient errors.
 
-        Inline <think> blocks are removed from the answer, and ``usage`` is
-        always set: estimated if the provider sent none (before <think> is
-        stripped, since those tokens were generated too).
+        ``stream`` holds the delta callbacks (only when the hook streams).
+        ``usage`` is always set: estimated if the provider sent none (on the
+        raw content, before <think> is stripped, since those tokens were
+        generated too). nanobot runner.py:1015 and :1266.
         """
         tools = spec.tools.get_definitions() if with_tools else []
         kwargs: dict[str, Any] = {
@@ -243,10 +388,13 @@ class AgentRunner:
             "max_tokens": spec.max_tokens,
             "temperature": spec.temperature,
         }
-        response = await spec.provider.chat_with_retry(**kwargs, retry_mode=spec.provider_retry_mode)
+        response = await spec.provider.chat_stream_with_retry(
+            **kwargs,
+            **(stream or {}),
+            retry_mode=spec.provider_retry_mode,
+            on_retry_wait=self._retry_wait_callback(spec),
+        )
         response.usage = self._usage_or_estimate(spec.provider, response, kwargs)
-        if response.content and not response.is_error:
-            response.content = strip_think(response.content)
         return response
 
     @staticmethod
@@ -260,10 +408,72 @@ class AgentRunner:
             return usage if usage is not None and usage.total_tokens > 0 else LLMUsage.empty_request()
         return provider.usage_for_call(response, kwargs) or LLMUsage.empty_request()
 
+    @staticmethod
+    def _stream_callbacks(
+        hook: AgentHook, context: AgentHookContext
+    ) -> tuple[dict[str, Any], Callable[[], Awaitable[None]]]:
+        """Delta callbacks for a streaming hook, and the closer for native reasoning.
+
+        Content deltas go to ``hook.on_stream`` (the progress hook separates
+        inline <think> text there); native thinking deltas become
+        ``emit_reasoning`` chunks; a recovered stream ends the segment with
+        ``on_stream_end(resuming=True)``; provider-hosted tool events go to
+        ``on_provider_tool_event``. (nanobot runner.py:925-1018, without the
+        timing fields and the shielded close task.)
+        """
+        thinking_buf = ""
+        native_reasoning_open = False
+
+        async def close_native_reasoning() -> None:
+            nonlocal native_reasoning_open
+            if native_reasoning_open:
+                native_reasoning_open = False
+                await hook.emit_reasoning_end()
+
+        async def on_content_delta(delta: str) -> None:
+            if delta:
+                context.streamed_content = True
+                await close_native_reasoning()
+            await hook.on_stream(context, delta)
+
+        async def on_thinking_delta(delta: str) -> None:
+            nonlocal thinking_buf, native_reasoning_open
+            if not delta:
+                return
+            prev_clean = strip_reasoning_tags(thinking_buf)
+            thinking_buf += delta
+            incremental = strip_reasoning_tags(thinking_buf)[len(prev_clean):]
+            if incremental:
+                context.streamed_reasoning = True
+                native_reasoning_open = True
+                await hook.emit_reasoning(incremental)
+
+        async def on_tool_call_delta(event: dict[str, Any]) -> None:
+            # Only provider-hosted tools are reported; function-call deltas
+            # are assembled by the provider (nanobot runner.py:978).
+            if event.get("kind") != "hosted_tool":
+                return
+            await close_native_reasoning()
+            await hook.on_provider_tool_event(context, event)
+
+        async def on_stream_recover() -> None:
+            await close_native_reasoning()
+            await hook.on_stream_end(context, resuming=True)
+
+        callbacks = {
+            "on_content_delta": on_content_delta,
+            "on_thinking_delta": on_thinking_delta,
+            "on_tool_call_delta": on_tool_call_delta,
+            "on_stream_recover": on_stream_recover,
+        }
+        return callbacks, close_native_reasoning
+
     async def _request_model(
         self,
         spec: AgentRunSpec,
         messages: list[dict[str, Any]],
+        hook: AgentHook,
+        context: AgentHookContext,
         *,
         malformed_retry: bool = False,
     ) -> tuple[LLMResponse, LLMUsage | None]:
@@ -273,7 +483,15 @@ class AgentRunner:
         If that leaves none, the request is retried once with a note; if the
         retry is malformed too, one final request is made with tools off.
         """
-        response = await self._request(spec, messages, with_tools=True)
+        stream: dict[str, Any] | None = None
+        close_native_reasoning: Callable[[], Awaitable[None]] | None = None
+        if hook.wants_streaming():
+            stream, close_native_reasoning = self._stream_callbacks(hook, context)
+        try:
+            response = await self._request(spec, messages, with_tools=True, stream=stream)
+        finally:
+            if close_native_reasoning is not None:
+                await close_native_reasoning()
         usage = response.usage
         dropped, all_dropped, original_finish = self._drop_malformed_tool_calls(response)
         if not all_dropped or original_finish not in ("tool_calls", "function_call"):
@@ -285,7 +503,9 @@ class AgentRunner:
                 "Retrying LLM request after all {} malformed tool call(s) were dropped",
                 dropped,
             )
-            retry, retry_usage = await self._request_model(spec, retry_messages, malformed_retry=True)
+            retry, retry_usage = await self._request_model(
+                spec, retry_messages, hook, context, malformed_retry=True
+            )
             return retry, _add_usage(usage, retry_usage)
         logger.warning(
             "Malformed tool calls persisted after retry; falling back to no-tools request",
@@ -325,16 +545,26 @@ class AgentRunner:
         spec: AgentRunSpec,
         call: ToolCallRequest,
         workspace_violation_counts: dict[str, int] | None = None,
-    ) -> tuple[str, bool]:
-        """Run one call; return the text for the tool message and whether it succeeded.
+        *,
+        hook: AgentHook | None = None,
+        context: AgentHookContext | None = None,
+    ) -> tuple[Any, dict[str, str]]:
+        """Run one call; return its result and its tool event.
 
-        Mirrors nanobot agent/tools/execution.py _execute_tool_call. Boundary
-        errors (private network, outside the workspace) are reported as nanobot
-        does (``classify_violation``).
+        The result is the tool's raw output on success, else the error text
+        for the model. The event is ``{"name", "status": "ok"|"error",
+        "detail"}``. Hooks: ``before_execute_tool``, then
+        ``on_execute_tool_error`` or ``after_execute_tool``. Mirrors nanobot
+        agent/tools/execution.py:110-213; boundary errors (private network,
+        outside the workspace) are reported as nanobot does
+        (``classify_violation``).
         """
         counts = workspace_violation_counts if workspace_violation_counts is not None else {}
+        hook = hook or AgentHook()
+        context = context or AgentHookContext(iteration=0, messages=[])
 
-        def failed(raw_text: str, payload: str) -> tuple[str, bool]:
+        def failed(raw_text: str, payload: str, detail: str) -> tuple[str, dict[str, str]]:
+            event = {"name": call.name, "status": "error", "detail": detail}
             handled = classify_violation(
                 raw_text=raw_text,
                 soft_payload=payload,
@@ -342,25 +572,43 @@ class AgentRunner:
                 arguments=call.arguments,
                 workspace_violation_counts=counts,
             )
-            return (handled if handled is not None else payload), False
+            if handled is None:
+                return payload, event
+            # nanobot execution.py:242-271 labels boundary errors in the event.
+            if is_ssrf_violation(raw_text):
+                prefix = "ssrf_violation: "
+            elif handled != payload:
+                prefix = "workspace_violation_escalated: "
+            else:
+                prefix = "workspace_violation: "
+            event["detail"] = _event_detail(prefix, raw_text)
+            return handled, event
 
         tool, params, error = spec.tools.prepare_call(call.name, call.arguments)
         if error:
-            return failed(error, with_retry_hint(error))
+            return failed(error, with_retry_hint(error), error.split(": ", 1)[-1][:120])
         assert tool is not None
+        await hook.before_execute_tool(context, call, tool, params)
         try:
             result = await tool.execute(**params)
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
-            return failed(str(exc), with_retry_hint(f"Error: {type(exc).__name__}: {exc}"))
+            await hook.on_execute_tool_error(context, call, tool, params, exc)
+            return failed(str(exc), with_retry_hint(f"Error: {type(exc).__name__}: {exc}"), str(exc))
         if is_tool_error(result):
-            return failed(str(result), with_retry_hint(str(result)))
-        return ("" if result is None else str(result)), True
+            await hook.on_execute_tool_error(context, call, tool, params, result)
+            return failed(str(result), with_retry_hint(str(result)), _short_detail(str(result)))
+        await hook.after_execute_tool(context, call, tool, params, result)
+        return result, {"name": call.name, "status": "ok", "detail": _ok_detail(result)}
 
     async def _finalize_after_max_iterations(
         self,
         spec: AgentRunSpec,
+        hook: AgentHook,
         messages: list[dict[str, Any]],
     ) -> tuple[str, LLMUsage | None]:
+        """Ask for a summary with tools off (nanobot runner.py:1196 ``_try_finalize_after_max_iterations``)."""
         if not spec.finalize_on_max_iterations:
             return self._max_iterations_fallback(spec), None
         response = await self._request(
@@ -377,9 +625,17 @@ class AgentRunner:
                 spec.session_key or "default",
             )
             return self._max_iterations_fallback(spec), response.usage
-        if is_blank(response.content):
+        context = AgentHookContext(
+            iteration=spec.max_iterations,
+            messages=messages,
+            response=response,
+            usage=response.usage,
+            session_key=spec.session_key,
+        )
+        clean = hook.finalize_content(context, response.content)
+        if is_blank(clean):
             return self._max_iterations_fallback(spec), response.usage
-        return response.content or "", response.usage
+        return clean or "", response.usage
 
     @staticmethod
     def _max_iterations_fallback(spec: AgentRunSpec) -> str:
