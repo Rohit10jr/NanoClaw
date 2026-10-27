@@ -4,9 +4,6 @@ Copied from nanobot/agent/hook.py. The runner calls an :class:`AgentHook` at
 fixed points (before/after the run, each iteration, each tool call, while
 streaming). :class:`CompositeHook` fans one call out to many hooks, so a
 broken extra hook can't crash the run.
-
-Left out versus nanobot: ``AgentRunHookContext.had_injections`` (NanoClaw
-has no mid-turn message injection).
 """
 
 from __future__ import annotations
@@ -56,7 +53,8 @@ class AgentHookContext:
 class AgentRunHookContext:
     """Run-level snapshot for before_run / after_run / on_error / on_finally.
 
-    Fields after ``messages`` mirror AgentRunResult; ``exception`` is set when
+    Fields after ``messages`` mirror AgentRunResult (``had_injections``: a
+    follow-up message was folded into the run); ``exception`` is set when
     the run raised. (nanobot hook.py:38)
     """
 
@@ -67,6 +65,7 @@ class AgentRunHookContext:
     stop_reason: str | None = None
     error: str | None = None
     tool_events: list[dict[str, str]] = field(default_factory=list)
+    had_injections: bool = False
     exception: BaseException | None = None
 
 
