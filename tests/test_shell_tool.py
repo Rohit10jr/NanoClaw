@@ -1,9 +1,14 @@
-"""ExecTool against real bash."""
+"""ExecTool against real bash.
+
+Tests marked ``requires_posix_shell`` really run a command and are skipped on
+Windows until it has shell support (docs/WINDOWS.md, cause A); the guard tests
+run everywhere."""
 
 import time
 
 import pytest
 
+from conftest import requires_posix_shell
 from nanoclaw.agent.tools import is_tool_error
 from nanoclaw.agent.tools.shell import ExecTool
 
@@ -13,16 +18,19 @@ def tool(tmp_path):
     return ExecTool(working_dir=tmp_path)
 
 
+@requires_posix_shell
 async def test_stdout_and_exit_code(tool):
     assert await tool.execute(command="echo hello") == "hello\n\n\nExit code: 0"
 
 
+@requires_posix_shell
 async def test_stderr_and_nonzero_exit_is_not_a_tool_error(tool):
     out = await tool.execute(command="echo oops >&2; exit 3")
     assert not is_tool_error(out)
     assert out == "STDERR:\noops\n\n\nExit code: 3"
 
 
+@requires_posix_shell
 async def test_runs_in_workspace_and_working_dir(tool, tmp_path):
     (tmp_path / "sub").mkdir()
     assert (await tool.execute(command="pwd")).startswith(str(tmp_path))
@@ -34,6 +42,7 @@ async def test_missing_working_dir_is_an_error(tool):
     assert is_tool_error(out) and out.startswith("Error executing command:")
 
 
+@requires_posix_shell
 async def test_timeout_kills_the_command_and_its_children(tool, tmp_path):
     marker = tmp_path / "late.txt"
     start = time.monotonic()
@@ -52,11 +61,13 @@ def test_timeout_resolution(tmp_path):
     assert ExecTool(timeout=0)._resolve_timeout(None) is None  # 0 = no limit
 
 
+@requires_posix_shell
 async def test_zero_timeout_means_no_limit(tmp_path):
     out = await ExecTool(working_dir=tmp_path, timeout=0).execute(command="sleep 0.2; echo done")
     assert out == "done\n\n\nExit code: 0"
 
 
+@requires_posix_shell
 async def test_long_output_keeps_head_and_tail(tool):
     out = await tool.execute(command="python3 -c \"print('a' * 6000 + 'b' * 6000)\"")
     assert out.startswith("a" * 5000)
@@ -64,6 +75,7 @@ async def test_long_output_keeps_head_and_tail(tool):
     assert out.endswith("\n\nExit code: 0")
 
 
+@requires_posix_shell
 async def test_secrets_are_not_passed_to_commands(tool, monkeypatch):
     monkeypatch.setenv("NANOCLAW_API_KEY", "sk-secret")
     out = await tool.execute(command='echo "key=[$NANOCLAW_API_KEY]"; env | sort')
@@ -72,6 +84,7 @@ async def test_secrets_are_not_passed_to_commands(tool, monkeypatch):
     assert "HOME=" in out
 
 
+@requires_posix_shell
 async def test_commands_can_still_find_programs(tool):
     # No PATH is passed; bash supplies a default one.
     assert "Exit code: 0" in await tool.execute(command="ls / > /dev/null && which python3")
@@ -102,6 +115,7 @@ async def test_deny_list_allows_ordinary_commands(tool, command):
     assert "blocked" not in await tool.execute(command=command)
 
 
+@requires_posix_shell
 @pytest.mark.parametrize(
     "command",
     [
@@ -148,7 +162,7 @@ async def test_writes_to_memory_journal_are_blocked(tmp_path, command):
 @pytest.mark.parametrize("command", ["cat memory/history.jsonl", "grep fact memory/history.jsonl", "wc -l memory/.dream_cursor"])
 async def test_reading_the_memory_journal_is_allowed(tmp_path, command):
     (tmp_path / "memory").mkdir()
-    (tmp_path / "memory" / "history.jsonl").write_text("{}\n")
-    (tmp_path / "memory" / ".dream_cursor").write_text("1")
+    (tmp_path / "memory" / "history.jsonl").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "memory" / ".dream_cursor").write_text("1", encoding="utf-8")
     result = await ExecTool(working_dir=str(tmp_path)).execute(command=command)
     assert "blocked" not in result

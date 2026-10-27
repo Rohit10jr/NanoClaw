@@ -1,5 +1,9 @@
 """Skills (nanobot agent/skills.py) and how the agent uses them."""
 
+import os
+import sys
+from pathlib import Path
+
 import pytest
 
 from nanoclaw.__main__ import main
@@ -18,7 +22,7 @@ from nanoclaw.utils.templates import sync_workspace_templates
 def write_skill(root, name, description="Does things.", body="Step 1.", extra=""):
     folder = root / name
     folder.mkdir(parents=True, exist_ok=True)
-    (folder / "SKILL.md").write_text(f"---\nname: {name}\ndescription: {description}\n{extra}---\n\n{body}\n")
+    (folder / "SKILL.md").write_text(f"---\nname: {name}\ndescription: {description}\n{extra}---\n\n{body}\n", encoding="utf-8")
     return folder / "SKILL.md"
 
 
@@ -76,7 +80,7 @@ def test_workspace_skills_come_first_and_override_builtin(ws, builtin):
     write_skill(builtin, "shared", description="Built-in version.")
     write_skill(builtin, "stock")
     (ws / "skills" / "not-a-skill").mkdir()
-    (ws / "skills" / "loose.md").write_text("x")
+    (ws / "skills" / "loose.md").write_text("x", encoding="utf-8")
     skills = loader(ws, builtin).list_skills()
     by_name = {s["name"]: s["source"] for s in skills}
     assert by_name == {"mine": "workspace", "shared": "workspace", "stock": "builtin"}
@@ -87,7 +91,10 @@ def test_workspace_skills_come_first_and_override_builtin(ws, builtin):
 def test_requirements(ws, builtin, monkeypatch):
     write_skill(builtin, "needs-bin", extra='metadata: {"nanobot":{"requires":{"bins":["definitely-not-installed-x"]}}}\n')
     write_skill(builtin, "needs-env", extra='metadata: {"nanobot":{"requires":{"env":["NANOCLAW_TEST_TOKEN"]}}}\n')
-    write_skill(builtin, "has-bin", extra='metadata: {"nanobot":{"requires":{"bins":["sh"]}}}\n')
+    # A program every OS has (not `sh`, which Windows lacks): the Python running the tests.
+    monkeypatch.setenv("PATH", os.path.dirname(sys.executable) + os.pathsep + os.environ.get("PATH", ""))
+    python = Path(sys.executable).name
+    write_skill(builtin, "has-bin", extra=f'metadata: {{"nanobot":{{"requires":{{"bins":["{python}"]}}}}}}\n')
     sl = loader(ws, builtin)
     assert {s["name"] for s in sl.list_skills()} == {"has-bin"}
     assert len(sl.list_skills(filter_unavailable=False)) == 3
@@ -118,7 +125,7 @@ def test_wrong_metadata_shapes_are_ignored(ws, builtin):
 
 def test_description_falls_back_to_the_name(ws, builtin):
     (builtin / "bare").mkdir()
-    (builtin / "bare" / "SKILL.md").write_text("Just instructions, no frontmatter.")
+    (builtin / "bare" / "SKILL.md").write_text("Just instructions, no frontmatter.", encoding="utf-8")
     assert loader(ws, builtin).get_skill_description("bare") == "bare"
 
 
@@ -193,7 +200,7 @@ def test_bundled_skills_are_valid():
     names = sorted(p.name for p in BUILTIN_SKILLS_DIR.iterdir() if (p / "SKILL.md").exists())
     assert names == ["github", "memory", "skill-creator", "summarize", "tmux", "weather"]
     for name in names:
-        meta = parse_skill_metadata((BUILTIN_SKILLS_DIR / name / "SKILL.md").read_text())
+        meta = parse_skill_metadata((BUILTIN_SKILLS_DIR / name / "SKILL.md").read_text(encoding="utf-8"))
         assert valid_skill_metadata(meta, name), name
     assert (BUILTIN_SKILLS_DIR / "skill-creator" / "scripts" / "init_skill.py").exists()
 

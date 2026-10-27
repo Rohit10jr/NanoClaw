@@ -215,7 +215,7 @@ async def test_dream_updates_memory_and_advances_the_cursor(ws, tmp_path):
     loop.memory.append_history("- [permanent] likes tea")
     message = await loop.run_dream()
     assert message.startswith("Dream completed in") and "no memory changes" not in message
-    assert (ws / "memory/MEMORY.md").read_text() == "# Memory\n- likes tea\n"
+    assert (ws / "memory/MEMORY.md").read_text(encoding="utf-8") == "# Memory\n- likes tea\n"
     assert loop.memory.get_last_dream_cursor() == 1
     # Dream's request: normal system prompt, then its instructions with the journal.
     first = fake.calls[0]
@@ -252,7 +252,7 @@ def test_cli_compact_and_dream(capsys, ws):
     assert "Conversation compacted. Summary:\n- [permanent] user is Rohit" in capsys.readouterr().out
     assert main(["dream", "-w", str(ws)], provider=fake) == 0
     assert "Dream completed" in capsys.readouterr().out
-    assert (ws / "memory/MEMORY.md").read_text() == "- user is Rohit\n"
+    assert (ws / "memory/MEMORY.md").read_text(encoding="utf-8") == "- user is Rohit\n"
     assert main(["compact", "-w", str(ws)], provider=fake) == 0
     assert "Nothing to compact." in capsys.readouterr().out
 

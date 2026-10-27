@@ -287,12 +287,12 @@ async def test_compare_script_dry_run(tmp_path, monkeypatch):
     argv = ["--dry-run", "--runs", "1", "--window", "9000", "--max-tokens", "500", "--filler-tokens", "800",
             "--out", str(tmp_path / "ab")]
     assert await script.main(argv) == 0
-    report = (tmp_path / "ab" / "report.md").read_text()
+    report = (tmp_path / "ab" / "report.md").read_text(encoding="utf-8")
     assert "| | nanobot | fixed |" in report and "| Quiz: total recall |" in report
     for mode in ("nanobot", "fixed"):
         folder = tmp_path / "ab" / "run1" / mode
         assert (folder / "quiz.md").exists() and (folder / "checkpoints.md").exists()
         assert (folder / "workspace" / "memory" / "history.jsonl").exists()
-    results = __import__("json").loads((tmp_path / "ab" / "results.json").read_text())
+    results = __import__("json").loads((tmp_path / "ab" / "results.json").read_text(encoding="utf-8"))
     assert [r["mode"] for r in results] == ["nanobot", "fixed"]
     assert all(r["compactions"] >= 1 for r in results)  # the scenario really compacts

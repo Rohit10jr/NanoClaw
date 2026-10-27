@@ -1,6 +1,7 @@
 """Layer 10: the terminal chat, slash commands, progress lines and tool hints."""
 
 import asyncio
+import contextlib
 import io
 import signal
 
@@ -104,7 +105,8 @@ def test_exit_signal_handler(monkeypatch):
     assert exc.value.code == 0
     assert restored == [1]  # terminal put back before leaving
     assert out.getvalue() == "\nReceived SIGINT, goodbye!\n"
-    assert handlers[signal.SIGPIPE] is signal.SIG_IGN
+    if hasattr(signal, "SIGPIPE"):  # Windows has no SIGPIPE; the app checks the same way
+        assert handlers[signal.SIGPIPE] is signal.SIG_IGN
 
 
 # --- progress lines and tool hints ----------------------------------------
@@ -269,7 +271,7 @@ async def test_new_history_and_status(ws, tmp_path):
     assert "💬 Session: 2 messages" in text and "⚡ Tasks: 0 active" in text
     assert "New session started." in text
     assert text.count("No conversation history yet.") == 2  # cleared by /new
-    assert (ws / "memory" / "history.jsonl").read_text().count("said hi") == 1  # archived first
+    assert (ws / "memory" / "history.jsonl").read_text(encoding="utf-8").count("said hi") == 1  # archived first
 
 
 def test_status_content_uses_last_usage():
@@ -487,13 +489,25 @@ def test_cli_chat_markdown_option(ws, monkeypatch, capsys):
 # --- second review: nanobot's terminal handling ------------------------------
 
 
-async def test_prompt_enter_sends_and_alt_enter_adds_a_line(tmp_path):
+@contextlib.contextmanager
+def dummy_terminal():
+    """A pipe for keys and a dummy screen, also as the app session's default,
+    so ``patch_stdout`` never asks for a real console (on Windows that raises
+    NoConsoleScreenBufferError under pytest: docs/WINDOWS.md, cause G)."""
+    from prompt_toolkit.application import create_app_session
     from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    with create_pipe_input() as pipe, create_app_session(input=pipe, output=DummyOutput()):
+        yield pipe
+
+
+async def test_prompt_enter_sends_and_alt_enter_adds_a_line(tmp_path):
     from prompt_toolkit.output import DummyOutput
 
     from nanoclaw.cli.terminal import PromptInput
 
-    with create_pipe_input() as pipe:
+    with dummy_terminal() as pipe:
         reader = PromptInput(tmp_path / "hist", input=pipe, output=DummyOutput())
         pipe.send_text("line one\x1b\rline two\r")
         assert await reader() == "line one\nline two"
@@ -502,7 +516,7 @@ async def test_prompt_enter_sends_and_alt_enter_adds_a_line(tmp_path):
         from prompt_toolkit.filters import to_filter
 
         assert to_filter(reader._session.multiline)()  # a multi-line input box, as nanobot
-    history = (tmp_path / "hist").read_text()
+    history = (tmp_path / "hist").read_text(encoding="utf-8")
     assert "+line one\n+line two\n" in history and "+second\n" in history
 
 
@@ -571,14 +585,13 @@ def test_spinner_clears_its_line_on_a_terminal():
 
 
 async def test_typed_ahead_keys_are_dropped_before_each_prompt(tmp_path, monkeypatch):
-    from prompt_toolkit.input import create_pipe_input
     from prompt_toolkit.output import DummyOutput
 
     from nanoclaw.cli import terminal
 
     flushed = []
     monkeypatch.setattr(terminal, "flush_pending_tty_input", lambda: flushed.append(1))
-    with create_pipe_input() as pipe:
+    with dummy_terminal() as pipe:
         reader = terminal.PromptInput(tmp_path / "hist", input=pipe, output=DummyOutput())
         pipe.send_text("hi\r")
         await reader()

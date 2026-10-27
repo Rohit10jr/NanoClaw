@@ -32,15 +32,15 @@ def test_sync_creates_missing_files_and_never_overwrites(tmp_path):
     assert sync_workspace_templates(tmp_path) == [
         "AGENTS.md", "SOUL.md", "USER.md", "memory/MEMORY.md", "memory/history.jsonl"
     ]
-    assert (tmp_path / "memory" / "MEMORY.md").read_text() == load_bundled_template("memory/MEMORY.md")
-    assert (tmp_path / "memory" / "history.jsonl").read_text() == ""
+    assert (tmp_path / "memory" / "MEMORY.md").read_text(encoding="utf-8") == load_bundled_template("memory/MEMORY.md")
+    assert (tmp_path / "memory" / "history.jsonl").read_text(encoding="utf-8") == ""
     for name in WORKSPACE_FILES:
-        assert (tmp_path / name).read_text() == load_bundled_template(name)
+        assert (tmp_path / name).read_text(encoding="utf-8") == load_bundled_template(name)
 
-    (tmp_path / "SOUL.md").write_text("I am a pirate.")
+    (tmp_path / "SOUL.md").write_text("I am a pirate.", encoding="utf-8")
     (tmp_path / "USER.md").unlink()
     assert sync_workspace_templates(tmp_path) == ["USER.md"]
-    assert (tmp_path / "SOUL.md").read_text() == "I am a pirate."
+    assert (tmp_path / "SOUL.md").read_text(encoding="utf-8") == "I am a pirate."
 
 
 def test_load_bundled_template_missing_is_none():
@@ -57,8 +57,8 @@ def test_templates_render_without_leftover_jinja():
 
 
 def test_sections_in_nanobot_order(ws):
-    (ws / "AGENTS.md").write_text("Use tabs.")
-    (ws / "USER.md").write_text("Name: Sam")
+    (ws / "AGENTS.md").write_text("Use tabs.", encoding="utf-8")
+    (ws / "USER.md").write_text("Name: Sam", encoding="utf-8")
     prompt = ContextBuilder(ws).build_system_prompt(channel="cli")
 
     sections = prompt.split(SECTION_SEPARATOR)
@@ -128,7 +128,7 @@ def test_template_memory_is_skipped(ws):
 def test_edited_memory_is_injected_without_extra_heading(ws):
     # nanobot ...::test_customized_memory_md_is_injected: MEMORY.md carries its
     # own "# Long-term Memory" heading, so it appears exactly once.
-    (ws / "memory" / "MEMORY.md").write_text("# Long-term Memory\n\n## Preferences\n- User prefers dark mode\n")
+    (ws / "memory" / "MEMORY.md").write_text("# Long-term Memory\n\n## Preferences\n- User prefers dark mode\n", encoding="utf-8")
     prompt = ContextBuilder(ws).build_system_prompt()
     assert prompt.count("# Long-term Memory") == 1
     assert "# Memory\n" not in prompt
@@ -143,22 +143,22 @@ def test_unedited_user_and_agents_are_skipped_but_soul_is_kept(ws):
 
 
 def test_edited_files_are_included_and_whitespace_only_edits_dont_count(ws):
-    (ws / "USER.md").write_text(load_bundled_template("USER.md") + "\n\n\n")  # still the template
-    (ws / "AGENTS.md").write_text(load_bundled_template("AGENTS.md") + "\n- Always run tests.\n")
+    (ws / "USER.md").write_text(load_bundled_template("USER.md") + "\n\n\n", encoding="utf-8")  # still the template
+    (ws / "AGENTS.md").write_text(load_bundled_template("AGENTS.md") + "\n- Always run tests.\n", encoding="utf-8")
     prompt = ContextBuilder(ws).build_system_prompt()
     assert "## USER.md" not in prompt
     assert "- Always run tests." in prompt
 
 
 def test_empty_and_missing_files_are_skipped(tmp_path):
-    (tmp_path / "SOUL.md").write_text("   \n")
+    (tmp_path / "SOUL.md").write_text("   \n", encoding="utf-8")
     prompt = ContextBuilder(tmp_path).build_system_prompt()
     assert "## SOUL.md" not in prompt
     assert len(prompt.split(SECTION_SEPARATOR)) == 3  # identity + tool notes + skills only
 
 
 def test_soul_edits_change_the_prompt(ws):
-    (ws / "SOUL.md").write_text("I am a terse pirate.")
+    (ws / "SOUL.md").write_text("I am a terse pirate.", encoding="utf-8")
     assert "## SOUL.md\n\nI am a terse pirate." in ContextBuilder(ws).build_system_prompt()
 
 
@@ -265,7 +265,7 @@ def test_cli_prompt_command_prints_system_prompt_and_creates_files(capsys, tmp_p
 def test_cli_ask_sends_edited_soul_to_the_model(tmp_path):
     ws = tmp_path / "ws"
     sync_workspace_templates(ws)
-    (ws / "SOUL.md").write_text("I am a terse pirate.")
+    (ws / "SOUL.md").write_text("I am a terse pirate.", encoding="utf-8")
     fake = FakeProvider(["Arr."])
     assert main(["ask", "hi", "-w", str(ws)], provider=fake) == 0
     system = fake.calls[0].messages[0]
