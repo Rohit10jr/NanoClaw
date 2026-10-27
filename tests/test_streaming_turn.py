@@ -304,6 +304,22 @@ async def test_runner_calls_hooks_in_nanobot_order(ws, tmp_path):
     ]
 
 
+async def test_runner_marks_streamed_content_for_hooks(ws, tmp_path):
+    seen = []
+
+    class Spy(AgentHook):
+        def wants_streaming(self):
+            return True
+
+        async def before_execute_tools(self, context):
+            seen.append(context.streamed_content)
+
+    loop, _ = make_loop(ws, tmp_path, [call("a", "Checking."), call("b", call_id="c2"), "Done."])
+    await loop.process_direct("go", hooks=[Spy()])
+    # Text streamed before the first call; the second call came with none.
+    assert seen == [True, False]
+
+
 async def test_temporary_turns_skip_extra_hooks(ws, tmp_path):
     calls = []
 
@@ -359,6 +375,20 @@ async def test_compact_command_emits_manual_compaction_events(ws, tmp_path):
     rec = Recorder()
     assert await loop.compact_session(events=rec.sink) == ""
     assert rec.events == []  # nothing to compact: no events (nanobot memory.py:1243)
+
+
+async def test_compact_command_reports_a_failed_archive(ws, tmp_path):
+    loop, _ = make_loop(ws, tmp_path, ["a"])
+    await loop.process_direct("I like tea")
+
+    async def broken_archive(*args, **kwargs):
+        raise RuntimeError("archive broke")
+
+    loop.consolidator.archive_session = broken_archive
+    rec = Recorder()
+    with pytest.raises(RuntimeError, match="archive broke"):
+        await loop.compact_session(events=rec.sink)
+    assert rec.summary() == [("compaction", "started:manual:True"), ("compaction", "failed:manual:True")]
 
 
 async def test_context_pressure_emits_compaction_events(ws, tmp_path):
@@ -461,6 +491,48 @@ async def test_chat_channel_settings_hide_lines(ws, tmp_path):
     text = text_of(out)
     assert "plan" not in text and "echo" not in text
     assert "\nnanoclaw\nDone.\n" in text
+
+
+async def test_chat_prints_an_error_after_partial_streamed_text(ws, tmp_path):
+    """Errors are always printed, even after text streamed; closing the
+    renderer does not print its buffer a second time."""
+    broken = ScriptedStream(
+        content_deltas=["Partial "], response=LLMResponse(content="Error: stream broke", finish_reason="error")
+    )
+    chat, _, out = make_chat(ws, tmp_path, [broken], ["go"])
+    await chat.run()
+    text = text_of(out)
+    assert "Error: stream broke" in text
+    assert text.count("Partial") == 1
+
+
+async def test_chat_hides_complete_reasoning_sentences_when_show_reasoning_is_off(ws, tmp_path):
+    script = [ScriptedStream(content_deltas=["Done."], thinking_deltas=["Plan it. ", "Then act.\n"])]
+    chat, _, out = make_chat(ws, tmp_path, script, ["go"], channels=ChannelsConfig(show_reasoning=False))
+    await chat.run()
+    text = text_of(out)
+    assert "Plan it" not in text and "Then act" not in text
+    assert "\nnanoclaw\nDone.\n" in text
+
+
+async def test_turn_output_honours_send_progress_and_tracks_each_segment():
+    from nanoclaw.cli.stream import StreamRenderer
+    from nanoclaw.cli.terminal import TurnOutput
+
+    buf = io.StringIO()
+    renderer = StreamRenderer(
+        show_spinner=False, console=Console(file=buf, width=100, color_system=None, force_terminal=False)
+    )
+    output = TurnOutput(renderer, ChannelsConfig(send_progress=False))
+    await output.publish(ProgressEvent(content="Thinking aloud"))
+    await output.publish(ProgressEvent(content="read notes.txt", tool_hint=True))
+    assert "Thinking aloud" not in buf.getvalue() and "read notes.txt" in buf.getvalue()
+    await output.publish(StreamDeltaEvent(content="Hi"))
+    await output.publish(StreamEndEvent(resuming=True))
+    assert output.streamed_content
+    # A later segment with no text: the answer is not on screen.
+    await output.publish(StreamEndEvent())
+    assert not output.streamed_content and not output.answer_on_screen("completed")
 
 
 async def test_chat_compact_prints_compaction_events(ws, tmp_path):
@@ -569,3 +641,15 @@ def test_ask_keeps_errors_on_stderr_when_streaming(ws, capsys, monkeypatch):
     assert main(["ask", "go", "-w", str(ws)], provider=provider) == 1
     captured = capsys.readouterr()
     assert captured.out == "" and "Error: bad request" in captured.err
+
+
+def test_ask_hides_tool_hints_when_send_tool_hints_is_off(ws, capsys, tmp_path):
+    import json
+
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({"channels": {"sendToolHints": False}}), encoding="utf-8")
+    provider = FakeProvider([list_dir_call("Checking."), "Done."])
+    assert main(["ask", "go", "-w", str(ws), "-c", str(config)], provider=provider) == 0
+    captured = capsys.readouterr()
+    assert captured.out == "Done.\n"
+    assert "  ↳ Checking.\n" in captured.err and "ls ." not in captured.err
