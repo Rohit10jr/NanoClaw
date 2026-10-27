@@ -171,6 +171,21 @@ def extract_think(text: str) -> tuple[str | None, str]:
     return thinking, strip_think(text)
 
 
+def extract_reasoning(reasoning_content: str | None, content: str | None) -> tuple[str | None, str | None]:
+    """``(reasoning_text, cleaned_content)`` from one model response.
+
+    A dedicated ``reasoning_content`` field wins; otherwise closed inline
+    ``<think>`` blocks in ``content`` are the reasoning. Inline tags are
+    always stripped from the answer. (nanobot utils/helpers.py:297, without
+    Anthropic ``thinking_blocks``, which NanoClaw's provider never returns.)
+    """
+    if reasoning_content:
+        return strip_reasoning_tags(reasoning_content), strip_think(content) if content else content
+    if content:
+        return extract_think(content)
+    return None, content
+
+
 class IncrementalThinkExtractor:
     """Surface inline ``<think>`` reasoning from a growing stream buffer.
 

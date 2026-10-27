@@ -113,6 +113,14 @@ class FakeProvider(LLMProvider):
         for item in items:
             self._script.append(self._entry(item))
 
+    def _chat_replaced(self) -> bool:
+        """Whether ``chat`` is overridden by a subclass or patched on the instance.
+
+        Since layer 13 the runner always streams (nanobot runner.py:1015), so
+        tests that script answers by replacing ``chat`` keep working.
+        """
+        return "chat" in vars(self) or type(self).chat is not FakeProvider.chat
+
     @property
     def stream_calls(self) -> int:
         """How many calls went through ``chat_stream``."""
@@ -168,6 +176,20 @@ class FakeProvider(LLMProvider):
         on_thinking_delta: ContentDeltaCallback | None = None,
         on_tool_call_delta: ToolCallDeltaCallback | None = None,
     ) -> LLMResponse:
+        if self._chat_replaced():
+            # A test replaced ``chat`` (a subclass or an instance attribute):
+            # stream through it, like a provider without native streaming.
+            return await super().chat_stream(
+                messages,
+                tools,
+                model,
+                max_tokens,
+                temperature,
+                tool_choice,
+                on_content_delta,
+                on_thinking_delta,
+                on_tool_call_delta,
+            )
         stream = _as_stream(self._next(messages, tools, model, max_tokens, temperature, streamed=True))
         for text in stream.thinking_deltas:
             if on_thinking_delta:

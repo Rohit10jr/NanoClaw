@@ -312,7 +312,10 @@ async def test_max_iterations_is_warned(tmp_path, ws, logs):
     )
     result = await loop.process_direct("hello there")
     assert result.stop_reason == "max_iterations"
-    assert messages(logs, "INFO") == ["Processing message from cli:user: hello there"]
+    # The progress hook logs each tool call, as nanobot's does (progress_hook.py:151).
+    assert messages(logs, "INFO") == ["Processing message from cli:user: hello there"] + [
+        'Tool call: echo({"text": "x"})'
+    ] * 2
     assert messages(logs, "WARNING") == ["Max iterations (2) reached"]
 
 

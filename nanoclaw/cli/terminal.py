@@ -4,6 +4,11 @@ Mirrors the classic chat of nanobot/cli/terminal.py and nanobot/cli/stream.py:
 a prompt_toolkit prompt with saved input history, rich for Markdown replies,
 dim "↳" progress lines, and a "thinking" spinner. The spinner and nanobot's
 streaming renderer and reasoning display are in nanoclaw/cli/stream.py.
+
+Since layer 13 a chat turn's events (stream deltas and ends, progress, tool
+hints, reasoning, retry waits, compaction) are drawn by :class:`TurnOutput`,
+nanobot's ``_consume_outbound`` + ``_maybe_print_interactive_progress``
+(cli/agent.py:310-347, terminal.py:366-410).
 """
 
 from __future__ import annotations
@@ -11,10 +16,10 @@ from __future__ import annotations
 import os
 import select
 import sys
-from collections.abc import Callable
-from contextlib import nullcontext, suppress
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager, nullcontext, redirect_stdout, suppress
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from rich.console import Console
 from rich.markdown import Markdown
@@ -22,7 +27,17 @@ from rich.text import Text
 
 # The spinner, the escaped progress-line markup and the bot name live with the
 # streaming renderer (as in nanobot cli/stream.py); re-exported from here.
-from nanoclaw.cli.stream import BOT_NAME, ThinkingSpinner, progress_line_markup
+from nanoclaw.bus.outbound_events import (
+    ProgressEvent,
+    StreamDeltaEvent,
+    StreamEndEvent,
+    _event_content,
+)
+from nanoclaw.cli.stream import BOT_NAME, StreamRenderer, ThinkingSpinner, progress_line_markup
+from nanoclaw.events import AgentEvent, ContextCompactionEvent, EventSink, RetryWaitEvent
+
+if TYPE_CHECKING:
+    from nanoclaw.config import ChannelsConfig
 
 # nanobot terminal.py:51
 EXIT_COMMANDS = {"exit", "quit", "/exit", "/quit", ":q"}
@@ -64,10 +79,16 @@ def print_agent_response(
     *,
     render_markdown: bool,
     render_as_text: bool = False,
+    show_header: bool = True,
 ) -> None:
-    """A reply under the bot's name, with a blank line before and after. (nanobot ``_print_agent_response``)"""
-    console.print()
-    console.print(f"[cyan]{BOT_NAME}[/cyan]")
+    """A reply under the bot's name, with a blank line before and after.
+
+    ``show_header=False`` when a stream renderer already printed the name
+    this turn. (nanobot ``_print_agent_response``, terminal.py:216)
+    """
+    if show_header:
+        console.print()
+        console.print(f"[cyan]{BOT_NAME}[/cyan]")
     console.print(response_renderable(response or "", render_markdown, render_as_text=render_as_text))
     console.print()
 
@@ -78,6 +99,81 @@ def print_progress_line(console: Console, text: str, spinner: ThinkingSpinner | 
         return
     with spinner.pause() if spinner else nullcontext():
         console.print(progress_line_markup(text))
+
+
+def progress_event_text(event: AgentEvent) -> str | None:
+    """The progress line for a retry wait or compaction event, else None.
+
+    nanobot prints both as "↳" lines (terminal.py:372-377), with the text of
+    ``outbound_message_for_event`` (bus/outbound_events.py:149).
+    """
+    if isinstance(event, ContextCompactionEvent | RetryWaitEvent):
+        return _event_content(event)
+    return None
+
+
+class TurnOutput:
+    """Draws one chat turn's events with a :class:`StreamRenderer`.
+
+    Stream deltas and ends go to the renderer; progress, tool hints,
+    reasoning, retry waits and compaction become its "↳"/"✻" lines, filtered
+    by ``channels`` as nanobot's CLI does (cli/agent.py:310-347,
+    terminal.py:366-410, ``sendProgress`` / ``sendToolHints`` /
+    ``showReasoning``). ``streamed_content`` says whether the last stream
+    segment had text, so the final answer is already on screen (nanobot
+    loop.py:1945-1961 ``track_output``, which decides ``StreamedResponseEvent``).
+    """
+
+    def __init__(self, renderer: StreamRenderer, channels: ChannelsConfig | None = None) -> None:
+        self.renderer = renderer
+        self.channels = channels
+        self.streamed_content = False
+        self._segment_streamed = False
+
+    @property
+    def events(self) -> EventSink:
+        return EventSink(self.publish)
+
+    async def publish(self, event: AgentEvent) -> None:
+        renderer, channels = self.renderer, self.channels
+        if isinstance(event, StreamDeltaEvent):
+            if event.content:
+                self._segment_streamed = True
+            await renderer.on_delta(event.content)
+            return
+        if isinstance(event, StreamEndEvent):
+            self.streamed_content, self._segment_streamed = self._segment_streamed, False
+            await renderer.on_end(resuming=event.resuming)
+            return
+        if (text := progress_event_text(event)) is not None:
+            renderer.print_progress_line(text)
+            return
+        if not isinstance(event, ProgressEvent):
+            return
+        if event.reasoning_end:
+            if channels and not channels.show_reasoning:
+                renderer.clear_reasoning()
+            else:
+                renderer.on_reasoning_end()
+            return
+        if event.reasoning or event.reasoning_delta:
+            if channels and not channels.show_reasoning:
+                renderer.clear_reasoning()
+            else:
+                renderer.on_reasoning_delta(event.content)
+            return
+        if channels and event.tool_hint and not channels.send_tool_hints:
+            return
+        if channels and not event.tool_hint and not channels.send_progress:
+            return
+        renderer.print_progress_line(event.content)
+
+    def answer_on_screen(self, stop_reason: str) -> bool:
+        """Whether the final answer was streamed, so it must not be printed again.
+
+        (nanobot loop.py:2064 ``_assemble_outbound``: errors are always sent.)
+        """
+        return self.streamed_content and stop_reason != "error"
 
 
 def build_key_bindings() -> Any:
@@ -196,11 +292,22 @@ class PromptInput:
             raise KeyboardInterrupt from exc
 
 
-async def print_above_prompt(write: Callable[[], None]) -> None:
-    """Run ``write`` so its output appears above a waiting prompt. (nanobot ``run_in_terminal``)"""
-    from prompt_toolkit.application import run_in_terminal
+@asynccontextmanager
+async def prompt_suspended() -> AsyncIterator[None]:
+    """Hide a waiting prompt while the body writes to the terminal, then redraw it.
 
-    await run_in_terminal(write)
+    For a background subagent's follow-up turn, which streams while the
+    prompt waits. prompt_toolkit's ``in_terminal`` suspends the prompt; stdout
+    is pointed at the real terminal meanwhile, because ``patch_stdout``'s
+    proxy would hold every write until the suspension ends and escape the
+    renderer's cursor codes. (nanobot streams these into the previous turn's
+    renderer through that proxy, cli/agent.py:312-321.)
+    """
+    from prompt_toolkit.application import in_terminal
+
+    async with in_terminal():
+        with redirect_stdout(sys.__stdout__) if sys.__stdout__ is not None else nullcontext():
+            yield
 
 
 def stdin_is_interactive() -> bool:

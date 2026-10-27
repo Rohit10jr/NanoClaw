@@ -13,6 +13,12 @@ Since layer 8 the main agent has the ``spawn`` tool. A background subagent's
 report becomes a follow-up turn (``process_subagent_result``): saved as an
 assistant message and shown to the model as new input, so the main agent can
 tell the user about it.
+
+Since layer 13 each turn builds nanobot's hook chain (``build_agent_turn_hook``)
+over an :class:`EventSink` from the caller: progress, tool hints, reasoning,
+stream deltas and ends, retry waits and context compaction all arrive there
+as events. ``on_progress`` / ``on_stream`` / ``on_stream_end`` callbacks are
+adapted into that sink (nanobot ``output_events``).
 """
 
 from __future__ import annotations
@@ -20,6 +26,8 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import time
+import uuid
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -28,6 +36,7 @@ from loguru import logger
 
 from nanoclaw.agent.context import ContextBuilder
 from nanoclaw.agent.context_governance import merge_adjacent_user_messages_for_model
+from nanoclaw.agent.hook import AgentHook
 from nanoclaw.agent.memory import COMPACTION_NANOBOT, Consolidator, MemoryStore
 from nanoclaw.agent.messages import EMPTY_FINAL_RESPONSE_MESSAGE, is_blank
 from nanoclaw.agent.runner import AgentRunner, AgentRunResult, AgentRunSpec, ProgressCallback
@@ -40,6 +49,9 @@ from nanoclaw.agent.subagent import (
 from nanoclaw.agent.tools import ToolRegistry, build_default_tools
 from nanoclaw.agent.tools.context import RequestContext, bind_request_context, reset_request_context
 from nanoclaw.agent.tools.spawn import SpawnTool
+from nanoclaw.agent.turn_hooks import AgentTurnHookSpec, build_agent_turn_hook
+from nanoclaw.bus.outbound_events import StreamDeltaEvent, StreamEndEvent
+from nanoclaw.events import NO_EVENTS, ContextCompactionEvent, EventSink
 from nanoclaw.providers import LLMProvider
 from nanoclaw.runtime_context import (
     RUNTIME_CONTEXT_HISTORY_META,
@@ -54,6 +66,7 @@ from nanoclaw.session import Session, SessionManager
 from nanoclaw.session.recovery import PENDING_USER_TURN_KEY, restore_pending_interruption
 from nanoclaw.session.summary import SessionSummary, session_summary_from_metadata
 from nanoclaw.utils.llm_runtime import LLMRuntime
+from nanoclaw.utils.progress_events import output_events
 from nanoclaw.utils.tokens import estimate_prompt_tokens
 
 DREAM_NO_INPUT_MESSAGE = "\n".join([
@@ -162,37 +175,70 @@ class AgentLoop:
         ephemeral: bool = False,
         tools: ToolRegistry | None = None,
         on_progress: ProgressCallback | None = None,
+        on_stream: Callable[[str], Awaitable[None]] | None = None,
+        on_stream_end: Callable[..., Awaitable[None]] | None = None,
+        events: EventSink = NO_EVENTS,
+        streaming: bool = False,
+        hooks: list[AgentHook] | None = None,
     ) -> AgentRunResult:
         """Run one turn in the session and return the result.
 
         Turns in the same session run one at a time. An ``ephemeral`` turn
         starts from an empty session and saves nothing (used by Dream); ``tools``
-        replaces the default tool set for this turn. ``on_progress`` receives
-        the model's text and tool hints while the turn works (nanobot ``on_progress``).
+        replaces the default tool set for this turn.
+
+        Output while the turn works goes to ``events`` (NanoClaw has no bus;
+        it stands in for nanobot's turn delivery sink). ``on_progress``
+        (the model's text and tool hints), ``on_stream`` and ``on_stream_end``
+        are nanobot's ``process_direct`` callbacks, adapted with
+        ``output_events``. The answer streams when ``on_stream`` is given or
+        ``streaming`` is set (nanobot loop.py:1931). ``hooks`` are extra hooks
+        for this turn only.
         """
         result = await self._process_turn(
-            content, session_key, channel, ephemeral=ephemeral, tools=tools, on_progress=on_progress
+            content,
+            session_key,
+            channel,
+            ephemeral=ephemeral,
+            tools=tools,
+            events=output_events(
+                default=events, on_progress=on_progress, on_stream=on_stream, on_stream_end=on_stream_end
+            ),
+            streaming=streaming or on_stream is not None,
+            hooks=hooks,
         )
         if is_blank(result.final_content):
             result = dataclasses.replace(result, final_content=EMPTY_FINAL_RESPONSE_MESSAGE)
         return result
 
     async def process_subagent_result(
-        self, report: SubagentResult, *, on_progress: ProgressCallback | None = None
+        self,
+        report: SubagentResult,
+        *,
+        on_progress: ProgressCallback | None = None,
+        on_stream: Callable[[str], Awaitable[None]] | None = None,
+        on_stream_end: Callable[..., Awaitable[None]] | None = None,
+        events: EventSink = NO_EVENTS,
+        streaming: bool = False,
     ) -> AgentRunResult:
         """Let the main agent react to a finished background subagent.
 
         Mirrors nanobot's system turn for a subagent result (``_build_turn``
         with ``is_subagent``): the report is saved as an assistant message
         (once per task) and given to the model as new input, without the time
-        block. The model's reply is what the user sees.
+        block. The model's reply is what the user sees. Output arguments as
+        in :meth:`process_direct` (nanobot delivers these turns through the
+        same turn delivery as user turns).
         """
         return await self._process_turn(
             report.content,
             report.session_key or DEFAULT_SESSION_KEY,
             report.channel,
             subagent=report,
-            on_progress=on_progress,
+            events=output_events(
+                default=events, on_progress=on_progress, on_stream=on_stream, on_stream_end=on_stream_end
+            ),
+            streaming=streaming or on_stream is not None,
         )
 
     async def next_subagent_result(self) -> SubagentResult | None:
@@ -222,7 +268,9 @@ class AgentLoop:
         ephemeral: bool = False,
         tools: ToolRegistry | None = None,
         subagent: SubagentResult | None = None,
-        on_progress: ProgressCallback | None = None,
+        events: EventSink = NO_EVENTS,
+        streaming: bool = False,
+        hooks: list[AgentHook] | None = None,
     ) -> AgentRunResult:
         tools = tools if tools is not None else self.tools
         # Children follow the loop's current iteration limit (nanobot
@@ -273,11 +321,25 @@ class AgentLoop:
             )
             # Temporary turns are checked too, but never journal or save a summary.
             messages, checkpoint = await self._compact_if_needed(
-                session, messages, history, summary, content, channel, blocks, tools, persist=not ephemeral
+                session, messages, history, summary, content, channel, blocks, tools,
+                persist=not ephemeral, events=events,
             )
 
             # Run. Tools such as spawn read the turn's session and model settings.
             token = bind_request_context(RequestContext(channel=channel, session_key=session.key, runtime=self.runtime))
+            # nanobot loop.py:1310-1328: the progress hook first, then this
+            # turn's hooks; temporary turns get the progress hook only.
+            hook = build_agent_turn_hook(
+                AgentTurnHookSpec(
+                    events=events,
+                    streaming=streaming,
+                    channel=channel,
+                    session_key=session.key,
+                    workspace=self.workspace,
+                    turn_hooks=list(hooks or []),
+                    ephemeral=ephemeral,
+                )
+            )
             try:
                 result = await self.runner.run(
                     AgentRunSpec(
@@ -292,14 +354,20 @@ class AgentLoop:
                         max_tokens=self.max_tokens,
                         temperature=self.temperature,
                         session_key=session.key,
-                        on_progress=on_progress,
                         provider_retry_mode=self.provider_retry_mode,
+                        hook=hook,
+                        events=events,
                     )
                 )
             finally:
                 reset_request_context(token)
             if result.stop_reason == "max_iterations":
                 logger.warning("Max iterations ({}) reached", self.max_iterations)
+                # Push the final text through the stream so streaming outputs
+                # show it (nanobot loop.py:1386-1402; without goals it always streams).
+                if events.publish is not None and streaming:
+                    await events.publish(StreamDeltaEvent(content=result.final_content or ""))
+                    await events.publish(StreamEndEvent())
             elif result.stop_reason == "error":
                 logger.error("LLM returned error: {}", (result.final_content or "")[:200])
 
@@ -340,6 +408,7 @@ class AgentLoop:
         tools: ToolRegistry,
         *,
         persist: bool = True,
+        events: EventSink = NO_EVENTS,
     ) -> tuple[list[dict[str, Any]], str | None]:
         """Summarize the history if the request doesn't fit the context window.
 
@@ -350,6 +419,10 @@ class AgentLoop:
         summary in the system prompt, and the new message is kept. nanobot
         checks before every request of a turn; NanoClaw only before the first
         (see docs/notes/06-memory.md).
+
+        Publishes :class:`ContextCompactionEvent` (reason ``context_pressure``)
+        started, then succeeded, failed or cancelled (nanobot
+        context_governance.py:634-714).
         """
         if not self.context_window_tokens:
             return messages, None
@@ -359,26 +432,34 @@ class AgentLoop:
         if budget > 0 and measured < budget:
             return messages, None
 
-        accepted = merge_adjacent_user_messages_for_model(messages[: 1 + len(history)])
-        new_summary = await self.consolidator.summarize_transcript(
-            accepted,
-            summary["text"] if summary else None,
-            runtime=self.runtime,
-            session_key=session.key,
-            tools=definitions,
-            persist=persist,
-        )
-        if not new_summary:
-            raise ContextWindowExceededError(
-                session_key=session.key, estimated_tokens=measured, input_budget=budget, source=source
+        compaction_id = uuid.uuid4().hex
+        await events.emit(ContextCompactionEvent(compaction_id, "started", reason="context_pressure"))
+        try:
+            accepted = merge_adjacent_user_messages_for_model(messages[: 1 + len(history)])
+            new_summary = await self.consolidator.summarize_transcript(
+                accepted,
+                summary["text"] if summary else None,
+                runtime=self.runtime,
+                session_key=session.key,
+                tools=definitions,
+                persist=persist,
             )
-        compacted = self.context.build_messages(
-            [],
-            content,
-            channel=channel,
-            runtime_context_blocks=blocks,
-            session_summary={"text": new_summary, "last_active": datetime.now().astimezone().isoformat()},
-        )
+            if not new_summary:
+                raise ContextWindowExceededError(
+                    session_key=session.key, estimated_tokens=measured, input_budget=budget, source=source
+                )
+            compacted = self.context.build_messages(
+                [],
+                content,
+                channel=channel,
+                runtime_context_blocks=blocks,
+                session_summary={"text": new_summary, "last_active": datetime.now().astimezone().isoformat()},
+            )
+        except (Exception, asyncio.CancelledError) as exc:
+            phase = "cancelled" if isinstance(exc, asyncio.CancelledError) else "failed"
+            await events.emit(ContextCompactionEvent(compaction_id, phase, reason="context_pressure"))
+            raise
+        await events.emit(ContextCompactionEvent(compaction_id, "succeeded", reason="context_pressure"))
         measured, source = estimate_prompt_tokens(merge_adjacent_user_messages_for_model(compacted), definitions)
         if budget <= 0 or measured >= budget:
             raise ContextWindowExceededError(
@@ -412,13 +493,17 @@ class AgentLoop:
         self.sessions.save(session)
         self.sessions.invalidate(session_key)
 
-    async def compact_session(self, session_key: str = "cli:direct") -> str | None:
+    async def compact_session(self, session_key: str = "cli:direct", *, events: EventSink = NO_EVENTS) -> str | None:
         """Summarize the whole conversation now (nanobot's ``/compact`` command).
 
         Returns the summary, ``""`` if there was nothing new, ``None`` on failure.
+        Compaction events go to ``events`` with ``notify=True`` and reason
+        ``manual`` (nanobot command/builtin.py:358-365).
         """
         async with self._get_session_lock(session_key):
-            return await self.consolidator.compact_idle_session(session_key, runtime=self.runtime)
+            return await self.consolidator.compact_idle_session(
+                session_key, runtime=self.runtime, events=events, notify=True, reason="manual"
+            )
 
     async def run_dream(self) -> str:
         """Let Dream fold new journal entries into the memory files (nanobot ``/dream``).
