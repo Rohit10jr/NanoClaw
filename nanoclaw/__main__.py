@@ -63,8 +63,11 @@ def _make_loop(
     provider: LLMProvider, workspace: Path, *, restrict: bool = False, config: Config | None = None
 ) -> AgentLoop:
     """The agent loop with the configured settings (nanobot builds it from
-    ``agents.defaults``, cli/agent.py). ``restrict`` (``--restrict``) can only
-    turn the workspace restriction on."""
+    ``agents.defaults``, cli/agent.py) and ``tools.exec``. ``restrict``
+    (``--restrict``) can only turn the workspace restriction on.
+
+    The caller closes the loop (``aclose``) when done, which also ends the
+    exec sessions it started (nanobot ``agent -m``'s ``_close_runtime``)."""
     config = config or _runtime_config()
     defaults = config.agents.defaults
     return AgentLoop(
@@ -79,6 +82,7 @@ def _make_loop(
         restrict_to_workspace=restrict or config.tools.restrict_to_workspace,
         compaction=defaults.compaction,
         provider_retry_mode=defaults.provider_retry_mode,
+        exec_config=config.tools.exec,
     )
 
 

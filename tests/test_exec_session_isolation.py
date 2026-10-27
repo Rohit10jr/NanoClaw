@@ -1,9 +1,9 @@
 """Adapted from nanobot tests/agent/test_exec_session_isolation.py (c4dac64).
 
 nanobot checks that two AgentLoops each own an ExecSessionManager shared by
-their exec, exec_session and list_exec_sessions tools. Until the loop wiring
-(task 16.3) gives each loop its own manager, the same property is checked one
-level down, on ``build_default_tools``.
+their exec, exec_session and list_exec_sessions tools. That loop-level test
+is in test_exec_session_wiring.py (task 16.3); here the same property is
+checked one level down, on ``build_default_tools``.
 """
 
 from nanoclaw.agent.tools import build_default_tools

@@ -16,8 +16,9 @@ Two ways in:
   to end waits for the session's running subagents so their reports fold in
   (``_wait_for_pending``). Output, stream events and the final reply go back
   on the bus through a :class:`TurnDelivery`. ``cancel_active_tasks`` (``/stop``)
-  cancels a session's worker and subagents; the cancelled turn keeps its
-  latest checkpoint (finished tool results) in the history.
+  cancels a session's worker and subagents and ends its exec sessions; the
+  cancelled turn keeps its latest checkpoint (finished tool results) in the
+  history.
 
 Since layer 6 a turn also compacts the conversation when it no longer fits the
 model's context window, and the loop runs nanobot's ``/compact``, ``/new``
@@ -73,6 +74,7 @@ from nanoclaw.agent.subagent import (
     is_subagent_report,
 )
 from nanoclaw.agent.tools import ToolRegistry, build_default_tools
+from nanoclaw.agent.tools.exec_session import ExecSessionManager
 from nanoclaw.agent.tools.context import RequestContext, bind_request_context, reset_request_context
 from nanoclaw.agent.tools.spawn import SpawnTool
 from nanoclaw.agent.turn_delivery import TurnDelivery, TurnDeliveryFactory
@@ -81,6 +83,7 @@ from nanoclaw.bus.events import InboundMessage, OutboundMessage
 from nanoclaw.bus.outbound_events import StreamDeltaEvent, StreamedResponseEvent, StreamEndEvent
 from nanoclaw.bus.queue import MessageBus
 from nanoclaw.command import CommandContext, CommandRouter, command_text, register_builtin_commands
+from nanoclaw.config.schema import ExecToolConfig
 from nanoclaw.events import NO_EVENTS, AgentEvent, EventSink
 from nanoclaw.providers import LLMProvider
 from nanoclaw.runtime_context import (
@@ -178,6 +181,7 @@ class AgentLoop:
         restrict_to_workspace: bool = False,
         compaction: str = COMPACTION_NANOBOT,
         provider_retry_mode: str = "standard",
+        exec_config: ExecToolConfig | None = None,
     ) -> None:
         self.provider = provider
         # For the main agent's model calls only; subagents and memory archiving
@@ -194,6 +198,12 @@ class AgentLoop:
         self.bus = bus if bus is not None else MessageBus()
         self.context = ContextBuilder(workspace)
         self.memory: MemoryStore = self.context.memory
+        # ``config.tools.exec`` (nanobot ``self.exec_config``, loop.py:375).
+        self.exec_config = exec_config if exec_config is not None else ExecToolConfig()
+        # This loop's background shell sessions, shared by its exec tools
+        # (nanobot loop.py:397): /stop and /new end the session's ones,
+        # ``aclose`` ends all.
+        self._exec_session_manager = ExecSessionManager()
         self.subagents = SubagentManager(
             workspace,
             max_tool_result_chars=max_tool_result_chars,
@@ -201,11 +211,17 @@ class AgentLoop:
             max_concurrent_subagents=max_concurrent_subagents,
             restrict_to_workspace=restrict_to_workspace,
             bus=self.bus,
+            exec_config=self.exec_config,
         )
         if tools is None:
             # The main agent's tools: the standard set plus spawn. Subagents and
             # Dream build their own sets without it.
-            tools = build_default_tools(workspace, restrict_to_workspace=restrict_to_workspace)
+            tools = build_default_tools(
+                workspace,
+                restrict_to_workspace=restrict_to_workspace,
+                exec_session_manager=self._exec_session_manager,
+                exec_config=self.exec_config,
+            )
             tools.register(SpawnTool(self.subagents))
             logger.info("Registered {} tools: {}", len(tools.tool_names), tools.tool_names)
         self.tools = tools
@@ -538,7 +554,8 @@ class AgentLoop:
             await asyncio.gather(*tuple(self._background_tasks), return_exceptions=True)
 
     async def cancel_active_tasks(self, key: str) -> int:
-        """Cancel and await the session's worker and subagents; returns how many.
+        """Cancel and await the session's worker, subagents and exec sessions;
+        returns how many.
 
         nanobot ``_cancel_active_tasks`` (loop.py:948). One difference: a
         command running on the session's own worker (/new on an idle session)
@@ -561,10 +578,32 @@ class AgentLoop:
             # A worker cancelled before its first step never ran its cleanup.
             self._pending_queues.pop(key, None)
             await self._cancel_pending_messages(key, pending)
-        return cancelled + await self.subagents.cancel_by_session(key)
+        sub_cancelled = await self.subagents.cancel_by_session(key)
+        exec_cancelled = await self._exec_session_manager.terminate_by_owner(key)
+        return cancelled + sub_cancelled + exec_cancelled
+
+    def _has_pending_work(self) -> bool:
+        """Whether the loop still owns work. (nanobot loop.py:1526)
+
+        nanobot reads it only to pause intake for an update
+        (``maintenance``, used by update_stop.py); NanoClaw has no updater,
+        so nothing reads it outside tests. A finished exec session whose
+        output was not read yet counts as work, as in nanobot.
+        """
+        return bool(
+            self.bus.inbound_size
+            or self._pending_queues
+            or self.bus.has_pending_events
+            or self._active_tasks
+            or self._background_tasks
+            or (self._close_lock is not None and self._close_lock.locked())
+            or self.subagents.has_pending_work
+            or self._exec_session_manager.has_pending_work
+        )
 
     async def aclose(self) -> None:
-        """Cancel session workers, background work and subagents. (nanobot loop.py:1771)"""
+        """Cancel session workers, background work and subagents, then end
+        every exec session. (nanobot loop.py:1771)"""
         if self._close_lock is None:
             self._close_lock = asyncio.Lock()
         async with self._close_lock:
@@ -589,7 +628,17 @@ class AgentLoop:
                     await asyncio.gather(*tuple(self._background_tasks), return_exceptions=True)
             finally:
                 self._background_tasks.clear()
-                await self.subagents.close()
+                # Each step runs even when one before it fails (nanobot loop.py:1817).
+                errors: list[BaseException] = []
+                for cleanup in (self.subagents.close, self._exec_session_manager.close_all):
+                    try:
+                        await cleanup()
+                    except BaseException as exc:
+                        errors.append(exc)
+                if len(errors) == 1:
+                    raise errors[0]
+                if errors:
+                    raise BaseExceptionGroup("failed to close agent resources", errors)
 
     async def close(self) -> None:
         """Same as :meth:`aclose` (NanoClaw's older name)."""

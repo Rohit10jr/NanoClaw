@@ -378,7 +378,7 @@ async def test_unfinished_child_report_is_marked_partial(ws):
 async def test_child_exception_is_reported(ws, monkeypatch):
     manager = SubagentManager(ws)
 
-    def boom():
+    def boom(**_kwargs):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(manager, "_build_tools", boom)

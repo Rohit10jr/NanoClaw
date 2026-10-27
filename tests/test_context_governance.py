@@ -526,7 +526,7 @@ async def test_subagents_compact_their_own_runs_without_journaling(ws, tmp_path)
     loop = make_loop(ws, tmp_path)
     manager = loop.subagents
     assert manager.consolidator is loop.consolidator
-    manager._build_tools = lambda: registry(Fetch(size=3000))
+    manager._build_tools = lambda *_a, **_k: registry(Fetch(size=3000))
     script = [fetch_call("c1"), fetch_call("c2"), "child done"]
     probe = FakeProvider(list(script))
     await manager.run_inline("task", runtime=LLMRuntime(probe, "m", 100, 0.1, context_window_tokens=0))
