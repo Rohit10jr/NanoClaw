@@ -264,9 +264,9 @@ class WriteFileTool(_FsTool):
     @property
     def description(self) -> str:
         return (
-            "Create a new file or intentionally replace an entire file with "
-            "the provided content. Overwrites existing files and creates parent "
-            "directories as needed. For partial edits, prefer edit_file."
+            "Create a file or replace an entire file. "
+            "Overwrites existing files and creates parent directories. "
+            "Prefer apply_patch for partial edits."
         )
 
     @property
@@ -409,6 +409,16 @@ class _MatchSpan:
     line: int
 
 
+def _match_end_line(match: _MatchSpan) -> int:
+    """Last line the match covers; a trailing newline doesn't reach the next line."""
+    comparable = match.text[:-1] if match.text.endswith("\n") else match.text
+    return match.line + comparable.count("\n")
+
+
+def _match_covers_line(match: _MatchSpan, line: int) -> bool:
+    return match.line <= line <= _match_end_line(match)
+
+
 def _find_exact_matches(content: str, old_text: str) -> list[_MatchSpan]:
     matches: list[_MatchSpan] = []
     start = 0
@@ -537,8 +547,8 @@ class EditFileTool(_FsTool):
     def description(self) -> str:
         return (
             "Perform a small, exact replacement in one file. "
-            "Copy old_text from read_file. occurrence and replace_all=true are mutually exclusive. "
-            "With old_text empty, creates a new file."
+            "Prefer apply_patch for multi-file, structural, or generated edits. "
+            "occurrence, line_hint, and replace_all=true are mutually exclusive."
         )
 
     @property
@@ -556,6 +566,19 @@ class EditFileTool(_FsTool):
                 "description": "Optional 1-based occurrence to replace when old_text appears multiple times.",
                 "minimum": 1,
             },
+            line_hint={
+                "type": ["integer", "null"],
+                "description": (
+                    "Optional exact 1-based target line copied from read_file. "
+                    "The selected old_text match must cover this line."
+                ),
+                "minimum": 1,
+            },
+            expected_replacements={
+                "type": ["integer", "null"],
+                "description": "Optional guard for the number of replacements that must be made.",
+                "minimum": 1,
+            },
             required=["path", "old_text", "new_text"],
         )
 
@@ -571,6 +594,8 @@ class EditFileTool(_FsTool):
         new_text: str | None = None,
         replace_all: bool = False,
         occurrence: int | None = None,
+        line_hint: int | None = None,
+        expected_replacements: int | None = None,
         **kwargs: Any,
     ) -> str:
         try:
@@ -580,6 +605,14 @@ class EditFileTool(_FsTool):
                 raise ValueError("Unknown old_text")
             if new_text is None:
                 raise ValueError("Unknown new_text")
+            # Schema validation already enforces minimum 1; direct callers get
+            # nanobot's messages (filesystem.py:933).
+            if occurrence is not None and occurrence < 1:
+                return ToolResult.error("Error: occurrence must be >= 1.")
+            if line_hint is not None and line_hint < 1:
+                return ToolResult.error("Error: line_hint must be >= 1.")
+            if expected_replacements is not None and expected_replacements < 1:
+                return ToolResult.error("Error: expected_replacements must be >= 1.")
             fp = self._resolve_write(path)
             file_exists = fp.exists()
             if file_exists and old_text == new_text:
@@ -615,11 +648,15 @@ class EditFileTool(_FsTool):
             count = len(matches)
             if replace_all and occurrence is not None:
                 return ToolResult.error("Error: occurrence cannot be used with replace_all=true.")
+            if replace_all and line_hint is not None:
+                return ToolResult.error("Error: line_hint cannot be used with replace_all=true.")
+            if occurrence is not None and line_hint is not None:
+                return ToolResult.error("Error: line_hint cannot be used with occurrence.")
             if occurrence is not None and occurrence > count:
                 return ToolResult.error(
                     f"Error: occurrence {occurrence} is out of range; old_text appears {count} time(s)."
                 )
-            if count > 1 and not replace_all and occurrence is None:
+            if count > 1 and not replace_all and occurrence is None and line_hint is None:
                 lines = [m.line for m in matches]
                 preview = ", ".join(f"line {n}" for n in lines[:3]) + (", ..." if len(lines) > 3 else "")
                 # A warning, not an error, exactly as in nanobot: nothing is changed.
@@ -635,8 +672,28 @@ class EditFileTool(_FsTool):
                 selected = matches
             elif occurrence is not None:
                 selected = [matches[occurrence - 1]]
+            elif line_hint is not None:
+                # The chosen match must cover the hinted line (nanobot filesystem.py:1010).
+                candidates = [m for m in matches if _match_covers_line(m, line_hint)]
+                if not candidates:
+                    locations = ", ".join(f"line {m.line}" for m in matches[:3]) + (", ..." if len(matches) > 3 else "")
+                    return ToolResult.error(
+                        f"Error: line_hint {line_hint} does not match the old_text location. "
+                        f"old_text appears at {locations}. Re-read the intended region and "
+                        "copy old_text that covers the target line."
+                    )
+                if len(candidates) > 1:
+                    return ToolResult.error(
+                        f"Error: line_hint {line_hint} is ambiguous; "
+                        f"old_text appears {len(candidates)} times on that line."
+                    )
+                selected = candidates
             else:
                 selected = [matches[0]]
+            if expected_replacements is not None and len(selected) != expected_replacements:
+                return ToolResult.error(
+                    f"Error: expected {expected_replacements} replacements but would make {len(selected)}."
+                )
 
             new_content = content
             for match in reversed(selected):
@@ -729,9 +786,8 @@ class ListDirTool(_FsTool):
     @property
     def description(self) -> str:
         return (
-            "List the contents of a directory. "
-            "Set recursive=true to explore nested structure. "
-            "Common noise directories (.git, node_modules, __pycache__, etc.) are auto-ignored."
+            "List directory contents, skipping common noise directories "
+            "(.git, node_modules, __pycache__, etc.)."
         )
 
     @property

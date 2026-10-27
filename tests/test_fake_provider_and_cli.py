@@ -56,7 +56,7 @@ def test_cli_ask_gives_the_model_the_default_tools_in_the_workspace(capsys, tmp_
 
     names = sorted(d["function"]["name"] for d in fake.calls[0].tools)
     expected = [
-        "edit_file", "exec", "exec_session", "list_dir", "list_exec_sessions",
+        "apply_patch", "edit_file", "exec", "exec_session", "list_dir", "list_exec_sessions",
         "read_file", "spawn", "web_fetch", "web_search", "write_file",
     ]
     if shutil.which("rg"):  # rg is registered only when ripgrep is installed

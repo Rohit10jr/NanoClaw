@@ -150,7 +150,8 @@ out, so it fits.
    `memory/MEMORY.md`, how to treat the `[permanent]`/`[ephemeral]`/... marks,
    what to drop.
 3. Dream has restricted tools: `read_file` inside the workspace, and
-   `edit_file`/`write_file` for those three files only.
+   `edit_file`/`write_file` for those three files only *(since layer 7 also
+   `skills/`; since layer 17 also `apply_patch`, with the same limits)*.
 4. If the run completed, the cursor moves past the entries; otherwise they are
    read again next time. Old journal entries beyond 1,000 are dropped, but
    never ones Dream hasn't read.
@@ -212,7 +213,7 @@ the next baseline.
 | 2 | **Context window default** | 200,000 | 128,000, set with `NANOCLAW_CONTEXT_WINDOW` | Our default model `gpt-4o-mini` has 128,000; with 200,000 requests would fail before compaction started. Chosen with the user | — |
 | 3 | `/new` archiving | In the background; the reply comes first | Waits for it (one extra model call before the turn) | The CLI exits after the command, which would kill a background task | — |
 | 4 | Where the summary is stored when a turn compacts | Committed when the turn is saved | Same, but the compaction runs before the runner rather than inside it | Same saved result (checked) | *(Layer 15: the compaction runs inside the runner, as in nanobot; the summary comes back as a `SessionSummaryCheckpoint` and `_save_turn` commits it at its transcript boundary, also between two of the turn's messages)* |
-| 5 | Dream's tools | `read_file`, `edit_file`, `write_file`, `apply_patch`; may also write under `skills/` | `read_file`, `edit_file`, `write_file`; only `MEMORY.md`, `USER.md`, `SOUL.md`. Error text names the allowed files | No `apply_patch` (layer 3); skills arrive in layer 7. General path restriction is layer 9; here a small wrapper (`_PathGuard`) does the check | Layer 7 (skills), layer 9. *(Layer 9: general restriction added for the normal tools (opt-in); Dream keeps its own guard, as in nanobot.)* *(Layer 7: `skills/` writes, built-in skill reads and nanobot's exact error text added; only `apply_patch` still differs)* |
+| 5 | Dream's tools | `read_file`, `edit_file`, `write_file`, `apply_patch`; may also write under `skills/` | `read_file`, `edit_file`, `write_file`; only `MEMORY.md`, `USER.md`, `SOUL.md`. Error text names the allowed files | No `apply_patch` (layer 3); skills arrive in layer 7. General path restriction is layer 9; here a small wrapper (`_PathGuard`) does the check | Layer 7 (skills), layer 9. *(Layer 9: general restriction added for the normal tools (opt-in); Dream keeps its own guard, as in nanobot.)* *(Layer 7: `skills/` writes, built-in skill reads and nanobot's exact error text added; only `apply_patch` still differs)* *(Layer 17: `apply_patch` added; each edit's path goes through the same write guard, so the tool set and refusals now match nanobot)* |
 | 6 | Dream's instructions | Include a section on creating skills | Same text without the skills section and table row | Skills arrive in layer 7 | Layer 7 *(done: the full nanobot text is used)* |
 | 7 | "No memory changes" in Dream's report | Read from a git diff of the memory files | Compares the three files before and after | No git store (see below) | — |
 | 8 | Token counter loading | Loaded in a background thread; byte counts until ready | Loaded on first use | Simpler; same counts once loaded | — |

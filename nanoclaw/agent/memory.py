@@ -30,6 +30,7 @@ from loguru import logger
 
 from nanoclaw.agent.messages import build_assistant_message, strip_think, truncate_text
 from nanoclaw.agent.tools import Tool, ToolRegistry, ToolResult
+from nanoclaw.agent.tools.apply_patch import ApplyPatchTool
 from nanoclaw.agent.tools.filesystem import EditFileTool, ReadFileTool, WriteFileTool
 from nanoclaw.events import NO_EVENTS, CompactionReason, ContextCompactionEvent, EventSink
 from nanoclaw.runtime_context import public_history_message
@@ -309,7 +310,7 @@ class MemoryStore:
 
         Read: the workspace and the built-in skills. Write: the workspace's
         ``skills/`` folder plus ``MEMORY.md``, ``SOUL.md`` and ``USER.md``.
-        nanobot also gives Dream ``apply_patch``, which NanoClaw doesn't have.
+        ``apply_patch`` checks each edit's path with the same write guard.
         """
         from nanoclaw.agent.skills import BUILTIN_SKILLS_DIR
 
@@ -335,6 +336,7 @@ class MemoryStore:
         tools = ToolRegistry()
         tools.register(_PathGuard(ReadFileTool(workspace), workspace, readable))
         tools.register(_PathGuard(EditFileTool(workspace), workspace, writable))
+        tools.register(ApplyPatchTool(workspace, write_check=writable))
         tools.register(_PathGuard(WriteFileTool(workspace), workspace, writable))
         return tools
 

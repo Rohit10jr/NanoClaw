@@ -39,6 +39,7 @@ def build_default_tools(
     nanobot discovers tools by scanning its tools package (agent/tools/loader.py);
     NanoClaw lists them explicitly.
     """
+    from nanoclaw.agent.tools.apply_patch import ApplyPatchTool
     from nanoclaw.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
     from nanoclaw.agent.tools.exec_session import ExecSessionTool, ListExecSessionsTool
     from nanoclaw.agent.tools.rg import RgTool
@@ -51,6 +52,7 @@ def build_default_tools(
         ReadFileTool(workspace, restrict_to_workspace=restrict_to_workspace),
         WriteFileTool(workspace, restrict_to_workspace=restrict_to_workspace),
         EditFileTool(workspace, restrict_to_workspace=restrict_to_workspace),
+        ApplyPatchTool(workspace, restrict_to_workspace=restrict_to_workspace),
         ListDirTool(workspace, restrict_to_workspace=restrict_to_workspace),
     ]
     if cfg.enable:

@@ -223,7 +223,7 @@ async def test_dream_updates_memory_and_advances_the_cursor(ws, tmp_path):
     first = fake.calls[0]
     assert first.messages[1]["content"].startswith("You are running Dream.")
     assert "- [permanent] likes tea" in first.messages[1]["content"]
-    assert sorted(t["function"]["name"] for t in first.tools) == ["edit_file", "read_file", "write_file"]
+    assert sorted(t["function"]["name"] for t in first.tools) == ["apply_patch", "edit_file", "read_file", "write_file"]
     # Nothing saved for the Dream session; the new memory shows up in the next prompt.
     assert not any(p.name.startswith("ZHJlYW") for p in loop.sessions.sessions_dir.iterdir())
     assert "- likes tea" in loop.context.build_system_prompt()
