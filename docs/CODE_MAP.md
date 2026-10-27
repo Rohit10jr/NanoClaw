@@ -531,7 +531,7 @@ Note: [`notes/10-terminal-chat.md`](notes/10-terminal-chat.md)
 | NanoClaw | nanobot | How it compares |
 |---|---|---|
 | [`format_tool_hints`](../nanoclaw/utils/tool_hints.py#L39), [`abbreviate_path`](../nanoclaw/utils/path.py#L10) | [`utils/tool_hints.py:40`][nb-l10-hints], [`utils/path.py:10`][nb-l10-path] | Copied (2,000 random cases identical) |
-| `AgentRunSpec.on_progress`, [`AgentRunner._report_progress()`](../nanoclaw/agent/runner.py#L192) | [`progress_hook.py:135`][nb-l10-hook] `before_execute_tools` | Same events, without the empty one nanobot sends after tools (not shown by its chat) |
+| `AgentRunSpec.on_progress` (since layer 13 adapted into an `AgentProgressHook`; `_report_progress` removed) | [`progress_hook.py:135`][nb-l10-hook] | See layer 13 |
 | `AgentLoop.process_direct(on_progress=)`, `process_subagent_result(on_progress=)`, `_last_usage`, `start_time` | `process_direct(on_progress=)`, [`loop.py:2217`][nb-l10-usage] | Same |
 | `Session.get_history(include_runtime_context=)` | [`session/manager.py:240`][nb-l10-gethist] | Same option |
 | [`_chat()`](../nanoclaw/__main__.py#L136), [`_print_progress_to_stderr()`](../nanoclaw/__main__.py#L76) | [`cli/agent.py:54`][nb-l10-agent] `agent` | `nanoclaw chat` = classic `nanobot agent`; `ask` = `agent -m` with progress on stderr |

@@ -148,7 +148,7 @@ saved to a file with a preview instead, and `read_file` is never cut. See
 
 | nanobot feature | Where | Why it exists |
 |---|---|---|
-| Hooks (`before_iteration`, `before_execute_tool`, `on_stream`, ...) | `agent/hook.py`, used throughout `_run_core` | Plugins and UIs observe or change each step *(layer 10 added one slice: the `on_progress` callback for progress lines)* |
+| Hooks (`before_iteration`, `before_execute_tool`, `on_stream`, ...) | `agent/hook.py`, used throughout `_run_core` | Plugins and UIs observe or change each step *(layer 10 added one slice: the `on_progress` callback for progress lines)* | *(Done in layer 13.)*
 | Mid-turn injections | `_try_drain_injections` | Fold a user's follow-up message into the running turn |
 | Checkpoints | `_emit_checkpoint` | Resume after a crash mid-turn |
 | Length recovery | `build_length_recovery_message`, `_MAX_LENGTH_RECOVERIES` | Ask the model to continue a reply cut off by `max_tokens`, then join the parts |
