@@ -685,8 +685,9 @@ class AgentLoop:
             await ctx.delivery.started()
         if ctx.ephemeral:
             return
-        # A turn that died mid-way: its checkpoint first, then an error reply
-        # for a user message left unanswered.
+        # A turn that died mid-way (crash, kill, Ctrl-C): its checkpoint first,
+        # then an error reply for a user message left unanswered, saved before
+        # this turn runs or a command answers (nanobot loop.py:2134-2141).
         changed = restore_runtime_checkpoint(ctx.session)
         changed = restore_pending_interruption(ctx.session) or changed
         if changed:
@@ -812,8 +813,10 @@ class AgentLoop:
         ephemeral, pending_queue, events = ctx.ephemeral, ctx.pending_queue, ctx.events
 
         async def _checkpoint(payload: dict[str, Any]) -> None:
-            # The latest finished step, kept so a cancelled turn can be saved
-            # (nanobot loop.py:1082 stores it in the session).
+            # The latest finished step, saved to disk so a cancelled turn, or
+            # the next turn after a crash, can restore it (nanobot
+            # ``_set_runtime_checkpoint``, loop.py:2648). ``finish_turn``
+            # clears it once the turn is saved (``_clear_runtime_checkpoint``, :2663).
             if ephemeral:
                 return
             session.metadata[RUNTIME_CHECKPOINT_KEY] = copy.deepcopy(payload)
