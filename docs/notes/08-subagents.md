@@ -120,7 +120,7 @@ returns.
 | 4 | How the report travels | `InboundMessage` on the message bus (channel `system`, sender `subagent`) | ~~`SubagentResult` on the manager's `results` queue~~ **Gone in layer 14**: the same `InboundMessage` on the loop's bus (`SubagentResult.to_inbound`) | NanoClaw had no bus | Done in layer 14 |
 | 5 | Child tools | Also `apply_patch`, `rg`, `run_cli_app` *(`apply_patch`: added in layer 17)* | The tools NanoClaw has (`exec_session` and `list_exec_sessions` since layer 16) | Those tools aren't ported (layer 3) | With those tools |
 | 6 | Line in the child prompt | Also "Tools like 'read_file' and 'web_fetch' can return native image content…" | Not included | The same image line left out in layer 4 (NanoClaw's tools don't return images) | — |
-| 7 | Several `spawn` calls in one model reply | Run at the same time (`spawn` is `concurrency_safe`, and the main loop runs such tools in parallel) | Run one after another | NanoClaw's runner runs tools one at a time (parallel tools were skipped in layer 2). The results, requests and saved conversation are the same (checked); only the waiting time differs | Phase 2 (parallel tools) |
+| 7 | Several `spawn` calls (since layer 19: `subagent` create calls) in one model reply | Run at the same time (`spawn` is `concurrency_safe`, and the main loop runs such tools in parallel) | Run one after another | NanoClaw's runner runs tools one at a time (parallel tools were skipped in layer 2). The results, requests and saved conversation are the same (checked); only the waiting time differs | Phase 2 (parallel tools) |
 | 8 | Compaction on a **repeated** report | The summary marker goes one message too early, so a summarized message is replayed again ([upstream bug 5](../UPSTREAM_BUGS.md#5-summary-marker-one-message-too-early-on-a-repeated-subagent-report)) | Marker after everything that was summarized | Found in the second review; NanoClaw records the boundary before saving the report, so it was already correct. Kept, with a regression test | — |
 
 Everything else matches nanobot (checked by running both; see below).
@@ -157,8 +157,7 @@ iteration limit are reported as not complete. The model-facing texts
 (system prompt, templates, skills, slash-command help) never named `spawn`,
 so only the tool itself, its hints and this documentation changed; the
 rendered system prompt still differs from nanobot's only as in layer 11.
-Exact behaviour (child sessions, receipts, outcomes) is described with the
-layer 19 integration.
+Exact behaviour (child sessions, receipts, outcomes): [`19-subagents-v2.md`](19-subagents-v2.md).
 
 ## Files
 

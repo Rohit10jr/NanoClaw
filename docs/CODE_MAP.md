@@ -726,6 +726,19 @@ Note: [`notes/18-isolation.md`](notes/18-isolation.md). Links point at nanobot `
 | `ContextBuilder` `workspace=`, `# Current Project` (`agent/context.py`), skills root (`agent/skills.py`) | [`agent/context.py:105`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/context.py#L105) | Same |
 | Scope binding in `AgentLoop._run_agent_loop`; subagent inheritance (`agent/subagent.py`, `tools/spawn.py`; since layer 19 `tools/subagent.py`) | [`agent/loop.py:1293`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/loop.py#L1293), [`agent/subagent.py:824`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/subagent.py#L824) | Same |
 
+## Layer 19 — Subagents v2: the `subagent` tool
+
+Note: [`notes/19-subagents-v2.md`](notes/19-subagents-v2.md). Links point at nanobot `c4dac64`.
+
+| NanoClaw | nanobot (`c4dac64`) | How it compares |
+|---|---|---|
+| `nanoclaw/agent/tools/subagent.py` `SubagentTool` (replaces `tools/spawn.py`) | [`agent/tools/subagent.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/tools/subagent.py) | Same schema, description, texts |
+| `SubagentManager` `spawn`, `run_inline`, `send`, `cancel`, `check`, `cancel_by_session`, `close`, `recover_interrupted`; `_SubagentTask`, `_SubagentHook` (`agent/subagent.py`) | [`agent/subagent.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/subagent.py) | 89 checks identical; no parallel tool calls |
+| `nanoclaw/agent/subagent_sessions.py`, `subagent_status.py` | [`agent/subagent_sessions.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/subagent_sessions.py), [`subagent_status.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/subagent_status.py) | JSONL sessions instead of SQLite |
+| `nanoclaw/agent/session_activity.py` | [`agent/session_activity.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/session_activity.py) | No file-edit activity hook |
+| `SubagentTaskChanged` (`bus/runtime_events.py`) | [`bus/runtime_events.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/bus/runtime_events.py) | Published; no consumer yet |
+| `templates/agent/subagent_announce.md` | [`templates/agent/subagent_announce.md`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/templates/agent/subagent_announce.md) | Identical |
+
 [nb-pta]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/providers/base.py#L118
 [nb-tcr]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/providers/base.py#L72
 [nb-tcr-hvn]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/providers/base.py#L81

@@ -114,9 +114,12 @@ Legend: ⏳ in progress · ✅ done and verified · ⛔ blocked
 
 | Task | Scope (files) | Sub-agent | Verification | Status |
 |---|---|---|---|---|
-| 19.1 Subagent manager v2 | `agent/subagent.py` (tasks, outcomes, status hook, partial results, send/cancel/check, inbox via injections), child sessions `subagent:<id>`, `subagent_status`, report template | sub-agent (worktree), phase A | | ⏳ |
-| 19.2 The `subagent` tool | 19.1 also takes the tool and the tests; 19.2 the model-facing text (prompts, templates, skills, help) and docs | sub-agent (worktree), in parallel with 19.1 | | ⏳ |
-| Integration, mutation checks, docs, PR | | | | |
+| 19.1 Subagent manager v2 | `agent/subagent.py` (tasks, outcomes, status hook, partial results, send/cancel/check, inbox via injections), child sessions `subagent:<id>`, `subagent_status`, report template | sub-agent (worktree); interrupted by a container restart, finished by a second sub-agent from the saved work | 89 checks through both `AgentLoop`s identical | ✅ |
+| 19.2 The `subagent` tool | 19.1 also takes the tool and the tests; 19.2 the model-facing text (prompts, templates, skills, help) and docs | sub-agent (worktree), in parallel with 19.1 | No model-facing text named `spawn`; prompts differ from nanobot only as in layer 11 | ✅ |
+| Integration | merges | main session | No conflicts; 2,189 passed, 6 skipped | ✅ |
+| Mutation checks | ~120 rules | sub-agent (worktree) | | ⏳ |
+| Docs | note 19, CODE_MAP, README, ROADMAP, note 08 | main session | — | ✅ |
+| PR | `p2/layer-19` → `main` | main session | | ⏳ |
 
 ## Blockers and open items
 
