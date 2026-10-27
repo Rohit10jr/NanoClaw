@@ -51,6 +51,6 @@ the next thing to try.
 
 | Item | Where | Note |
 |---|---|---|
-| `exec` paths like `C:\...` don't count toward the repeated-violation escalation | `nanoclaw/agent/tools/violations.py` `_OUTSIDE_PATH_PATTERN` (only `/` and `~` paths) | Fix with the Windows shell support |
+| `exec` paths like `C:\...` don't count toward the repeated-violation escalation | `nanoclaw/agent/tools/violations.py` `_OUTSIDE_PATH_PATTERN` (only `/` and `~` paths) | **Fixed in layer 16 (task 16.2):** drive (`C:\x`, `C:/x`, `C:\`) and UNC (`\\server\share`) paths now match, and on a POSIX host `C:\x` and `C:/x` give the same signature. nanobot c4dac64 has the same gap (`utils/runtime.py:136`); this is a NanoClaw difference (tests/test_violations_windows.py) |
 | `write_text` without an encoding | `nanoclaw/skills/skill-creator/scripts/init_skill.py` (copied from nanobot) | Writes cp1252 on Windows; same in nanobot |
 | `list_dir` recursive mixes `/` after folder names with `\` inside paths | `ListDirTool` | Same as nanobot; cosmetic |

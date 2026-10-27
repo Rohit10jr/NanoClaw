@@ -14,6 +14,8 @@ throttle in nanobot/utils/runtime.py (``workspace_violation_signature``,
 
 from __future__ import annotations
 
+import ntpath
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -45,7 +47,20 @@ _WORKSPACE_VIOLATION_MARKERS: tuple[str, ...] = (
     "path traversal detected",
 )
 _MAX_REPEAT_WORKSPACE_VIOLATIONS = 2
-_OUTSIDE_PATH_PATTERN = re.compile(r"(?:^|[\s|>'\"])((?:/[^\s\"'>;|<]+)|(?:~[^\s\"'>;|<]+))")
+# nanobot utils/runtime.py:136 matches only ``/`` and ``~`` paths. NanoClaw also
+# matches Windows drive paths (``C:\x``, ``C:/x``, ``C:\``) and UNC paths
+# (``\\server\share``), so repeated ``exec`` attempts on them escalate too.
+# The drive letter must start a token and be followed by a slash, so
+# ``http://x`` and ``a:b`` are not paths.
+_OUTSIDE_PATH_PATTERN = re.compile(
+    r"(?:^|[\s|>'\"])("
+    r"/[^\s\"'>;|<]+"
+    r"|~[^\s\"'>;|<]+"
+    r"|[A-Za-z]:[\\/][^\s\"'>;|<]*"
+    r"|\\\\[^\s\"'>;|<]+"
+    r")"
+)
+_WINDOWS_PATH_PATTERN = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\)")
 
 
 def is_ssrf_violation(text: str) -> bool:
@@ -95,6 +110,10 @@ def workspace_violation_signature(tool_name: str, arguments: Any) -> str | None:
 
 def _normalize_violation_target(raw: str) -> str:
     """Normalize *raw* path so that equivalent spellings collide on the same key."""
+    if os.name != "nt" and _WINDOWS_PATH_PATTERN.match(raw):
+        # A Windows path on a POSIX host: Path would treat it as a relative
+        # file name, so ``C:\x`` and ``C:/x`` would not collide (NanoClaw only).
+        return f"violation:{ntpath.normpath(raw).replace(chr(92), '/')}".lower()
     try:
         normalized = Path(raw).expanduser().resolve().as_posix()
     except Exception:

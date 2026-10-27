@@ -17,7 +17,12 @@ Layout (camelCase in JSON)::
                               }},
       "channels": {"sendProgress", "sendToolHints", "showReasoning"},
       "providers": {"<name>": {"apiKey", "apiBase"}, ...},
-      "tools": {"restrictToWorkspace", "ssrfWhitelist"}
+      "tools": {"exec": {"enable", "maxRuntime", "maxRuntimeLimit",
+                         "idleTimeout", "idleAction", "pathPrepend",
+                         "pathAppend", "sandbox", "sandboxRoBinds",
+                         "sandboxRwBinds", "allowedEnvKeys",
+                         "allowPatterns", "denyPatterns"},
+                "restrictToWorkspace", "ssrfWhitelist"}
     }
 
 nanobot builds ``Config`` on pydantic-settings, so ``NANOBOT_AGENTS__DEFAULTS__MODEL``
@@ -27,11 +32,12 @@ style variables override the file (schema.py:757). NanoClaw keeps its own
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Literal, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 
 from nanoclaw.config.base import Base
 from nanoclaw.config.timezone import detect_system_timezone
@@ -157,9 +163,58 @@ class ChannelsConfig(Base):
     show_reasoning: bool = True  # schema.py:45, the model's reasoning
 
 
+class ExecToolConfig(Base):
+    """Shell ``exec`` tool settings: nanobot agent/tools/shell_config.py ``ExecToolConfig``.
+
+    Same fields, JSON names, defaults and validation as nanobot. ``timeout`` is
+    the legacy spelling of ``maxRuntime``: it is read, never written, and giving
+    both is an error.
+
+    ``sandbox``, ``sandboxRoBinds`` and ``sandboxRwBinds`` are read and kept but
+    unused until layer 18 (the bubblewrap sandbox).
+    """
+
+    enable: bool = True
+    max_runtime: int = Field(
+        default=3600,
+        ge=0,
+        validation_alias=AliasChoices("maxRuntime", "max_runtime", "timeout"),
+    )
+    max_runtime_limit: int = Field(default=86400, gt=0)
+    idle_timeout: int = Field(default=300, ge=0)
+    idle_action: Literal["report", "terminate"] = "report"
+    path_prepend: str = ""
+    path_append: str = ""
+    sandbox: str = ""  # unused until layer 18
+    sandbox_ro_binds: list[str] = Field(default_factory=list)  # unused until layer 18
+    sandbox_rw_binds: list[str] = Field(default_factory=list)  # unused until layer 18
+    allowed_env_keys: list[str] = Field(default_factory=list)
+    allow_patterns: list[str] = Field(default_factory=list)
+    deny_patterns: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_runtime_alias_conflict(cls, value: object) -> object:
+        if isinstance(value, Mapping):
+            value = cast(Mapping[object, object], value)
+            if "timeout" in value and ("maxRuntime" in value or "max_runtime" in value):
+                raise ValueError("Use maxRuntime or legacy timeout, not both")
+        return value
+
+    @property
+    def timeout(self) -> int:
+        """Legacy hard-runtime setting backed by ``max_runtime``."""
+        return self.max_runtime
+
+    @timeout.setter
+    def timeout(self, value: int) -> None:
+        self.max_runtime = value
+
+
 class ToolsConfig(Base):
     """Tool settings (nanobot schema.py:430 ``ToolsConfig``, a subset)."""
 
+    exec: ExecToolConfig = Field(default_factory=ExecToolConfig)  # schema.py:434
     restrict_to_workspace: bool = False  # schema.py:442
     ssrf_whitelist: list[str] = Field(default_factory=list)  # schema.py:460, CIDR ranges
 
