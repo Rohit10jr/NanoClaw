@@ -86,11 +86,21 @@ Legend: ⏳ in progress · ✅ done and verified · ⛔ blocked
 | Docs | note 16, CODE_MAP, README, ROADMAP, WINDOWS, notes 03/08 | main session | — | ✅ |
 | PR | `p2/layer-16` → `main` | main session | PR #8 | ✅ |
 
+## Layer 17 — more tools: `apply_patch`, `rg`, file state, MCP (`p2/layer-17`) ⏳
+
+| Task | Scope (files) | Sub-agent | Verification | Status |
+|---|---|---|---|---|
+| 17.1 `apply_patch`, edit options | new `agent/tools/apply_patch.py`; `filesystem.py` descriptions, `edit_file` `line_hint`/`expected_replacements` | sub-agent (worktree), parallel | | ⏳ |
+| 17.2 `rg` | new `agent/tools/rg.py` (on exec sessions), registration when ripgrep is installed | sub-agent (worktree), parallel | | ⏳ |
+| 17.3 File state | new `agent/tools/file_state.py`, `read_file` `force`, runner read context | sub-agent (worktree), parallel | | ⏳ |
+| 17.4 MCP | new `agent/tools/mcp.py` (stdio + streamable HTTP, tools only), `mcpServers` config, loop lifecycle, registry order | sub-agent (worktree), parallel | | ⏳ |
+| Integration, mutation checks, docs, PR | | | | |
+
 ## Blockers and open items
 
 | Item | Status |
 |---|---|
 | Real-model tests need API keys as environment secrets | Open; FakeProvider only until then |
 | Windows shell (16.4) not yet run on Windows | Needs a run of `uv run pytest` on Windows by the user |
-| PRs #2–#4 merged; #5–#7 (layers 13–15) open; later layers stacked on them | — |
+| PRs #2–#4 merged; #5–#8 (layers 13–16) open; later layers stacked on them | — |
 | Rewrite earlier commits to the user's author | After phase 2 (user decision) |
