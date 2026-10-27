@@ -16,6 +16,8 @@ import shutil
 import time
 from pathlib import Path
 
+from loguru import logger
+
 from nanoclaw.agent.messages import is_blank, truncate_text
 
 TOOL_RESULTS_DIR = ".nanoclaw/tool-results"
@@ -102,8 +104,8 @@ def maybe_persist_tool_result(
     directory.mkdir(parents=True, exist_ok=True)
     try:
         cleanup_tool_result_buckets(root, directory)
-    except OSError:
-        pass
+    except Exception:
+        logger.exception("Failed to clean stale tool result buckets in {}", root)
     # The name includes a hash of the content, so the same tool-call ID with
     # different output can never share a file: every reference in the history
     # keeps pointing at the output it previewed. Identical output reuses the
@@ -144,4 +146,10 @@ def normalize_tool_result(
         return content
     if workspace is None:
         return truncate_text(content, max_chars)
-    return maybe_persist_tool_result(workspace, bucket, tool_call_id, content, max_chars=max_chars)
+    try:
+        return maybe_persist_tool_result(workspace, bucket, tool_call_id, content, max_chars=max_chars)
+    except Exception:
+        # The result can't be saved (say, a read-only workspace): cut it instead
+        # of failing the turn (nanobot context_governance.py:874-880).
+        logger.exception("Tool result persist failed for {} in {}; using raw result", tool_call_id, bucket)
+        return truncate_text(content, max_chars)

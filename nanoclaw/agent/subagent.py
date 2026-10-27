@@ -28,6 +28,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+
 from nanoclaw.agent.runner import AgentRunner, AgentRunSpec
 from nanoclaw.agent.skills import SkillsLoader
 from nanoclaw.agent.tools import ToolRegistry, ToolResult, build_default_tools
@@ -148,6 +150,7 @@ class SubagentManager:
         )
         self._register(task_id, session_key, bg_task)
         bg_task.add_done_callback(lambda _: self._forget(task_id, session_key))
+        logger.info("Started subagent [{}]: {}", task_id, display_label)
         return f"Subagent [{display_label}] started (id: {task_id}). I'll notify you when it completes."
 
     async def run_inline(
@@ -173,6 +176,7 @@ class SubagentManager:
             )
         )
         self._register(task_id, session_key, inline_task)
+        logger.info("Started subagent [{}]: {}", task_id, display_label)
         try:
             result = await inline_task
             # nanobot subagent.py:678-682
@@ -218,6 +222,7 @@ class SubagentManager:
         announce: bool = True,
     ) -> str:
         """Run the child agent and report the result."""
+        logger.info("Subagent [{}] starting task: {}", task_id, label)
         try:
             tools = self._build_tools()
             messages: list[dict[str, Any]] = [
@@ -265,7 +270,8 @@ class SubagentManager:
             status.partial = partial is not None
 
         except Exception as e:
-            # nanobot subagent.py:740
+            # nanobot subagent.py:733-735
+            logger.opt(exception=True).error("Subagent [{}] failed", task_id)
             status.phase = "error"
             status.stop_reason = "error"
             status.error = str(e)[: self.max_tool_result_chars]
@@ -329,6 +335,7 @@ class SubagentManager:
                 channel=channel,
             )
         )
+        logger.debug("Subagent [{}] announced result to {}", task_id, session_key or channel)
 
     def _build_subagent_prompt(self) -> str:
         """The child's short system prompt."""
