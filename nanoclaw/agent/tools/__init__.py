@@ -10,6 +10,7 @@ from nanoclaw.agent.tools.registry import RETRY_HINT, ToolRegistry
 
 if TYPE_CHECKING:
     from nanoclaw.agent.tools.exec_session import ExecSessionManager
+    from nanoclaw.agent.tools.file_state import FileStates
     from nanoclaw.config.schema import ExecToolConfig
 
 
@@ -19,6 +20,7 @@ def build_default_tools(
     restrict_to_workspace: bool = False,
     exec_session_manager: ExecSessionManager | None = None,
     exec_config: ExecToolConfig | None = None,
+    file_states: FileStates | None = None,
 ) -> ToolRegistry:
     """The standard tool set, rooted at ``workspace``.
 
@@ -33,6 +35,11 @@ def build_default_tools(
     shell.py:169, exec_session.py:788, :947). Its sandbox fields are not
     read yet (layer 18).
 
+    ``file_states`` gives the file tools their own read/write state
+    (nanobot ``ToolContext.file_state_store``; subagents pass a fresh one).
+    Without it they use the state the loop binds per session
+    (``bind_file_states``), or a private fallback outside a turn.
+
     nanobot discovers tools by scanning its tools package (agent/tools/loader.py);
     NanoClaw lists them explicitly.
     """
@@ -44,10 +51,10 @@ def build_default_tools(
 
     cfg = exec_config if exec_config is not None else ExecToolConfig()
     tools: list[Tool] = [
-        ReadFileTool(workspace, restrict_to_workspace=restrict_to_workspace),
-        WriteFileTool(workspace, restrict_to_workspace=restrict_to_workspace),
-        EditFileTool(workspace, restrict_to_workspace=restrict_to_workspace),
-        ListDirTool(workspace, restrict_to_workspace=restrict_to_workspace),
+        ReadFileTool(workspace, restrict_to_workspace=restrict_to_workspace, file_states=file_states),
+        WriteFileTool(workspace, restrict_to_workspace=restrict_to_workspace, file_states=file_states),
+        EditFileTool(workspace, restrict_to_workspace=restrict_to_workspace, file_states=file_states),
+        ListDirTool(workspace, restrict_to_workspace=restrict_to_workspace, file_states=file_states),
     ]
     if cfg.enable:
         # nanobot ExecTool.create (shell.py:173).
