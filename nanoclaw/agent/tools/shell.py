@@ -1,11 +1,28 @@
 """The exec tool: run a shell command. Mirrors nanobot/agent/tools/shell.py.
 
-Deliberate difference from nanobot: the deny list and the internal-URL check
-run on **every** command. nanobot runs its whole command guard only when
-``restrict_to_workspace`` is on, which is off by default, so by default
-nanobot blocks nothing (docs/notes/03-tools.md, 09-safety.md). The workspace
-checks (``working_dir``, ``../``, absolute paths) apply only in restricted
-mode, as in nanobot.
+Since layer 16 every command runs as an exec session (nanobot 6310a39,
+26e1f41; ``exec_session.py``): ``exec`` waits up to ``yield_time_ms`` (1 s by
+default) and returns the output and exit code if the command finished, or a
+``session_id`` the model polls with ``exec_session`` if it is still running.
+A hard runtime budget (``max_runtime``, 1 hour by default, at most
+``max_runtime_limit``) kills the whole process group; a command that prints
+nothing for ``idle_timeout`` seconds is reported (or killed, with
+``idle_action="terminate"``).
+
+Deliberate differences from nanobot:
+
+* The deny list (with ``allow_patterns``) and the internal-URL check run on
+  **every** command. nanobot runs its whole command guard only when
+  ``restrict_to_workspace`` is on, which is off by default, so by default
+  nanobot blocks nothing (docs/notes/03-tools.md, 09-safety.md). The
+  workspace checks (``working_dir``, ``../``, absolute paths) apply only in
+  restricted mode, as in nanobot.
+* No OS sandbox (bubblewrap/seatbelt) yet, no media-folder exception, no
+  Web UI loopback exception and no workspace scopes (later layers).
+* POSIX only for now: ``_spawn`` runs bash (or ``sh``/``zsh``); Windows
+  (PowerShell, cmd, Job objects, taskkill, its environment) is task 16.4. The
+  seams are ``_resolve_shell``, ``_spawn``, ``_kill_process_tree``,
+  ``_build_env`` and the process-tree owner hooks.
 """
 
 from __future__ import annotations
@@ -16,19 +33,35 @@ import re
 import shlex
 import shutil
 import signal
+from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, Protocol, cast
 from urllib.parse import unquote
 
+from loguru import logger
+
 from nanoclaw.agent.tools.base import Tool, ToolResult
+from nanoclaw.agent.tools.context import current_request_session_key
+from nanoclaw.agent.tools.exec_session import (
+    DEFAULT_EXEC_SESSION_MANAGER,
+    DEFAULT_MAX_OUTPUT_CHARS,
+    DEFAULT_YIELD_MS,
+    MAX_OUTPUT_CHARS,
+    MAX_YIELD_MS,
+    ExecSessionManager,
+    clamp_session_int,
+    format_session_poll,
+)
 from nanoclaw.agent.tools.schema import object_schema
 from nanoclaw.security.network import contains_internal_url
 from nanoclaw.security.workspace_policy import is_path_within
 
+_PROCESS_TREE_OWNER_ATTR = "_nanoclaw_process_tree_owner"
+
 # nanobot shell.py ExecTool.__init__. Lower-cased commands are searched for
 # these. A guard against accidents, not a security boundary:
-# `rm --recursive --force`, `find -delete` or a Python one-liner get through. nanobot also blocks writes to its memory files;
-# those patterns arrive with memory in layer 6.
+# `rm --recursive --force`, `find -delete` or a Python one-liner get through.
 DEFAULT_DENY_PATTERNS = [
     r"\brm\s+-[rf]{1,2}\b",  # rm -r, rm -rf, rm -fr
     r"\bdel\s+/[fq]\b",  # del /f, del /q
@@ -49,7 +82,40 @@ DEFAULT_DENY_PATTERNS = [
 ]
 
 
-# Policy note appended to recoverable workspace-boundary guard errors (nanobot shell.py:85).
+class _ProcessTreeOwner(Protocol):
+    """Something that owns a process tree (nanobot: a Windows Job object; task 16.4)."""
+
+    creation_flags: int
+
+    def assign_and_resume(self, pid: int) -> None: ...
+
+    def release(self) -> None: ...
+
+    def terminate(self) -> None: ...
+
+
+def _reap_pid(pid: int) -> None:
+    """Best-effort ``waitpid`` to reap a child and prevent zombies (nanobot shell.py:59).
+
+    Call this after killing or after normal completion of any subprocess
+    as a safety net: asyncio's child watcher *should* have reaped it, but in
+    containers and edge cases it sometimes doesn't. Uses ``os`` capability
+    checks, so it is a no-op where ``os.waitpid``/``os.WNOHANG`` don't exist.
+    """
+    waitpid = getattr(os, "waitpid", None)
+    wnohang = getattr(os, "WNOHANG", None)
+    if waitpid is None or wnohang is None:
+        return
+    try:
+        waitpid(pid, wnohang)
+    except (ProcessLookupError, ChildProcessError):
+        # Already reaped, or not our child: both are fine.
+        pass
+    except OSError as exc:
+        logger.debug("_reap_pid({}): {}", pid, exc)
+
+
+# Policy note appended to recoverable workspace-boundary guard errors (nanobot shell.py:84).
 _WORKSPACE_BOUNDARY_NOTE = (
     "\n\nNote: this is a hard policy boundary, not a transient failure. "
     "Do NOT retry with shell tricks (symlinks, base64 piping, alternative "
@@ -59,10 +125,74 @@ _WORKSPACE_BOUNDARY_NOTE = (
 )
 
 
-class ExecTool(Tool):
-    _MAX_TIMEOUT = 600
-    _MAX_OUTPUT = 10_000
+@dataclass(slots=True)
+class _PreparedCommand:
+    command: str | list[str]
+    cwd: str
+    env: dict[str, str]
+    timeout: int | None
+    shell_program: str | None
+    login: bool
 
+
+def _exec_parameters(max_runtime: int, max_runtime_limit: int) -> dict[str, Any]:
+    """The exec tool's argument schema (nanobot shell.py:103, POSIX wording)."""
+    return object_schema(
+        command={"type": "string", "description": "The shell command to execute"},
+        cmd={"type": "string", "description": "Compatibility alias for command"},
+        working_dir={"type": "string", "description": "Optional working directory for the command"},
+        workdir={"type": "string", "description": "Compatibility alias for working_dir"},
+        max_runtime={
+            "type": "integer",
+            "description": (
+                "Hard runtime budget in seconds. Omit for the configured default "
+                f"({'unlimited' if max_runtime == 0 else str(max_runtime) + 's'}). "
+                f"Explicit requests must not exceed {max_runtime_limit}s. "
+                "Output does not extend the budget."
+            ),
+            "minimum": 1,
+            "maximum": max_runtime_limit,
+        },
+        timeout={
+            "type": "integer",
+            "description": "Compatibility alias for max_runtime; cannot be combined with it.",
+            "minimum": 1,
+            "maximum": max_runtime_limit,
+        },
+        shell={
+            "type": ["string", "null"],
+            "description": "Shell override; omit for bash, or pass 'sh' or 'zsh'.",
+        },
+        login={
+            "type": ["boolean", "null"],
+            "description": "Run bash/zsh as a login shell.",
+            "default": False,
+        },
+        yield_time_ms={
+            "type": ["integer", "null"],
+            "description": (
+                "Return after this many milliseconds if still running (default 1000, max 30000); "
+                "execution continues."
+            ),
+            "minimum": 0,
+            "maximum": MAX_YIELD_MS,
+        },
+        max_output_chars={
+            "type": ["integer", "null"],
+            "description": "Session output limit in characters (default 10000, max 50000).",
+            "minimum": 1000,
+            "maximum": MAX_OUTPUT_CHARS,
+        },
+        max_output_tokens={
+            "type": ["integer", "null"],
+            "description": "Compatibility alias for max_output_chars.",
+            "minimum": 1000,
+            "maximum": MAX_OUTPUT_CHARS,
+        },
+    )
+
+
+class ExecTool(Tool):
     _BENIGN_DEVICE_PATHS: frozenset[str] = frozenset({
         "/dev/null",
         "/dev/zero",
@@ -77,15 +207,48 @@ class ExecTool(Tool):
 
     def __init__(
         self,
-        working_dir: Path | None = None,
-        timeout: int = 60,
+        timeout: int | None = None,
+        working_dir: str | Path | None = None,
         deny_patterns: list[str] | None = None,
+        allow_patterns: list[str] | None = None,
         restrict_to_workspace: bool = False,
+        path_prepend: str = "",
+        path_append: str = "",
+        allowed_env_keys: list[str] | None = None,
+        exec_session_manager: ExecSessionManager | None = None,
+        *,
+        max_runtime: int | None = None,
+        max_runtime_limit: int = 86400,
+        idle_timeout: int = 300,
+        idle_action: Literal["report", "terminate"] = "report",
     ) -> None:
-        self.working_dir = working_dir
-        self.timeout = timeout
+        # nanobot validates these through ExecToolConfig (shell_config.py):
+        # timeout is the legacy name of max_runtime, so both can't be given.
+        if timeout is not None and max_runtime is not None:
+            raise ValueError("timeout and max_runtime are mutually exclusive")
+        runtime = max_runtime if max_runtime is not None else timeout
+        if runtime is None:
+            runtime = 3600
+        if runtime < 0:
+            raise ValueError("max_runtime must be >= 0")
+        if max_runtime_limit <= 0:
+            raise ValueError("max_runtime_limit must be > 0")
+        if idle_timeout < 0:
+            raise ValueError("idle_timeout must be >= 0")
+        if idle_action not in ("report", "terminate"):
+            raise ValueError("idle_action must be 'report' or 'terminate'")
+        self.max_runtime = runtime
+        self.max_runtime_limit = max_runtime_limit
+        self.idle_timeout = idle_timeout
+        self.idle_action: Literal["report", "terminate"] = idle_action
+        self.working_dir = str(working_dir) if working_dir is not None else None
         self.deny_patterns = (deny_patterns or []) + DEFAULT_DENY_PATTERNS
+        self.allow_patterns = allow_patterns or []
         self.restrict_to_workspace = restrict_to_workspace
+        self.path_prepend = path_prepend
+        self.path_append = path_append
+        self.allowed_env_keys = allowed_env_keys or []
+        self._session_manager = exec_session_manager or DEFAULT_EXEC_SESSION_MANAGER
 
     @property
     def name(self) -> str:
@@ -93,129 +256,418 @@ class ExecTool(Tool):
 
     @property
     def description(self) -> str:
-        return "Execute a shell command."
+        return "Execute a shell command. timeout and max_runtime are mutually exclusive."
 
     @property
     def parameters(self) -> dict[str, Any]:
-        return object_schema(
-            command={"type": "string", "description": "The shell command to execute"},
-            working_dir={"type": "string", "description": "Optional working directory for the command"},
-            timeout={
-                "type": "integer",
-                "description": "Hard timeout in seconds (default 60, max 600).",
-                "minimum": 1,
-                "maximum": 600,
-            },
-            required=["command"],
-        )
+        return _exec_parameters(self.max_runtime, self.max_runtime_limit)
+
+    @property
+    def timeout(self) -> int:
+        """Legacy name of the configured runtime budget (nanobot ``ExecTool.timeout``)."""
+        return self.max_runtime
+
+    @property
+    def session_manager(self) -> ExecSessionManager:
+        return self._session_manager
 
     async def execute(
         self,
-        command: str | None = None,
+        command: str | list[str] | None = None,
+        cmd: str | None = None,
         working_dir: str | None = None,
+        workdir: str | None = None,
         timeout: int | None = None,
+        shell: str | None = None,
+        login: bool | None = None,
+        yield_time_ms: int | None = None,
+        max_output_chars: int | None = None,
+        max_output_tokens: int | None = None,
+        max_runtime: int | None = None,
         **kwargs: Any,
     ) -> str:
+        command = command or cmd
+        working_dir = working_dir or workdir
         if not command:
-            return ToolResult.error("Error: Missing command. Provide command.")
-        cwd = self._resolve_cwd(working_dir)
+            return ToolResult.error("Error: Missing command. Provide command or cmd.")
+        if max_output_chars is None:
+            max_output_chars = max_output_tokens
+
+        if timeout is not None and max_runtime is not None:
+            return ToolResult.error("Error: timeout and max_runtime are mutually exclusive.")
+        try:
+            prepared = self._prepare_command(
+                command, working_dir, max_runtime if max_runtime is not None else timeout,
+                shell, login,
+            )
+        except ValueError as exc:
+            return ToolResult.error(f"Error: {exc}")
+        if isinstance(prepared, str):
+            return prepared
+        return await self._execute_session(prepared, yield_time_ms, max_output_chars)
+
+    async def execute_to_completion(self, command: str, working_dir: str) -> str:
+        """Return the complete result for a trusted user shell command, without an agent observer."""
+        try:
+            prepared = self._prepare_command(command, working_dir)
+        except ValueError as exc:
+            return ToolResult.error(f"Error: {exc}")
+        if isinstance(prepared, str):
+            return prepared
+        return await self._execute_session(prepared, None, None, until_exit=True)
+
+    async def _execute_session(
+        self,
+        prepared: _PreparedCommand,
+        yield_time_ms: int | None,
+        max_output_chars: int | None,
+        *,
+        until_exit: bool = False,
+    ) -> str:
+        try:
+            session_id, poll = await self._session_manager.start(
+                command=prepared.command,
+                cwd=prepared.cwd,
+                env=prepared.env,
+                timeout=prepared.timeout,
+                shell_program=prepared.shell_program,
+                login=prepared.login,
+                yield_time_ms=0 if until_exit else clamp_session_int(
+                    yield_time_ms, DEFAULT_YIELD_MS, 0, MAX_YIELD_MS,
+                ),
+                until_exit=until_exit,
+                # stdin stays open only when the model chose a yield time and
+                # so expects an interactive session (nanobot shell.py:350).
+                stdin=(asyncio.subprocess.DEVNULL if yield_time_ms is None else asyncio.subprocess.PIPE),
+                idle_timeout=self.idle_timeout,
+                idle_action=self.idle_action,
+                owner_session_key=current_request_session_key(),
+                max_output_chars=clamp_session_int(
+                    max_output_chars,
+                    DEFAULT_MAX_OUTPUT_CHARS,
+                    1000,
+                    MAX_OUTPUT_CHARS,
+                ),
+            )
+            result = format_session_poll(session_id, poll)
+            if not poll.done:
+                result += "\nInitial wait ended; session remains active."
+            return ToolResult.error(result) if poll.failed else result
+        except Exception as exc:
+            return ToolResult.error(f"Error executing command: {exc}")
+
+    def _resolve_timeout(self, timeout: object) -> int | None:
+        """Resolve a hard budget without changing the caller's requested duration (nanobot shell.py:368).
+
+        An explicit request must be an integer in ``1..max_runtime_limit``;
+        without one, the configured ``max_runtime`` applies, where 0 means no
+        limit (``None``).
+        """
+        if timeout is not None:
+            if isinstance(timeout, bool) or not isinstance(timeout, int):
+                raise ValueError("max_runtime must be an integer number of seconds")
+            if not 1 <= timeout <= self.max_runtime_limit:
+                raise ValueError(f"max_runtime must be between 1 and {self.max_runtime_limit} seconds")
+            return timeout
+        return self.timeout or None
+
+    def _prepare_command(
+        self,
+        command: str | list[str],
+        working_dir: str | None = None,
+        timeout: int | None = None,
+        shell: str | None = None,
+        login: bool | None = None,
+    ) -> _PreparedCommand | str:
+        """Resolve cwd, run the guard, and build env and shell (nanobot shell.py:380)."""
+        workspace_root = self.working_dir
+        if working_dir:
+            requested_dir = Path(working_dir).expanduser()
+            cwd = str(
+                requested_dir
+                if requested_dir.is_absolute()
+                else Path(workspace_root or os.getcwd()) / requested_dir
+            )
+        else:
+            cwd = workspace_root or os.getcwd()
         # Restricted mode: an LLM-supplied working_dir must not escape the
-        # workspace, or absolute paths under it would pass the path check
-        # below, which is anchored on cwd (nanobot shell.py:424, #2826).
-        if self.restrict_to_workspace and self.working_dir:
+        # workspace, or absolute paths under it would pass the path check in
+        # _guard_command, which is anchored on cwd (nanobot #2826).
+        if self.restrict_to_workspace and workspace_root:
             try:
                 requested = Path(cwd).expanduser().resolve()
-                resolved_root = Path(self.working_dir).expanduser().resolve()
+                resolved_root = Path(workspace_root).expanduser().resolve()
             except Exception:
                 return ToolResult.error("Error: working_dir could not be resolved" + _WORKSPACE_BOUNDARY_NOTE)
             if not is_path_within(requested, resolved_root):
-                return ToolResult.error("Error: working_dir is outside the configured workspace" + _WORKSPACE_BOUNDARY_NOTE)
-        guard_error = self._guard_command(command, cwd)
+                return ToolResult.error(
+                    "Error: working_dir is outside the configured workspace" + _WORKSPACE_BOUNDARY_NOTE
+                )
+
+        # NanoClaw difference: the guard runs on every command (see module docstring).
+        guard_error = self._guard_command(
+            shlex.join(command) if isinstance(command, list) else command,
+            cwd,
+            workspace_root=workspace_root,
+        )
         if guard_error:
             return guard_error
 
         effective_timeout = self._resolve_timeout(timeout)
-        process: asyncio.subprocess.Process | None = None
-        try:
-            process = await asyncio.create_subprocess_exec(
-                shutil.which("bash") or "/bin/bash",
-                "-c",
-                command,
-                stdin=asyncio.subprocess.DEVNULL,
+        env = self._build_env()
+
+        if isinstance(command, list):
+            parent_path = os.environ.get("PATH", env.get("PATH", ""))
+            env["PATH"] = self._compose_path(parent_path)
+        elif self.path_prepend or self.path_append:
+            command = self._wrap_path_export(command, env)
+
+        shell_program, shell_error = self._resolve_shell(shell)
+        if shell_error:
+            return shell_error
+
+        return _PreparedCommand(
+            command=command,
+            cwd=cwd,
+            env=env,
+            timeout=effective_timeout,
+            shell_program=shell_program,
+            login=False if login is None else login,
+        )
+
+    def _compose_path(self, current_path: str) -> str:
+        parts: list[str] = []
+        if self.path_prepend:
+            parts.append(self.path_prepend)
+        if current_path:
+            parts.append(current_path)
+        if self.path_append:
+            parts.append(self.path_append)
+        return os.pathsep.join(parts)
+
+    def _wrap_path_export(self, command: str, env: dict[str, str]) -> str:
+        """Extend the shell's own PATH; the values travel in env, never in the command text."""
+        segments: list[str] = []
+        if self.path_prepend:
+            env["NANOBOT_PATH_PREPEND"] = self.path_prepend
+            segments.append("$NANOBOT_PATH_PREPEND")
+        segments.append("$PATH")
+        if self.path_append:
+            env["NANOBOT_PATH_APPEND"] = self.path_append
+            segments.append("$NANOBOT_PATH_APPEND")
+        path_expr = os.pathsep.join(segments)
+        return f'export PATH="{path_expr}"; {command}'
+
+    @staticmethod
+    async def _spawn(
+        command: str | list[str],
+        cwd: str,
+        env: dict[str, str],
+        shell_program: str | None = None,
+        login: bool = False,
+        *,
+        stdin: int = asyncio.subprocess.DEVNULL,
+        process_tree: bool = False,
+    ) -> asyncio.subprocess.Process:
+        """Launch an argument vector directly or a command string through a shell (nanobot shell.py:503).
+
+        ``process_tree`` puts the command in its own session/process group so
+        a kill reaches its children too. POSIX only; Windows is task 16.4.
+        """
+        if isinstance(command, list):
+            executable = shutil.which(command[0], path=env.get("PATH", ""))
+            if executable is None:
+                raise FileNotFoundError(f"Executable not found: {command[0]}")
+            process = None
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    executable, *command[1:],
+                    stdin=stdin,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=cwd,
+                    env=env,
+                    start_new_session=process_tree,
+                )
+                return process
+            except BaseException:
+                if process is not None:
+                    await ExecTool._kill_process(process)
+                raise
+        shell_program = shell_program or shutil.which("bash") or "/bin/bash"
+        args: list[str] = [shell_program]
+        shell_name = Path(shell_program).name.lower()
+        if login and shell_name in {"bash", "bash.exe", "zsh", "zsh.exe"}:
+            args.append("-l")
+        args.extend(["-c", command])
+        if process_tree:
+            return await asyncio.create_subprocess_exec(
+                *args,
+                stdin=stdin,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd,
-                env=self._build_env(),
-                # Own process group, so a timeout can kill the command's children too.
+                env=env,
                 start_new_session=True,
             )
-            try:
-                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=effective_timeout)
-            except asyncio.TimeoutError:
-                await self._kill_process_tree(process)
-                return ToolResult.error(f"Error: Command timed out after {effective_timeout} seconds")
-            except asyncio.CancelledError:
-                await self._kill_process_tree(process)
-                raise
+        return await asyncio.create_subprocess_exec(
+            *args,
+            stdin=stdin,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=cwd,
+            env=env,
+        )
 
-            parts: list[str] = []
-            if stdout:
-                parts.append(stdout.decode("utf-8", errors="replace"))
-            if stderr:
-                stderr_text = stderr.decode("utf-8", errors="replace")
-                if stderr_text.strip():
-                    parts.append(f"STDERR:\n{stderr_text}")
-            # A non-zero exit code is reported, not treated as a tool error.
-            parts.append(f"\nExit code: {process.returncode}")
-            result = "\n".join(parts)
+    @staticmethod
+    def _resolve_shell(shell: str | None) -> tuple[str | None, str | None]:
+        """Validate a ``shell`` override (nanobot shell.py:643, POSIX branch; Windows is task 16.4)."""
+        if not shell:
+            return None, None
+        if "\0" in shell or "\n" in shell or "\r" in shell:
+            return None, ToolResult.error("Error: shell contains invalid characters")
+        allowed = {"sh", "bash", "zsh"}
+        path = Path(shell).expanduser()
+        if path.is_absolute():
+            if path.name not in allowed:
+                return None, ToolResult.error(f"Error: unsupported shell {shell!r}. Allowed: bash, sh, zsh")
+            if not path.is_file() or not os.access(path, os.X_OK):
+                return None, ToolResult.error(f"Error: shell is not executable: {shell}")
+            return str(path), None
+        if "/" in shell or "\\" in shell:
+            return None, ToolResult.error("Error: shell must be a shell name or absolute path")
+        if shell not in allowed:
+            return None, ToolResult.error(f"Error: unsupported shell {shell!r}. Allowed: bash, sh, zsh")
+        resolved = shutil.which(shell)
+        if not resolved:
+            return None, ToolResult.error(f"Error: shell not found: {shell}")
+        return resolved, None
 
-            if len(result) > self._MAX_OUTPUT:
-                half = self._MAX_OUTPUT // 2
-                result = (
-                    result[:half]
-                    + f"\n\n... ({len(result) - self._MAX_OUTPUT:,} chars truncated) ...\n\n"
-                    + result[-half:]
-                )
-            return result
-        except Exception as e:
-            if process is not None and process.returncode is None:
-                await self._kill_process_tree(process)
-            return ToolResult.error(f"Error executing command: {e}")
+    @staticmethod
+    async def _kill_process(process: asyncio.subprocess.Process) -> None:
+        """Kill a subprocess and reap it to prevent zombies (nanobot shell.py:691).
 
-    def _resolve_timeout(self, timeout: int | None) -> int | None:
-        """Effective timeout in seconds; ``None`` means no limit (nanobot: _resolve_timeout).
-
-        A timeout chosen by the model is capped at 600 s. The configured default
-        (``self.timeout``) may be higher, and 0 disables the limit entirely.
+        Safe to call when the process has already exited: skips ``kill()``
+        and only runs the safety-net reap.
         """
-        if timeout:
-            return min(timeout, self._MAX_TIMEOUT)
-        if self.timeout and self.timeout > 0:
-            return self.timeout
-        return None
+        if process.returncode is not None:
+            _reap_pid(process.pid)
+            return
+        try:
+            with suppress(ProcessLookupError):
+                process.kill()
+            with suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(process.wait(), timeout=5.0)
+        finally:
+            _reap_pid(process.pid)
 
-    def _guard_command(self, command: str, cwd: str) -> ToolResult | None:
-        """Best-effort safety guard (nanobot ``_guard_command``, shell.py:840).
+    @staticmethod
+    async def _kill_process_tree(process: asyncio.subprocess.Process) -> None:
+        """Kill a session process and descendants, then reap the root process (nanobot shell.py:710)."""
+        owner = ExecTool._process_tree_owner(process)
+        try:
+            if owner is not None:
+                owner.terminate()
+            else:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
 
-        The deny list and the internal-URL check always run; nanobot runs them
-        only in restricted mode. The path checks run only in restricted mode.
+            if process.returncode is None:
+                with suppress(ProcessLookupError):
+                    process.kill()
+            await asyncio.wait_for(process.wait(), timeout=5.0)
+            if owner is not None:
+                ExecTool._drop_process_tree_owner(process)
+        finally:
+            _reap_pid(process.pid)
+
+    @staticmethod
+    def _process_tree_owner(process: asyncio.subprocess.Process) -> _ProcessTreeOwner | None:
+        # _spawn is the only writer for this private ownership marker (none on POSIX yet).
+        return cast(_ProcessTreeOwner | None, vars(process).get(_PROCESS_TREE_OWNER_ATTR))
+
+    @staticmethod
+    def _drop_process_tree_owner(process: asyncio.subprocess.Process) -> None:
+        with suppress(AttributeError):
+            delattr(process, _PROCESS_TREE_OWNER_ATTR)
+
+    @staticmethod
+    def _release_process_tree(process: asyncio.subprocess.Process) -> None:
+        owner = ExecTool._process_tree_owner(process)
+        if owner is None:
+            return
+        owner.release()
+        ExecTool._drop_process_tree_owner(process)
+
+    def _build_env(self) -> dict[str, str]:
+        """A minimal environment, as in nanobot (Unix; nanobot shell.py:770).
+
+        Only these variables (plus ``allowed_env_keys`` that are set) are
+        passed, so API keys and other secrets in the agent's own environment
+        are never visible to commands the model runs. bash supplies a default
+        PATH; ``login=True`` lets bash/zsh source the user's profile.
+        """
+        env = {
+            "HOME": os.environ.get("HOME", "/tmp"),
+            "LANG": os.environ.get("LANG", "C.UTF-8"),
+            "TERM": os.environ.get("TERM", "dumb"),
+            "PYTHONUNBUFFERED": "1",
+        }
+        for key in self.allowed_env_keys:
+            val = os.environ.get(key)
+            if val is not None:
+                env[key] = val
+        return env
+
+    def _guard_command(
+        self,
+        command: str,
+        cwd: str,
+        *,
+        restrict_to_workspace: bool | None = None,
+        workspace_root: str | None = None,
+    ) -> ToolResult | None:
+        """Best-effort safety guard (nanobot ``_guard_command``, shell.py:819).
+
+        The deny/allow lists and the internal-URL check always run; nanobot
+        runs them only in restricted mode. The path checks run only in
+        restricted mode.
         """
         cmd = command.strip()
         lower = cmd.lower()
-        for pattern in self.deny_patterns:
-            if re.search(pattern, lower):
-                return ToolResult.error("Error: Command blocked by deny pattern filter")
+
+        # allow_patterns take priority over deny_patterns so that users can
+        # exempt specific commands (e.g. "rm -rf" inside a build directory)
+        # from the deny list via configuration. A chained command is only
+        # explicitly allowed when every top-level shell segment matches.
+        # With allow_patterns set, anything else is blocked (allow-only mode).
+        segments = self._split_shell_segments(lower)
+        explicitly_allowed = bool(self.allow_patterns) and bool(segments) and all(
+            any(re.fullmatch(pattern, segment) for pattern in self.allow_patterns)
+            for segment in segments
+        )
+        if not explicitly_allowed:
+            for pattern in self.deny_patterns:
+                if re.search(pattern, lower):
+                    return ToolResult.error("Error: Command blocked by deny pattern filter")
+
+            if self.allow_patterns:
+                return ToolResult.error("Error: Command blocked by allowlist filter (not in allowlist)")
 
         if contains_internal_url(cmd):
             return ToolResult.error("Error: Command blocked by safety guard (internal/private URL detected)")
 
-        if self.restrict_to_workspace:
+        should_restrict = self.restrict_to_workspace if restrict_to_workspace is None else restrict_to_workspace
+        if should_restrict:
             if "..\\" in cmd or "../" in cmd:
                 return ToolResult.error(
                     "Error: Command blocked by safety guard (path traversal detected)" + _WORKSPACE_BOUNDARY_NOTE
                 )
+            workspace_root = workspace_root if workspace_root is not None else self.working_dir
             cwd_path = Path(cwd).resolve()
-            resolved_workspace = Path(self.working_dir).expanduser().resolve() if self.working_dir else None
+            resolved_workspace = Path(workspace_root).expanduser().resolve() if workspace_root else None
             for raw in self._extract_absolute_paths(cmd):
                 try:
                     expanded = os.path.expandvars(raw.strip())
@@ -259,6 +711,86 @@ class ExecTool(Tool):
                         "Error: Command blocked by safety guard (path outside working dir)" + _WORKSPACE_BOUNDARY_NOTE
                     )
         return None
+
+    @staticmethod
+    def _split_shell_segments(command: str) -> list[str]:
+        """Split shell commands on top-level chaining operators (nanobot shell.py:932)."""
+        segments: list[str] = []
+        current: list[str] = []
+        quote: str | None = None
+        escaped = False
+        paren_depth = 0
+        i = 0
+
+        while i < len(command):
+            ch = command[i]
+
+            if escaped:
+                current.append(ch)
+                escaped = False
+                i += 1
+                continue
+
+            if ch == "\\" and quote != "'":
+                current.append(ch)
+                escaped = True
+                i += 1
+                continue
+
+            if quote is not None:
+                current.append(ch)
+                if ch == quote:
+                    quote = None
+                i += 1
+                continue
+
+            if ch in {"'", '"', "`"}:
+                current.append(ch)
+                quote = ch
+                i += 1
+                continue
+
+            if ch == "(":
+                paren_depth += 1
+                current.append(ch)
+                i += 1
+                continue
+
+            if ch == ")" and paren_depth > 0:
+                paren_depth -= 1
+                current.append(ch)
+                i += 1
+                continue
+
+            operator_len = 0
+            if paren_depth == 0:
+                if command.startswith(("&&", "||"), i):
+                    operator_len = 2
+                elif ch == "&" and not (
+                    (i > 0 and command[i - 1] in "<>") or command.startswith("&>", i)
+                ):
+                    current.append(ch)
+                    operator_len = 1
+                # A newline separates commands just like ";" does, so a payload
+                # smuggled onto its own line must be checked on its own too.
+                elif ch in {";", "|", "\n", "\r"}:
+                    operator_len = 1
+
+            if operator_len:
+                segment = "".join(current).strip()
+                if segment:
+                    segments.append(segment)
+                current = []
+                i += operator_len
+                continue
+
+            current.append(ch)
+            i += 1
+
+        segment = "".join(current).strip()
+        if segment:
+            segments.append(segment)
+        return segments
 
     @classmethod
     def _is_benign_device_path(cls, path: str) -> bool:
@@ -404,40 +936,3 @@ class ExecTool(Tool):
             i = max(end, i + 1)
         return paths
 
-    def _resolve_cwd(self, working_dir: str | None) -> str:
-        root = str(self.working_dir) if self.working_dir else os.getcwd()
-        if not working_dir:
-            return root
-        requested = Path(working_dir).expanduser()
-        return str(requested if requested.is_absolute() else Path(root) / requested)
-
-    @staticmethod
-    def _build_env() -> dict[str, str]:
-        """A minimal environment, as in nanobot (Unix).
-
-        Only these variables are passed, so API keys and other secrets in the
-        agent's own environment are never visible to commands the model runs.
-        bash supplies a default PATH.
-        """
-        return {
-            "HOME": os.environ.get("HOME", "/tmp"),
-            "LANG": os.environ.get("LANG", "C.UTF-8"),
-            "TERM": os.environ.get("TERM", "dumb"),
-            "PYTHONUNBUFFERED": "1",
-        }
-
-    @staticmethod
-    async def _kill_process_tree(process: asyncio.subprocess.Process) -> None:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
-        if process.returncode is None:
-            try:
-                process.kill()
-            except ProcessLookupError:
-                pass
-        try:
-            await asyncio.wait_for(process.wait(), timeout=5.0)
-        except asyncio.TimeoutError:
-            pass

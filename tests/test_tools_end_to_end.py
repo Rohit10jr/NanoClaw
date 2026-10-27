@@ -1,5 +1,7 @@
 """The runner driving the real default tools, with a scripted model."""
 
+import re
+
 from conftest import requires_posix_shell
 from nanoclaw.agent.runner import AgentRunner, AgentRunSpec
 from nanoclaw.agent.tools import build_default_tools
@@ -37,7 +39,7 @@ async def test_model_reads_edits_and_verifies_a_file(tmp_path):
     assert tool_outputs["c1"] == "📄 config.ini"
     assert tool_outputs["c2"].startswith("1| [server]\n2| port = 8080")
     assert tool_outputs["c3"] == "Patch applied:\n- update config.ini (+1/-1)"
-    assert tool_outputs["c4"] == "port = 9090\n\n\nExit code: 0"
+    assert re.fullmatch(r"port = 9090\n\nExit code: 0\nElapsed: \d+\.\ds", tool_outputs["c4"])
 
 
 async def test_bad_arguments_reach_the_model_which_then_corrects_itself(tmp_path):
