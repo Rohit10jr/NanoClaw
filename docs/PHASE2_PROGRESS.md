@@ -36,7 +36,7 @@ Legend: ⏳ in progress · ✅ done and verified · ⛔ blocked
 | Integration | retry mode from config, `--logs`, provider retry logs | main session | 3 merges without conflicts | ✅ |
 | Mutation checks | 23 rules | main session | 22 caught, 1 equivalent (5 gaps closed with new tests) | ✅ |
 | Docs | note 12, CODE_MAP, README, ROADMAP | main session | — | ✅ |
-| PR | `p2/layer-12` → `main` | main session | — | ⏳ |
+| PR | `p2/layer-12` → `main` | main session | PR #4 | ✅ |
 
 ## Blockers and open items
 
