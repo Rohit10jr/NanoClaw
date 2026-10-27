@@ -57,6 +57,7 @@ class MockAPI:
             max_retries=0,
             http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(self.handler)),
         )
+        kwargs.setdefault("api_base", "https://llm.test/v1")
         return OpenAICompatProvider(default_model="test-model", client=client, **kwargs)
 
 
@@ -191,6 +192,9 @@ async def test_connection_error_becomes_error_response():
     ("data", "content", "is_error"),
     [
         ({"choices": []}, "Error: API returned empty choices.", True),
+        # Gateway shapes without choices (nanobot e4fc878).
+        ({"choices": [], "content": "top"}, "top", False),
+        ({"output_text": [{"type": "text", "text": "out"}]}, "out", False),
         (completion({"content": [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]}), "ab", False),
         (completion({"content": [{"type": "thinking", "text": "hidden"}, {"type": "text", "text": "shown"}]}), "shown", False),
     ],
@@ -199,6 +203,101 @@ def test_parse_edge_cases(data, content, is_error):
     resp = OpenAICompatProvider.parse(data)
     assert resp.content == content
     assert resp.is_error is is_error
+
+
+def test_top_level_gateway_reply_keeps_usage_and_reasoning():
+    resp = OpenAICompatProvider.parse(
+        {
+            "choices": [],
+            "output_text": "hi",
+            "reasoning_content": "hmm",
+            "finish_reason": "length",
+            "usage": {"prompt_tokens": 4, "completion_tokens": 2},
+        }
+    )
+    assert (resp.content, resp.reasoning_content, resp.finish_reason) == ("hi", "hmm", "length")
+    assert resp.usage == LLMUsage(input_tokens=4, output_tokens=2)
+
+
+def build(model, api_base="https://llm.test/v1", max_tokens=2048, temperature=0.7):
+    provider = OpenAICompatProvider(api_key="k", api_base=api_base, default_model=model)
+    return provider.build_kwargs(
+        [{"role": "user", "content": "hello"}], max_tokens=max_tokens, temperature=temperature
+    )
+
+
+# Adapted from nanobot tests/providers/test_openai_compat_spec.py:902-1053.
+@pytest.mark.parametrize(
+    ("model", "expected_key"),
+    [
+        ("gpt-5.4", "max_completion_tokens"),
+        ("gpt-5-chat", "max_completion_tokens"),
+        ("o1-mini", "max_completion_tokens"),
+        ("o3-mini", "max_completion_tokens"),
+        ("o4-mini", "max_completion_tokens"),
+        ("o1", "max_completion_tokens"),
+        ("openai/gpt-5", "max_completion_tokens"),
+        ("openai/o3-mini", "max_completion_tokens"),
+        ("kimi-k3", "max_completion_tokens"),
+        ("gpt-4", "max_tokens"),
+        ("gpt-4o-mini", "max_tokens"),
+        ("foo3-mini", "max_tokens"),
+        ("foo4-mini", "max_tokens"),
+        ("o10", "max_tokens"),
+    ],
+)
+def test_max_token_key_by_model_name(model, expected_key):
+    kwargs = build(model)
+    other_key = "max_tokens" if expected_key == "max_completion_tokens" else "max_completion_tokens"
+    assert kwargs[expected_key] == 2048
+    assert other_key not in kwargs
+
+
+@pytest.mark.parametrize(
+    ("model", "supports"),
+    [
+        ("gpt-4o", True),
+        ("gpt-4.1", True),
+        ("llama3.2", True),
+        ("gpt-5-chat", False),
+        ("o3-mini", False),
+        ("openai/gpt-5", False),
+        ("gpt-6-sol", False),  # nanobot keeps it only for reasoning_effort="none"
+        ("kimi-k3.1-pro", False),
+        ("qwen-o1-preview", False),  # substring rule, as in nanobot
+    ],
+)
+def test_temperature_only_for_models_that_accept_it(model, supports):
+    kwargs = build(model, temperature=0.2)
+    if supports:
+        assert kwargs["temperature"] == 0.2
+    else:
+        assert "temperature" not in kwargs
+
+
+@pytest.mark.parametrize("api_base", [None, "https://api.openai.com/v1"])
+def test_direct_openai_always_uses_max_completion_tokens(api_base):
+    # nanobot's "openai" spec sets supports_max_completion_tokens=True.
+    kwargs = build("gpt-4o-mini", api_base=api_base)
+    assert kwargs["max_completion_tokens"] == 2048
+    assert "max_tokens" not in kwargs
+    assert kwargs["temperature"] == 0.7
+
+
+def test_gpt5_safe_parameters():
+    kwargs = build("gpt-5-chat", api_base=None, max_tokens=4096)
+    assert kwargs["model"] == "gpt-5-chat"
+    assert kwargs["max_completion_tokens"] == 4096
+    assert "max_tokens" not in kwargs
+    assert "temperature" not in kwargs
+
+
+async def test_reasoning_model_request_on_the_wire():
+    api = MockAPI(body=completion({"content": "ok"}))
+    await api.provider().chat(messages=[{"role": "user", "content": "hi"}], model="o3-mini", max_tokens=50)
+    sent = api.requests[0]
+    assert sent["max_completion_tokens"] == 50
+    assert "max_tokens" not in sent and "temperature" not in sent
 
 
 def test_provider_from_env():
