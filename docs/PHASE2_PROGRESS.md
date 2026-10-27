@@ -48,7 +48,7 @@ Legend: ⏳ in progress · ✅ done and verified · ⛔ blocked
 | 13.4 Wiring | runner, loop, memory, chat, ask, channel settings | sub-agent (worktree), phase B | Identical event sequences for scripted turns; identical chat-turn output; real terminal run | ✅ |
 | Mutation checks | 83 rules | sub-agent (worktree) | 81 caught, 2 equivalent (8 tests added for 10 gaps) | ✅ |
 | Docs | note 13, CODE_MAP, README, notes 02/10, UPSTREAM_BUGS (bug 6 in reasoning lines) | main session | — | ✅ |
-| PR | `p2/layer-13` → `main` | main session | — | ⏳ |
+| PR | `p2/layer-13` → `main` | main session | PR #5 | ✅ |
 
 ## Blockers and open items
 
