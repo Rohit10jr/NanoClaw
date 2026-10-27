@@ -94,6 +94,15 @@ def shape(session):
         ({**FINAL, "assistant_message": {"role": "user", "content": "x"}}, False),
         ({**COMPLETED, "completed_tool_results": "x"}, False),
         ({**AWAITING, "pending_tool_calls": [tc("c1"), {"id": "c2", "function": "bad"}]}, False),
+        # Every call pending, but a result already recorded: not awaiting any more.
+        ({**AWAITING, "completed_tool_results": [DONE_1]}, False),
+        # The right number of rows, but for a call the assistant never made.
+        ({**AWAITING, "pending_tool_calls": [tc("c1"), tc("c3")]}, False),
+        ({**COMPLETED, "completed_tool_results": [DONE_1, dict(DONE_2, tool_call_id="c3")]}, False),
+        # Every call answered, but one still listed as pending.
+        ({**COMPLETED, "pending_tool_calls": [tc("c2")]}, False),
+        # A result row that is not a tool message.
+        ({**COMPLETED, "completed_tool_results": [DONE_1, dict(DONE_2, role="user")]}, False),
         (
             {
                 "phase": "awaiting_tools",
@@ -116,6 +125,11 @@ def shape(session):
         "not-assistant",
         "rows-not-a-list",
         "call-without-function",
+        "awaiting-all-pending-with-a-result",
+        "awaiting-unknown-call",
+        "completed-unknown-call",
+        "completed-all-answered-with-pending",
+        "result-not-a-tool-row",
         "duplicate-ids",
     ],
 )
@@ -193,6 +207,19 @@ def test_rows_already_saved_are_not_added_twice(saved, checkpoint, expected):
     assert restore_runtime_checkpoint(session) is True
     assert len(session.messages) == expected
     assert [m.get("tool_call_id") for m in session.messages[-2:]] == ["c1", "c2"]
+
+
+def test_the_longest_saved_overlap_wins():
+    """Only the whole matching tail counts, even when a shorter one matches too
+    (two identical interrupted rows: a checkpoint repeating a call id)."""
+    checkpoint = {"assistant_message": None, "completed_tool_results": [], "pending_tool_calls": [tc("c1"), tc("c1")]}
+    session = crashed(checkpoint)
+    restore_runtime_checkpoint(session)
+    before = shape(session)
+    assert len(before) == 3
+    session.metadata[RUNTIME_CHECKPOINT_KEY] = checkpoint
+    restore_runtime_checkpoint(session)
+    assert shape(session) == before
 
 
 def test_restoring_twice_adds_nothing():
@@ -363,6 +390,8 @@ async def test_a_command_after_a_crash_still_restores_first(ws, tmp_path):
     saved = on_disk(tmp_path)
     assert plain(saved.messages)[:2] == [("user", None, "go"), ("assistant", None, "finished")]
     assert RUNTIME_CHECKPOINT_KEY not in saved.metadata
+    # The command's own saved input is answered, so it leaves no crash marker.
+    assert PENDING_USER_TURN_KEY not in saved.metadata
 
 
 async def test_a_subagent_report_after_a_crash_restores_first(ws, tmp_path):
