@@ -170,8 +170,8 @@ class ExecToolConfig(Base):
     the legacy spelling of ``maxRuntime``: it is read, never written, and giving
     both is an error.
 
-    ``sandbox``, ``sandboxRoBinds`` and ``sandboxRwBinds`` are read and kept but
-    unused until layer 18 (the bubblewrap sandbox).
+    ``sandbox`` is ``""`` (none) or ``"bwrap"`` (layer 18, ``agent/tools/sandbox.py``);
+    nanobot also accepts ``"seatbelt"`` (macOS), which NanoClaw leaves out.
     """
 
     enable: bool = True
@@ -185,9 +185,9 @@ class ExecToolConfig(Base):
     idle_action: Literal["report", "terminate"] = "report"
     path_prepend: str = ""
     path_append: str = ""
-    sandbox: str = ""  # unused until layer 18
-    sandbox_ro_binds: list[str] = Field(default_factory=list)  # unused until layer 18
-    sandbox_rw_binds: list[str] = Field(default_factory=list)  # unused until layer 18
+    sandbox: str = ""
+    sandbox_ro_binds: list[str] = Field(default_factory=list)
+    sandbox_rw_binds: list[str] = Field(default_factory=list)
     allowed_env_keys: list[str] = Field(default_factory=list)
     allow_patterns: list[str] = Field(default_factory=list)
     deny_patterns: list[str] = Field(default_factory=list)

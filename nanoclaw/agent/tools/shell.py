@@ -17,8 +17,9 @@ Deliberate differences from nanobot:
   nanobot blocks nothing (docs/notes/03-tools.md, 09-safety.md). The
   workspace checks (``working_dir``, ``../``, absolute paths) apply only in
   restricted mode, as in nanobot.
-* No OS sandbox (bubblewrap/seatbelt) yet, no media-folder exception, no
-  Web UI loopback exception and no workspace scopes (later layers).
+* No media-folder exception, no Web UI loopback exception and no workspace
+  scopes. The OS sandbox is bubblewrap only (``sandbox.py``; no macOS
+  seatbelt, decision 11).
 * If Windows can't create a Job object for a session, the command still
   runs, without one, and a kill falls back to ``taskkill /T /F``; nanobot
   fails the command instead.
@@ -61,6 +62,7 @@ from nanoclaw.agent.tools.exec_session import (
     clamp_session_int,
     format_session_poll,
 )
+from nanoclaw.agent.tools.sandbox import wrap_command
 from nanoclaw.agent.tools.schema import object_schema
 from nanoclaw.security.network import contains_internal_url
 from nanoclaw.security.workspace_policy import is_path_within
@@ -230,6 +232,9 @@ class ExecTool(Tool):
         allowed_env_keys: list[str] | None = None,
         exec_session_manager: ExecSessionManager | None = None,
         *,
+        sandbox: str = "",
+        sandbox_ro_binds: list[str] | None = None,
+        sandbox_rw_binds: list[str] | None = None,
         max_runtime: int | None = None,
         max_runtime_limit: int = 86400,
         idle_timeout: int = 300,
@@ -255,6 +260,10 @@ class ExecTool(Tool):
         self.idle_timeout = idle_timeout
         self.idle_action: Literal["report", "terminate"] = idle_action
         self.working_dir = str(working_dir) if working_dir is not None else None
+        # OS sandbox (layer 18, nanobot shell.py:225, :252): "bwrap" or "".
+        self.sandbox = sandbox
+        self.sandbox_ro_binds = self._normalize_bind_roots(sandbox_ro_binds)
+        self.sandbox_rw_binds = self._normalize_bind_roots(sandbox_rw_binds)
         self.deny_patterns = (deny_patterns or []) + DEFAULT_DENY_PATTERNS
         self.allow_patterns = allow_patterns or []
         self.restrict_to_workspace = restrict_to_workspace
@@ -392,7 +401,11 @@ class ExecTool(Tool):
         shell: str | None = None,
         login: bool | None = None,
     ) -> _PreparedCommand | str:
-        """Resolve cwd, run the guard, and build env and shell (nanobot shell.py:380)."""
+        """Resolve cwd, run the guard, wrap in the sandbox, and build env and
+        shell (nanobot shell.py:380)."""
+        # A configured sandbox forces restricted mode (nanobot
+        # ``current_tool_workspace(..., sandbox_restricts_workspace=...)``).
+        restrict = self.restrict_to_workspace or bool(self.sandbox)
         workspace_root = self.working_dir
         if working_dir:
             requested_dir = Path(working_dir).expanduser()
@@ -406,7 +419,7 @@ class ExecTool(Tool):
         # Restricted mode: an LLM-supplied working_dir must not escape the
         # workspace, or absolute paths under it would pass the path check in
         # _guard_command, which is anchored on cwd (nanobot #2826).
-        if self.restrict_to_workspace and workspace_root:
+        if restrict and workspace_root:
             try:
                 requested = Path(cwd).expanduser().resolve()
                 resolved_root = Path(workspace_root).expanduser().resolve()
@@ -421,10 +434,32 @@ class ExecTool(Tool):
         guard_error = self._guard_command(
             shlex.join(command) if isinstance(command, list) else command,
             cwd,
+            restrict_to_workspace=restrict,
             workspace_root=workspace_root,
         )
         if guard_error:
             return guard_error
+
+        # nanobot shell.py:436. An argv command (rg) is joined, wrapped and
+        # split back into argv, so it still runs without a shell around bwrap.
+        if self.sandbox:
+            if _IS_WINDOWS:
+                logger.warning(
+                    "Sandbox '{}' is not supported on Windows; running unsandboxed",
+                    self.sandbox,
+                )
+            else:
+                workspace = workspace_root or cwd
+                wrapped = wrap_command(
+                    self.sandbox,
+                    shlex.join(command) if isinstance(command, list) else command,
+                    workspace,
+                    cwd,
+                    sandbox_ro_binds=[str(p) for p in self.sandbox_ro_binds],
+                    sandbox_rw_binds=[str(p) for p in self.sandbox_rw_binds],
+                )
+                command = shlex.split(wrapped) if isinstance(command, list) else wrapped
+                cwd = str(Path(workspace).resolve())
 
         effective_timeout = self._resolve_timeout(timeout)
         env = self._build_env()
@@ -868,6 +903,7 @@ class ExecTool(Tool):
             workspace_root = workspace_root if workspace_root is not None else self.working_dir
             cwd_path = Path(cwd).resolve()
             resolved_workspace = Path(workspace_root).expanduser().resolve() if workspace_root else None
+            sandbox_bind_roots = self._active_sandbox_bind_roots(resolved_workspace or cwd_path)
             for raw in self._extract_absolute_paths(cmd):
                 try:
                     expanded = os.path.expandvars(raw.strip())
@@ -906,6 +942,8 @@ class ExecTool(Tool):
                 allowed = is_path_within(p, cwd_path)
                 if not allowed and resolved_workspace is not None:
                     allowed = is_path_within(p, resolved_workspace)
+                if not allowed and sandbox_bind_roots:
+                    allowed = any(is_path_within(p, root) for root in sandbox_bind_roots)
                 if p.is_absolute() and not allowed:
                     return ToolResult.error(
                         "Error: Command blocked by safety guard (path outside working dir)" + _WORKSPACE_BOUNDARY_NOTE
@@ -1030,6 +1068,41 @@ class ExecTool(Tool):
                         paths.append(path)
                         seen.add(path)
         return paths
+
+    @staticmethod
+    def _normalize_bind_roots(paths: list[str] | None) -> list[Path]:
+        """Absolute, resolved, de-duplicated sandbox bind folders (nanobot shell.py:1153)."""
+        roots: list[Path] = []
+        seen: set[str] = set()
+        for raw in paths or []:
+            value = str(raw).strip()
+            if not value:
+                continue
+            path = Path(os.path.expandvars(value)).expanduser()
+            if not path.is_absolute():
+                continue
+            with suppress(OSError, RuntimeError, ValueError):
+                resolved = path.resolve(strict=False)
+                key = os.path.normcase(os.fspath(resolved))
+                if key in seen:
+                    continue
+                seen.add(key)
+                roots.append(resolved)
+        return roots
+
+    def _active_sandbox_bind_roots(self, workspace_root: Path | None = None) -> list[Path]:
+        """Bind folders the restricted-mode path check also allows (nanobot shell.py:1175).
+
+        Only with the sandbox actually in use (not on Windows); a bind that
+        contains the workspace is left out, so binding a parent never opens
+        the workspace's surroundings to the guard.
+        """
+        if self.sandbox != "bwrap" or _IS_WINDOWS:
+            return []
+        roots = [*self.sandbox_ro_binds, *self.sandbox_rw_binds]
+        if workspace_root is None:
+            return roots
+        return [root for root in roots if not is_path_within(workspace_root, root)]
 
     @staticmethod
     def _extract_posix_paths_from_token(token: str) -> list[str]:
