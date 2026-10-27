@@ -113,12 +113,12 @@ class OpenAICompatProvider(LLMProvider):
         default_model: str = "gpt-4o-mini",
         *,
         client: AsyncOpenAI | None = None,
-        max_retries: int = 2,
+        max_retries: int = 0,
         timeout_s: float = 120.0,
     ) -> None:
         super().__init__(api_key, api_base, default_model)
-        # nanobot sets max_retries=0 and runs its own retry policy; until we
-        # build one, the SDK's retries (with backoff on 429/5xx) cover us.
+        # The SDK's own retries are off: chat_with_retry is the one retry
+        # policy, so retries don't multiply (nanobot openai_compat_provider.py:581).
         self._max_retries = max_retries
         self._timeout_s = timeout_s
         # Created lazily so constructing a provider never touches the network.
@@ -256,15 +256,36 @@ class OpenAICompatProvider(LLMProvider):
 
     @staticmethod
     def _parse_usage(raw_usage: Any) -> LLMUsage | None:
+        """Usage with cache counts, normalized across providers.
+
+        (nanobot openai_compat_provider.py:1381 ``_extract_usage``)
+        """
         if not isinstance(raw_usage, dict) or not raw_usage:
             return None
-        return LLMUsage(
+        cache_read: int | None = None
+        for path in (
+            ("prompt_tokens_details", "cached_tokens"),  # OpenAI, Zhipu, MiniMax, Qwen, Mistral, xAI
+            ("cached_tokens",),  # StepFun, Moonshot
+            ("prompt_cache_hit_tokens",),  # DeepSeek, SiliconFlow
+        ):
+            cache_read = _get_nested_int(raw_usage, path)
+            if cache_read is not None:
+                break
+        return LLMUsage.reported(
             input_tokens=int(raw_usage.get("prompt_tokens") or 0),
             output_tokens=int(raw_usage.get("completion_tokens") or 0),
+            total_tokens=_get_nested_int(raw_usage, ("total_tokens",)),
+            cache_read_tokens=cache_read,
+            cache_write_tokens=_get_nested_int(raw_usage, ("prompt_tokens_details", "cache_write_tokens")),
         )
 
-    @staticmethod
-    def _error_response(exc: Exception) -> LLMResponse:
+    @classmethod
+    def _error_response(cls, exc: Exception) -> LLMResponse:
+        """An error response carrying what the retry policy needs.
+
+        (nanobot openai_compat_provider.py:1732 ``_handle_error``; NanoClaw keeps
+        its own shorter message text.)
+        """
         if isinstance(exc, APIStatusError):
             # The SDK's exc.message embeds the whole JSON body; prefer the
             # API's own human-readable message when it sent one.
@@ -273,4 +294,63 @@ class OpenAICompatProvider(LLMProvider):
             detail = f"HTTP {exc.status_code}: {message or exc.message}"
         else:
             detail = str(exc).strip() or type(exc).__name__
-        return LLMResponse(content=f"Error calling LLM: {detail}", finish_reason="error")
+        content = f"Error calling LLM: {detail}"
+        retry_after = cls._extract_retry_after_from_headers(getattr(getattr(exc, "response", None), "headers", None))
+        if retry_after is None:
+            retry_after = cls._extract_retry_after(content)
+        return LLMResponse(
+            content=content,
+            finish_reason="error",
+            retry_after=retry_after,
+            **cls._extract_error_metadata(exc),
+        )
+
+    @classmethod
+    def _extract_error_metadata(cls, exc: Exception) -> dict[str, Any]:
+        """Status, type/code, Retry-After and x-should-retry from an SDK error.
+
+        (nanobot openai_compat_provider.py:1684)
+        """
+        response = getattr(exc, "response", None)
+        headers = getattr(response, "headers", None)
+        payload = getattr(exc, "body", None) or getattr(exc, "doc", None) or getattr(response, "text", None)
+        error_type, error_code = cls._extract_error_type_code(payload)
+
+        status_code = getattr(exc, "status_code", None)
+        if status_code is None and response is not None:
+            status_code = getattr(response, "status_code", None)
+
+        should_retry: bool | None = None
+        if headers is not None:
+            raw = headers.get("x-should-retry")
+            if isinstance(raw, str):
+                should_retry = {"true": True, "false": False}.get(raw.strip().lower())
+
+        error_name = type(exc).__name__.lower()
+        error_kind = "timeout" if "timeout" in error_name else "connection" if "connection" in error_name else None
+        return {
+            "error_status_code": int(status_code) if status_code is not None else None,
+            "error_kind": error_kind,
+            "error_type": error_type,
+            "error_code": error_code,
+            "error_retry_after_s": cls._extract_retry_after_from_headers(headers),
+            "error_should_retry": should_retry,
+        }
+
+
+def _get_nested_int(obj: Any, path: tuple[str, ...]) -> int | None:
+    """A count at ``path`` in nested dicts, keeping an explicit 0; ``None`` if absent.
+
+    (nanobot openai_compat_provider.py:1439 ``_get_nested_int``)
+    """
+    current = obj
+    for segment in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(segment)
+    if current is None or isinstance(current, bool):
+        return None
+    try:
+        return int(current)
+    except (TypeError, ValueError):
+        return None

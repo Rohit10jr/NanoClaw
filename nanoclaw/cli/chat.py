@@ -157,6 +157,10 @@ def build_status_content(
     )
     last_in = int((last_usage or {}).get("input_tokens") or 0)
     last_out = int((last_usage or {}).get("output_tokens") or 0)
+    cached = int((last_usage or {}).get("cache_read_tokens") or 0)
+    token_line = f"📊 Tokens: {last_in} in / {last_out} out"
+    if cached and last_in:
+        token_line += f" ({cached * 100 // last_in}% cached)"
     ctx_total = max(context_window_tokens, 0)
     ctx_budget = max(ctx_total - int(max_completion_tokens) - _CONTEXT_SAFETY_BUFFER, 1)
     ctx_pct = min(int((context_tokens_estimate / ctx_budget) * 100), 999) if ctx_budget > 0 else 0
@@ -166,7 +170,7 @@ def build_status_content(
         [
             f"{BOT_NAME} v{__version__}",
             f"🧠 Model: {model}",
-            f"📊 Tokens: {last_in} in / {last_out} out",
+            token_line,
             f"📚 Context: {ctx_used_str}/{ctx_total_str} ({ctx_pct}% of input budget)",
             f"💬 Session: {session_msg_count} messages",
             f"⏱ Uptime: {uptime}",

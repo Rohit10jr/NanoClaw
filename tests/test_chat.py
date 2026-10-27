@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 import io
+import re
 import signal
 
 import pytest
@@ -267,7 +268,8 @@ async def test_new_history_and_status(ws, tmp_path):
     assert "Last 2 message(s):\n👤 You: hi there\n🤖 Bot: Hello!\n" in text  # no time block shown
     assert "Last 1 message(s):\n🤖 Bot: Hello!\n" in text
     assert "Usage: /history [count] — e.g. /history 5 (default: 10, max: 50)" in text
-    assert "🧠 Model: fake-model\n📊 Tokens: 0 in / 0 out\n" in text
+    # FakeProvider reports no usage, so /status shows the runner's estimate.
+    assert re.search(r"🧠 Model: fake-model\n📊 Tokens: [1-9]\d* in / [1-9]\d* out\n", text)
     assert "💬 Session: 2 messages" in text and "⚡ Tasks: 0 active" in text
     assert "New session started." in text
     assert text.count("No conversation history yet.") == 2  # cleared by /new
@@ -290,13 +292,29 @@ def test_status_content_uses_last_usage():
     assert "⚡ Tasks: 2 active" in content
 
 
+def test_status_content_shows_cache_share():
+    """nanobot utils/helpers.py:880: the cached share of the last input."""
+    content = build_status_content(
+        model="m",
+        start_time=0,
+        last_usage={"input_tokens": 1000, "output_tokens": 30, "cache_read_tokens": 250},
+        context_window_tokens=128_000,
+        session_msg_count=4,
+        context_tokens_estimate=0,
+        active_task_count=0,
+        max_completion_tokens=8192,
+    )
+    assert "📊 Tokens: 1000 in / 30 out (25% cached)" in content
+
+
 async def test_last_usage_is_saved(ws, tmp_path):
     from nanoclaw.providers.base import LLMUsage
 
     chat, _, _ = make_chat(ws, tmp_path, [LLMResponse(content="ok", usage=LLMUsage(input_tokens=50, output_tokens=7))], ["hi"])
     await chat.run()
     meta = chat.loop.sessions.get_or_create("cli:direct").metadata
-    assert meta["_last_usage"] == {"input_tokens": 50, "output_tokens": 7, "total_tokens": 57}
+    assert meta["_last_usage"] == LLMUsage(input_tokens=50, output_tokens=7).to_dict()
+    assert meta["_last_usage"]["total_tokens"] == 57
 
 
 async def test_compact_skill_and_dream(ws, tmp_path):

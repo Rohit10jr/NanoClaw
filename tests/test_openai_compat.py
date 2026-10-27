@@ -40,15 +40,15 @@ def tool_call(call_id, name, arguments):
 class MockAPI:
     """Serves one canned reply and remembers the request body."""
 
-    def __init__(self, status=200, body=None, exc=None):
-        self.status, self.body, self.exc = status, body, exc
+    def __init__(self, status=200, body=None, exc=None, headers=None):
+        self.status, self.body, self.exc, self.headers = status, body, exc, headers or {}
         self.requests: list[dict] = []
 
     def handler(self, request: httpx2.Request) -> httpx2.Response:
         self.requests.append(json.loads(request.content))
         if self.exc is not None:
             raise self.exc
-        return httpx2.Response(self.status, json=self.body)
+        return httpx2.Response(self.status, json=self.body, headers=self.headers)
 
     def provider(self, **kwargs) -> OpenAICompatProvider:
         client = AsyncOpenAI(
@@ -68,7 +68,7 @@ async def test_plain_text_reply_and_request_shape():
     assert resp.content == "Hello!"
     assert resp.finish_reason == "stop"
     assert resp.tool_calls == []
-    assert resp.usage == LLMUsage(input_tokens=12, output_tokens=3)
+    assert resp.usage == LLMUsage.reported(input_tokens=12, output_tokens=3, total_tokens=15)
     assert resp.usage.total_tokens == 15
 
     sent = api.requests[0]
@@ -216,7 +216,7 @@ def test_top_level_gateway_reply_keeps_usage_and_reasoning():
         }
     )
     assert (resp.content, resp.reasoning_content, resp.finish_reason) == ("hi", "hmm", "length")
-    assert resp.usage == LLMUsage(input_tokens=4, output_tokens=2)
+    assert resp.usage == LLMUsage.reported(input_tokens=4, output_tokens=2)
 
 
 def build(model, api_base="https://llm.test/v1", max_tokens=2048, temperature=0.7):
@@ -311,3 +311,131 @@ def test_provider_from_env_defaults():
     p = provider_from_env({})
     assert p.api_key is None and p.api_base is None
     assert p.default_model == "gpt-4o-mini"
+
+
+# --- error metadata for the retry policy (nanobot openai_compat_provider.py:1684) ---
+
+
+async def test_rate_limit_error_carries_retry_metadata():
+    api = MockAPI(
+        status=429,
+        body={"error": {"message": "Rate limit reached", "type": "requests", "code": "rate_limit_exceeded"}},
+        headers={"retry-after": "5", "x-should-retry": "true"},
+    )
+    resp = await api.provider().chat(messages=[{"role": "user", "content": "x"}])
+    assert resp.content == "Error calling LLM: HTTP 429: Rate limit reached"
+    assert (resp.error_status_code, resp.error_type, resp.error_code) == (429, "requests", "rate_limit_exceeded")
+    assert resp.error_retry_after_s == 5.0 and resp.retry_after == 5.0
+    assert resp.error_should_retry is True
+    assert OpenAICompatProvider.is_transient_response(resp)
+
+
+async def test_quota_error_is_not_retried():
+    api = MockAPI(
+        status=429,
+        body={"error": {"message": "You exceeded your current quota", "type": "insufficient_quota", "code": "insufficient_quota"}},
+    )
+    resp = await api.provider().chat(messages=[{"role": "user", "content": "x"}])
+    assert resp.error_type == "insufficient_quota" and resp.error_should_retry is None
+    assert not OpenAICompatProvider.is_transient_response(resp)
+    assert OpenAICompatProvider.is_arrearage_response(resp)
+
+
+async def test_retry_after_ms_and_should_retry_false_headers():
+    api = MockAPI(status=500, body={"error": {"message": "oops"}}, headers={"retry-after-ms": "250", "x-should-retry": "false"})
+    resp = await api.provider().chat(messages=[{"role": "user", "content": "x"}])
+    assert resp.error_retry_after_s == 0.25
+    assert resp.error_should_retry is False
+    assert not OpenAICompatProvider.is_transient_response(resp)  # the header beats the 500
+
+
+async def test_connection_error_metadata():
+    api = MockAPI(exc=httpx2.ConnectError("refused"))
+    resp = await api.provider().chat(messages=[{"role": "user", "content": "x"}])
+    assert resp.error_kind == "connection" and resp.error_status_code is None
+    assert OpenAICompatProvider.is_transient_response(resp)
+
+
+async def test_timeout_error_metadata():
+    api = MockAPI(exc=httpx2.ReadTimeout("slow"))
+    resp = await api.provider().chat(messages=[{"role": "user", "content": "x"}])
+    assert resp.error_kind == "timeout"
+    assert OpenAICompatProvider.is_transient_response(resp)
+
+
+def test_error_metadata_from_duck_typed_exception():
+    """nanobot tests/providers/test_provider_error_metadata.py."""
+
+    class FakeStatusError(Exception):
+        pass
+
+    err = FakeStatusError("boom")
+    err.status_code = 409
+    err.response = type("R", (), {"status_code": 409, "headers": {"retry-after-ms": "250", "x-should-retry": "false"}, "text": ""})()
+    err.body = {"error": {"type": "rate_limit_exceeded", "code": "rate_limit_exceeded"}}
+    resp = OpenAICompatProvider._error_response(err)
+    assert (resp.error_status_code, resp.error_type, resp.error_code) == (409, "rate_limit_exceeded", "rate_limit_exceeded")
+    assert resp.error_retry_after_s == 0.25 and resp.error_should_retry is False
+
+
+def test_sdk_retries_are_disabled():
+    """nanobot tests/providers/test_provider_sdk_retry_defaults.py: one retry policy, ours."""
+    assert OpenAICompatProvider(api_key="k")._get_client().max_retries == 0
+
+
+async def test_chat_with_retry_over_the_wire(monkeypatch):
+    delays = []
+
+    async def fake_sleep(delay):
+        delays.append(delay)
+
+    monkeypatch.setattr("nanoclaw.providers.base.asyncio.sleep", fake_sleep)
+    replies = [
+        httpx2.Response(503, json={"error": {"message": "overloaded"}}, headers={"retry-after": "2"}),
+        httpx2.Response(200, json=completion({"content": "ok"})),
+    ]
+    api = MockAPI()
+    api.handler = lambda request: replies.pop(0)
+    resp = await api.provider().chat_with_retry(messages=[{"role": "user", "content": "x"}])
+    assert resp.content == "ok"
+    assert delays == [3.0]  # Retry-After + 1s
+
+
+# --- usage with cache counts (nanobot tests/providers/test_cached_tokens.py) ---
+
+
+@pytest.mark.parametrize(
+    ("raw", "cache_read", "cache_write"),
+    [
+        ({"prompt_tokens": 2000, "completion_tokens": 300, "prompt_tokens_details": {"cached_tokens": 1200}}, 1200, None),
+        ({"prompt_tokens": 2000, "completion_tokens": 300, "prompt_cache_hit_tokens": 1500, "prompt_cache_miss_tokens": 500}, 1500, None),
+        ({"prompt_tokens": 2000, "completion_tokens": 300, "cached_tokens": 800}, 800, None),
+        ({"prompt_tokens": 2000, "completion_tokens": 300, "prompt_tokens_details": {"cached_tokens": 0}}, 0, None),
+        ({"prompt_tokens": 2000, "completion_tokens": 300, "prompt_tokens_details": None}, None, None),
+        ({"prompt_tokens": 2000, "completion_tokens": 300}, None, None),
+        (
+            {"prompt_tokens": 2000, "completion_tokens": 300, "prompt_tokens_details": {"cached_tokens": 100, "cache_write_tokens": 50}},
+            100,
+            50,
+        ),
+        # The nested OpenAI field wins over a top-level one.
+        ({"prompt_tokens": 2000, "completion_tokens": 300, "prompt_tokens_details": {"cached_tokens": 100}, "cached_tokens": 999}, 100, None),
+    ],
+)
+def test_usage_cache_fields(raw, cache_read, cache_write):
+    usage = OpenAICompatProvider._parse_usage(raw)
+    assert (usage.input_tokens, usage.output_tokens) == (2000, 300)
+    assert (usage.cache_read_tokens, usage.cache_write_tokens) == (cache_read, cache_write)
+    assert usage.source == "reported" and usage.request_count == 1 and usage.context_tokens == 2000
+
+
+def test_usage_keeps_a_larger_reported_total():
+    usage = OpenAICompatProvider._parse_usage({"prompt_tokens": 15, "completion_tokens": 18, "total_tokens": 175})
+    assert usage.total_tokens == 175 and usage.reported_tokens == 175
+
+
+async def test_sdk_usage_object_round_trip():
+    """The SDK's model_dump() gives prompt_tokens_details as a nested dict."""
+    usage = {"prompt_tokens": 50, "completion_tokens": 5, "total_tokens": 55, "prompt_tokens_details": {"cached_tokens": 40, "audio_tokens": None}}
+    resp = await MockAPI(body=completion({"content": "hi"}, usage=usage)).provider().chat(messages=[{"role": "user", "content": "x"}])
+    assert resp.usage.cache_read_tokens == 40 and resp.usage.total_tokens == 55
