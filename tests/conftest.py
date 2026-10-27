@@ -1,6 +1,9 @@
 """Shared test setup."""
 
+import os
+import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -8,12 +11,36 @@ from nanoclaw.utils import tokens
 
 REAL_GET_TOKEN_ENCODING = tokens.get_token_encoding
 
-# The exec tool runs bash; Windows shell support (PowerShell, as nanobot) is
-# planned, so tests that really run a command are skipped there (docs/WINDOWS.md,
-# cause A). Tests that only check the guards still run everywhere.
-requires_posix_shell = pytest.mark.skipif(
-    sys.platform == "win32", reason="exec tool needs bash; Windows shell support is planned (docs/WINDOWS.md)"
-)
+WINDOWS = sys.platform == "win32"
+
+# The exec tool runs bash on POSIX and PowerShell on Windows (layer 16, task
+# 16.4). Tests that really run a command give Windows a PowerShell variant
+# where they can; this marks the few whose command, or what they check, only
+# makes sense in a POSIX shell (docs/WINDOWS.md lists them).
+def requires_posix_shell(reason: str):
+    return pytest.mark.skipif(WINDOWS, reason=f"POSIX shell only: {reason}")
+
+
+def pid_running(pid: int) -> bool:
+    """Whether process ``pid`` is alive (zombies count as gone). ``os.kill(pid, 0)``
+    on POSIX, ``tasklist`` on Windows; psutil is not a dependency."""
+    if WINDOWS:
+        out = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+            capture_output=True, text=True, check=False,
+        ).stdout
+        return f'"{pid}"' in out
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    stat = Path(f"/proc/{pid}/stat")
+    try:  # Linux: an unreaped zombie still answers os.kill
+        return stat.read_text().rsplit(")", 1)[1].split()[0] != "Z"
+    except (OSError, IndexError):
+        return True
 
 
 def symlink_or_skip(link, target):

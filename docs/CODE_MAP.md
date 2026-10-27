@@ -594,7 +594,7 @@ section point at `c4dac64`, the phase 2 reference.
 | `_search_error`, tool descriptions (`nanoclaw/agent/tools/web.py`) | [`agent/tools/web.py:1206`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/tools/web.py#L1206) | Same texts |
 | `_model_slug`, `_requires_max_completion_tokens`, `_supports_temperature`, `_is_direct_openai`, `_parse_usage` (`nanoclaw/providers/openai_compat.py`) | [`providers/openai_compat_provider.py:147-927`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/providers/openai_compat_provider.py#L147) | Same request settings in 17 cases; no effort setting or provider specs |
 | `normalize_command_text`, `command_name`, `invalid_command_text` (`nanoclaw/cli/chat.py`) | [`command/router.py:26-168`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/command/router.py#L26) | Same results; functions instead of a router class |
-| `requires_posix_shell`, `symlink_or_skip` (`tests/conftest.py`) | — | NanoClaw only: Windows test skips (`WINDOWS.md`) |
+| `requires_posix_shell(reason)`, `pid_running`, `symlink_or_skip` (`tests/conftest.py`) | — | NanoClaw only: Windows test skips and a portable process check (`WINDOWS.md`) |
 
 ## Layer 12 — Foundations
 

@@ -210,7 +210,7 @@ blocked and the slip-through cases are tested in `tests/test_shell_tool.py`.
 | `edit_file` `line_hint`, `expected_replacements` | `filesystem.py` | Pick a match by line number; guard the number of replacements |
 | `apply_patch`, ripgrep `search` | `tools/apply_patch.py`, `tools/search.py` | Multi-file patches, fast code search |
 | Background shell sessions | `exec_session.py`, `yield_time_ms` | Long-running commands the model polls (**done in layer 16**) |
-| Shell choice, login shells, PATH config, Windows | `shell.py` | Platform support (shell/login/PATH **done in layer 16**; Windows: task 16.4) |
+| Shell choice, login shells, PATH config, Windows | `shell.py`, `_windows_job.py` | Platform support (**done in layer 16**: shell/login/PATH; Windows in task 16.4: PowerShell or cmd, a Job object or `taskkill /T /F` for the process tree, the Windows environment; not yet run on Windows, see `docs/WINDOWS.md`) |
 | Jina Reader, image fetching, proxies | `web.py` | Better extraction for JS-heavy pages |
 | Other search providers (Brave, Tavily, ...) | `web.py` | ~10 providers with API keys |
 | Tool auto-discovery and plugins | `tools/loader.py`, entry points | Third-party tools without code changes |
@@ -221,7 +221,7 @@ blocked and the slip-through cases are tested in `tests/test_shell_tool.py`.
   parameters, `{"arguments": ...}` unwrapping.
 - `tests/test_filesystem_tools.py`: real files in a temp folder; paging,
   caps, every edit strategy and error, CRLF, best-match diff, list_dir rules.
-- `tests/test_shell_tool.py`: real bash; output format, exit codes, timeout
+- `tests/test_shell_tool.py`: real bash (PowerShell variants on Windows); output format, exit codes, timeout
   killing child processes, secrets not visible, deny list (blocked,
   allowed, and slip-through cases; since the end of layer 6 also writes to
   the memory journal, while reading it stays allowed).

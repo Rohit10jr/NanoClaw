@@ -4,7 +4,7 @@ import hashlib
 import os
 from pathlib import Path
 
-from conftest import requires_posix_shell
+from conftest import WINDOWS
 from nanoclaw.agent.messages import TRUNCATED_SUFFIX
 from nanoclaw.agent.runner import AgentRunner, AgentRunSpec
 from nanoclaw.agent.tool_results import TOOL_RESULTS_DIR, maybe_persist_tool_result, normalize_tool_result
@@ -102,10 +102,10 @@ async def test_runner_keeps_read_file_footer_on_large_files(tmp_path):
     assert content.endswith("(Showing lines 1-2000 of 3000. Use offset=2001 to continue.)")
 
 
-@requires_posix_shell
 async def test_runner_offloads_large_exec_output_to_workspace(tmp_path):
+    command = "1..3000" if WINDOWS else "seq 1 3000"
     result = await _run(
-        tmp_path, "exec", {"command": "seq 1 3000"}, workspace=tmp_path, max_chars=2000
+        tmp_path, "exec", {"command": command}, workspace=tmp_path, max_chars=2000
     )
     content = result.messages[2]["content"]
     assert content.startswith("[tool output persisted]")
