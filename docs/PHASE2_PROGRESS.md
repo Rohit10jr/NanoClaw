@@ -8,18 +8,22 @@ comparison and mutation checks → docs → PR.
 
 Legend: ⏳ in progress · ✅ done and verified · ⛔ blocked
 
-## Layer 11 — catch up with upstream (`p2/layer-11`)
+## Layer 11 — catch up with upstream (`p2/layer-11`) ✅
 
 | Task | Scope (files) | Sub-agent | Verification | Status |
 |---|---|---|---|---|
-| 11.1 System prompt | `agent/context.py`, `agent/skills.py`, `templates/agent/{identity,platform_policy}.md`, built-in skill descriptions | | | ⏳ |
-| 11.2 Loop and subagent report | `agent/loop.py` (iteration-limit notice), `agent/subagent.py`, `templates/agent/subagent_announce.md` | | | ⏳ |
-| 11.3 File, shell and network fixes | `tools/filesystem.py`, `tools/shell.py` (guard), `security/network.py` | | | ⏳ |
-| 11.4 Schema, error hint, web | `tools/schema.py`, `tools/registry.py`, `tools/web.py`, `pyproject.toml` (ddgs) | | | ⏳ |
-| 11.5 OpenAI reasoning models | `providers/openai_compat.py` | | | ⏳ |
-| 11.6 Slash text goes to the model | `cli/chat.py` | | | ⏳ |
-| 11.7 Windows test fixes | tests only (after 11.1–11.6) | | | |
-| 11.8 Docs, comparison, mutation checks, PR | docs | main session | | |
+| 11.1 System prompt | `agent/context.py`, `agent/skills.py`, `templates/agent/{identity,platform_policy}.md`, 5 skill descriptions, `nanoclaw skills` | sub-agent (worktree) | Both projects' prompts rendered and diffed: only deliberate differences | ✅ |
+| 11.2 Iteration-limit notice, subagent report | `agent/loop.py`, `runtime_context.py`, `session/manager.py`, `agent/subagent.py`, `subagent_announce.md` | sub-agent (worktree) | nanobot code run on the same scenarios; exact strings asserted | ✅ |
+| 11.3 File, shell, DNS fixes | `tools/filesystem.py`, `tools/shell.py`, `security/network.py` | sub-agent (worktree) | Fail-before/pass-after per fix; nanobot's 53 regression tests pass on the same inputs | ✅ |
+| 11.4 Schema, error hint, web | `tools/schema.py`, `tools/registry.py`, `tools/web.py`, ddgs pin | sub-agent (worktree) | 7,922 cases identical to nanobot | ✅ |
+| 11.5 OpenAI reasoning models | `providers/openai_compat.py` | sub-agent (worktree) | Request settings identical in 17 cases | ✅ |
+| 11.6 Slash text goes to the model | `cli/chat.py` | sub-agent (worktree) | nanobot's tests adapted; 22 fail on old code | ✅ |
+| 11.7 Windows test fixes | tests only | sub-agent (worktree, after 11.1–11.6) | Linux suite unchanged; simulated no-console and encoding checks; not run on Windows | ✅ |
+| Upstream bugs re-check | read-only | sub-agent | Bug 1 fixed upstream; 2–6 reproduced at `c4dac64` | ✅ |
+| Integration | merges | main session | One conflict (old hint text in a new test), fixed; 784 passed | ✅ |
+| Mutation checks | 25 rules | main session | 25/25 caught | ✅ |
+| Docs | note 11, CODE_MAP, ROADMAP, README, WINDOWS, UPSTREAM_BUGS, stale lines | main session | — | ✅ |
+| PR | `p2/layer-11` → `main` | main session | — | ⏳ |
 
 ## Blockers and open items
 

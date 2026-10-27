@@ -43,6 +43,14 @@ the next thing to try.
 | Item | Status |
 |---|---|
 | Diagnosis (this page) | Done |
-| Option 1: test fixes and Windows skips | Not started |
-| Option 2: Windows shell support | Not started (phase 2) |
+| Option 1: test fixes and Windows skips | Done in layer 11 (task 11.7): causes B–H fixed in the tests; 21 tests skipped on Windows (18 run the shell tool, 2 need symlink rights, 1 POSIX permissions); not yet run on Windows |
+| Option 2: Windows shell support | Planned for layer 16 (PowerShell with `taskkill`) |
 | Docker / Ubuntu run | Planned |
+
+## Found while fixing the tests (for layer 16)
+
+| Item | Where | Note |
+|---|---|---|
+| `exec` paths like `C:\...` don't count toward the repeated-violation escalation | `nanoclaw/agent/tools/violations.py` `_OUTSIDE_PATH_PATTERN` (only `/` and `~` paths) | Fix with the Windows shell support |
+| `write_text` without an encoding | `nanoclaw/skills/skill-creator/scripts/init_skill.py` (copied from nanobot) | Writes cp1252 on Windows; same in nanobot |
+| `list_dir` recursive mixes `/` after folder names with `\` inside paths | `ListDirTool` | Same as nanobot; cosmetic |
