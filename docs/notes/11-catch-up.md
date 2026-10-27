@@ -72,3 +72,15 @@ Layer 11 adds about 210 tests (572 → 783 on Linux), mostly adapted from the
 nanobot tests that came with each upstream commit, plus
 `tests/test_iteration_limit.py`. Every rule was also broken on purpose to
 confirm a test fails (mutation checks, below).
+
+### Mutation checks
+
+25 rules from this layer were broken one at a time and the full suite run:
+all 25 caught. They covered the memory section, unavailable skills, the
+absolute built-in root, the iteration-limit flag (set, used, recorded, cleared
+by `/new`), exact newlines, reindenting, per-match whitespace, the `~user`
+guard, bytes hosts in DNS pinning, JSON integers, enum equality, `null` type,
+container decoding, the hint text, the search timeout message, the
+`max_completion_tokens` rules (model and direct-OpenAI), temperature,
+`output_text`, registered-only slash commands, the `incomplete` subagent
+outcome and partial results.
