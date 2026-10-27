@@ -1,17 +1,17 @@
 """Typed events for user-facing output: progress, streaming, turn end.
 
-Copied from nanobot/bus/outbound_events.py. In nanobot these ride on an
-``OutboundMessage`` through the message bus; NanoClaw has no bus yet
-(layer 14), so ``outbound_message_for_event`` / ``replace_outbound_event``
-are not here. The events are published straight to an
-:class:`~nanoclaw.events.EventSink`.
+Copied from nanobot/bus/outbound_events.py. They are published to an
+:class:`~nanoclaw.events.EventSink`, or ride on an ``OutboundMessage``
+through the message bus (``outbound_message_for_event``).
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
 from typing import Any
 
+from nanoclaw.bus.events import OutboundMessage
 from nanoclaw.events import AgentEvent
 from nanoclaw.events import ContextCompactionEvent as ContextCompactionEvent
 from nanoclaw.events import RecoveryStateEvent as RecoveryStateEvent
@@ -145,11 +145,31 @@ class TurnModelUpdatedEvent(AgentEvent):
     reauth_provider: str | None = None
 
 
-def _event_content(event: AgentEvent) -> str:
-    """Plain-text fallback for an event, for channels that only show text.
+def outbound_message_for_event(
+    *,
+    channel: str,
+    chat_id: str,
+    event: AgentEvent,
+    content: str | None = None,
+    metadata: Mapping[str, Any] | None = None,
+) -> OutboundMessage:
+    """An :class:`OutboundMessage` carrying a typed event. (nanobot :115)"""
+    return OutboundMessage(
+        channel=channel,
+        chat_id=chat_id,
+        content=_event_content(event) if content is None else content,
+        event=event,
+        metadata=dict(metadata or {}),
+    )
 
-    (nanobot :149; used there by ``outbound_message_for_event``)
-    """
+
+def replace_outbound_event(msg: OutboundMessage, event: AgentEvent, *, content: str | None = None) -> OutboundMessage:
+    """*msg* with a new event and, optionally, new content. (nanobot :134)"""
+    return replace(msg, content=_event_content(event) if content is None else content, event=event)
+
+
+def _event_content(event: AgentEvent) -> str:
+    """Plain-text fallback for an event, for channels that only show text. (nanobot :149)"""
     if isinstance(
         event,
         ProgressEvent | RetryWaitEvent | StreamDeltaEvent | StreamEndEvent | UserInputEvent,

@@ -626,7 +626,7 @@ Note: [`notes/13-hooks-streaming.md`](notes/13-hooks-streaming.md). Links point 
 | [`LLMProvider.chat_stream`, `safe_chat_stream`, `chat_stream_with_retry`, `resolve_stream_idle_timeout_s`](../nanoclaw/providers/base.py#L451) | [`providers/base.py:50, 1085, 1147, 1230`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/providers/base.py#L1230) | Same retry rule (no retry after text, timeout recovery); no timing |
 | `OpenAICompatProvider.chat_stream`, `_parse_chunks` | [`providers/openai_compat_provider.py:1556, 1839`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/providers/openai_compat_provider.py#L1839) | Same assembled response (19/20 cases; no `<tool_call>` text rescue) |
 | `FakeProvider` streaming, `ScriptedStream` | — | NanoClaw only (tests) |
-| [`AgentHook`, `CompositeHook`, `AgentHookContext`, `AgentRunHookContext`, `AgentTurnHookContext`](../nanoclaw/agent/hook.py#L91) | [`agent/hook.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/hook.py) | Same callbacks and failure isolation; `had_injections` dropped |
+| [`AgentHook`, `CompositeHook`, `AgentHookContext`, `AgentRunHookContext`, `AgentTurnHookContext`](../nanoclaw/agent/hook.py#L91) | [`agent/hook.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/hook.py) | Same callbacks and failure isolation (`had_injections` restored in layer 14) |
 | [`AgentEvent`, `EventSink`, `ContextCompactionEvent`, `RetryWaitEvent`, …](../nanoclaw/events.py#L17) | [`events.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/events.py) | Same dataclasses |
 | [`ProgressEvent`, `StreamDeltaEvent`, `StreamEndEvent`, …](../nanoclaw/bus/outbound_events.py#L24) | [`bus/outbound_events.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/bus/outbound_events.py) | Same; no `OutboundMessage` helpers until layer 14 |
 | [`AgentProgressHook`](../nanoclaw/agent/progress_hook.py#L29) | [`agent/progress_hook.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/progress_hook.py) | Byte-identical events for the same calls |
@@ -638,6 +638,25 @@ Note: [`notes/13-hooks-streaming.md`](notes/13-hooks-streaming.md). Links point 
 | [`StreamRenderer`, `ThinkingSpinner`, `ReasoningBuffer`](../nanoclaw/cli/stream.py#L140) | [`cli/stream.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/cli/stream.py), [`cli/terminal.py:276-337`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/cli/terminal.py#L276) | Same output; lines escaped |
 | [`TurnOutput`](../nanoclaw/cli/terminal.py#L115), chat and ask streaming | [`cli/agent.py:200-450`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/cli/agent.py#L200) | Same chat output; `ask` keeps stdout for the reply |
 | `channels.sendProgress`, `sendToolHints`, `showReasoning` (`config/schema.py`) | [`config/schema.py:43-45`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/config/schema.py#L43) | Same names and defaults |
+
+## Layer 14 — Bus, session workers, `/stop`, injections
+
+Note: [`notes/14-bus-workers.md`](notes/14-bus-workers.md). Links point at nanobot `c4dac64`.
+
+| NanoClaw | nanobot (`c4dac64`) | How it compares |
+|---|---|---|
+| `nanoclaw/bus/events.py` `InboundMessage`, `OutboundMessage` | [`bus/events.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/bus/events.py) | Same fields; no delivery ids |
+| `nanoclaw/bus/queue.py` `MessageBus` | [`bus/queue.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/bus/queue.py) | Same; no runtime admission |
+| `outbound_message_for_event`, `replace_outbound_event` (`bus/outbound_events.py`) | [`bus/outbound_events.py:115, 134`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/bus/outbound_events.py#L115) | Same |
+| `nanoclaw/bus/runtime_events.py` | [`bus/runtime_events.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/bus/runtime_events.py) | Slim: turn lifecycle only |
+| `nanoclaw/command/router.py` `CommandRouter`, `CommandContext`, `normalize_command_text` | [`command/router.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/command/router.py) | Same results on 30 inputs; context has `events`, `bus`, `tasks` |
+| `nanoclaw/command/builtin.py` `BUILTIN_COMMAND_SPECS`, handlers, `register_builtin_commands` | [`command/builtin.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/command/builtin.py) | Same specs and registration for the 8 commands |
+| `AgentRunSpec.injection_callback`, `terminal_injection_callback`, `checkpoint_callback`, `had_injections`, `_raise_if_cancelling` (`agent/runner.py`) | [`agent/runner.py:64`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/runner.py#L64) and injection points | Byte-identical on 15 scenarios; no goal continuation |
+| `AgentLoop.run`, `stop`, `aclose`, session queues and workers, `_drain_pending`, `_wait_for_pending`, `cancel_active_tasks`, `_process_message` (`agent/loop.py`) | [`agent/loop.py:1096-1819`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/loop.py#L1096) | Same outbound and saved sessions on 12 scenarios |
+| `nanoclaw/agent/turn_delivery.py` `TurnDelivery` | [`agent/turn_delivery.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/turn_delivery.py) | Slim: routing, stream ids, final and error replies, lifecycle |
+| `restore_runtime_checkpoint`, `finish_turn` (`session/recovery.py`) | [`session/recovery.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/session/recovery.py) | Same rebuild; JSONL storage |
+| Subagent reports on the bus (`agent/subagent.py`) | [`agent/subagent.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/subagent.py) | Same system-message report |
+| `Chat` over the bus (`cli/chat.py`) | [`cli/agent.py:322-445`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/cli/agent.py#L322) | Prompt stays open during a turn (difference #1) |
 
 [nb-pta]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/providers/base.py#L118
 [nb-tcr]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/providers/base.py#L72

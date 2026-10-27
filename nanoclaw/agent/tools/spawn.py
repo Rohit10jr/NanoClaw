@@ -77,6 +77,7 @@ class SpawnTool(Tool):
             runtime=request.runtime,
             label=label,
             origin_channel=request.channel,
+            origin_chat_id=request.chat_id,
             session_key=request.session_key,
             temperature=temperature,
         )

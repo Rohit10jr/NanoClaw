@@ -36,6 +36,11 @@ def call(name, args, call_id="c1"):
     )
 
 
+async def next_report(manager):
+    """The next report a background child published on the bus (layer 14; was ``manager.results``)."""
+    return SubagentResult.from_inbound(await asyncio.wait_for(manager.bus.consume_inbound(), 5))
+
+
 def is_child(messages):
     return messages[0]["role"] == "system" and messages[0]["content"].startswith("# Subagent")
 
@@ -336,7 +341,7 @@ async def test_failed_child_reports_failure(ws, tmp_path):
     manager = SubagentManager(ws)
     provider = RoutingProvider([], [LLMResponse(content="Rate limited", finish_reason="error")])
     await manager.spawn("t", runtime=runtime(provider))
-    report = await asyncio.wait_for(manager.results.get(), 5)
+    report = await next_report(manager)
     assert report.status == "error"
     assert report.content.startswith("[Subagent 't' failed]")
     assert "Result:\nRate limited\nExit reason: error\nError: Rate limited\n\n" in report.content
@@ -354,7 +359,7 @@ async def test_unfinished_child_report_is_marked_partial(ws):
         for i in range(2)
     ]
     await manager.spawn("Find it", label="Search", runtime=runtime(RoutingProvider([], script)))
-    report = await asyncio.wait_for(manager.results.get(), 5)
+    report = await next_report(manager)
     assert report.status == "incomplete"
     assert report.content == (
         "[Subagent 'Search' stopped before completing the task]\n\nTask: Find it\n\nResult:\nlooking around\n"
@@ -378,7 +383,7 @@ async def test_child_exception_is_reported(ws, monkeypatch):
     result = await manager.run_inline("t", runtime=runtime(FakeProvider([])))
     assert is_tool_error(result) and result == "boom\nPartial result:\nError: boom"
     await manager.spawn("t", runtime=runtime(FakeProvider([])))
-    report = await asyncio.wait_for(manager.results.get(), 5)
+    report = await next_report(manager)
     assert report.status == "error" and "Result:\nError: boom\nExit reason: error\nError: boom\n" in report.content
 
 
@@ -413,7 +418,7 @@ async def test_at_most_four_run_at_once(ws):
     assert phases == ["initializing"] * 4 + ["queued"] * 2
     gate.set()
     for _ in range(6):
-        await asyncio.wait_for(manager.results.get(), 5)
+        await next_report(manager)
     assert peak == 4
 
 
@@ -438,7 +443,7 @@ async def test_cancel_by_session_and_close(ws):
     assert manager.get_running_count() == 1
     await manager.close()
     assert manager.get_running_count() == 0
-    assert manager.results.empty()  # cancelled children never report
+    assert manager.bus.inbound.empty()  # cancelled children never report
 
 
 async def test_next_subagent_result_waits_for_running_children(ws, tmp_path):

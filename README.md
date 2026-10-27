@@ -29,6 +29,7 @@ recovery, governance) for later.
 | 11 | Catch up with upstream nanobot (`c4dac64`) | done |
 | 12 | Foundations: config file, logging, retries, token usage | done |
 | 13 | Hooks, events, streaming replies | done |
+| 14 | Message bus, session workers, `/stop`, injections | done |
 
 Phase 1 (the core agent) is complete. Phase 2 builds the production backend
 (layers 11–25; progress in [`docs/PHASE2_PROGRESS.md`](docs/PHASE2_PROGRESS.md)).
@@ -98,8 +99,10 @@ Replies stream word by word, with the model's reasoning shown as dim `✻` lines
 `showReasoning` in the config). `nanoclaw ask` keeps stdout for the reply only.
 
 In the chat, slash commands: `/new` (start over), `/compact`, `/stop` (cancel
-background subagents), `/status`, `/history [n]`, `/dream`, `/skill`, `/help`.
-While the agent works you see what it does (`↳ $ ls`, `↳ read notes.txt`).
+the running turn and background subagents; finished work is kept), `/status`,
+`/history [n]`, `/dream`, `/skill`, `/help`. While the agent works you see what
+it does (`↳ $ ls`, `↳ read notes.txt`), and you can keep typing: a new message
+is folded into the running turn, as in nanobot.
 
 Memory, as in nanobot:
 

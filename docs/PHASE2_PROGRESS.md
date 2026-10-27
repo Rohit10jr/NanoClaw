@@ -50,9 +50,22 @@ Legend: ⏳ in progress · ✅ done and verified · ⛔ blocked
 | Docs | note 13, CODE_MAP, README, notes 02/10, UPSTREAM_BUGS (bug 6 in reasoning lines) | main session | — | ✅ |
 | PR | `p2/layer-13` → `main` | main session | PR #5 | ✅ |
 
+## Layer 14 — bus, session workers, `/stop`, injections (`p2/layer-14`) ✅
+
+| Task | Scope (files) | Sub-agent | Verification | Status |
+|---|---|---|---|---|
+| 14.1 Bus and command router | `bus/events.py`, `bus/queue.py`, `command/router.py`, `command/builtin.py`; chat uses the router | sub-agent (worktree), phase A | 30 router inputs identical; 8 specs identical; chat output byte-identical | ✅ |
+| 14.2 Runner injections and cancellation | `agent/runner.py` | sub-agent (worktree), phase A | 15 scenarios byte-identical to nanobot | ✅ |
+| 14.3 Bus-driven loop | loop `run()`, workers, `TurnDelivery`, cancellation, recovery restore, subagent reports on the bus, chat over the bus | sub-agent (worktree), phase B | 12 scenarios through both `AgentLoop.run()`: 11 identical, `/status` differs only by web-search lines (re-run by main session); real terminal runs | ✅ |
+| Upstream bug 7 | cancelled turn loses earlier rounds | main session | Confirmed in nanobot's own run | ✅ |
+| Mutation checks | 90 rules | sub-agent (worktree) | 88 caught, 2 equivalent (11 tests added) | ✅ |
+| Docs | note 14, CODE_MAP, README, notes 08, UPSTREAM_BUGS | main session | — | ✅ |
+| PR | `p2/layer-14` → `main` | main session | PR #6 | ✅ |
+
 ## Blockers and open items
 
 | Item | Status |
 |---|---|
 | Real-model tests need API keys as environment secrets | Open; FakeProvider only until then |
-| PR #2 (docs) not merged; layer 11 branches from it | Open |
+| PRs #2–#4 merged; #5 (layer 13) open | — |
+| Rewrite earlier commits to the user's author | After phase 2 (user decision) |

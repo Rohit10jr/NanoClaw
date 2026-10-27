@@ -10,13 +10,19 @@ Since layer 13 the runner reports what it does through an :class:`AgentHook`
 runner, and every model request goes through ``chat_stream_with_retry``
 (deltas only reach the hook when it ``wants_streaming()``). Retry waits are
 published to ``spec.events`` as :class:`RetryWaitEvent`.
+
+Since layer 14 a caller can fold messages that arrive mid-turn into the run
+(``injection_callback``, drained before every model call and after an answer;
+``terminal_injection_callback``, consulted only when the turn is about to end,
+e.g. to wait for running subagents), and can keep the latest finished step of
+the turn (``checkpoint_callback``) so a cancelled turn can still be saved.
 """
 
 from __future__ import annotations
 
 import asyncio
 import copy
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -53,6 +59,28 @@ from nanoclaw.utils.progress_events import output_events
 # events). Kept as a compatibility input: the runner wraps it in an
 # AgentProgressHook (see AgentRunSpec.on_progress).
 ProgressCallback = Callable[..., Awaitable[None]]
+
+# Called with each checkpoint payload: {"phase": "awaiting_tools" |
+# "tools_completed" | "final_response", "iteration", "model",
+# "assistant_message", "completed_tool_results", "pending_tool_calls"}
+# (nanobot runner.py:70, without "provider_state").
+CheckpointCallback = Callable[[dict[str, Any]], Awaitable[None]]
+
+# Returns one snapshot of pending input (nanobot runner.py:71). Items may be
+# {"role": "user", "content": ...} dicts (kept as they are, extra keys too),
+# objects with a ``.content`` (e.g. InboundMessage) or anything else (str()).
+InjectionCallback = Callable[[], Awaitable[Iterable[Any] | None]]
+
+
+def _raise_if_cancelling() -> None:
+    """Don't resume model work when a dependency swallowed a cancellation.
+
+    (nanobot runner.py:64)
+    """
+    task = asyncio.current_task()
+    if task is not None and task.cancelling():
+        raise asyncio.CancelledError
+
 
 # After this many empty replies in a row, ask once more with tools off.
 _MAX_EMPTY_RETRIES = 2
@@ -97,6 +125,17 @@ class AgentRunSpec:
     # Where retry waits go, as RetryWaitEvent (nanobot runner.py:125
     # ``events``, read by the provider's retry notifications, base.py:1357).
     events: EventSink = NO_EVENTS
+    # The latest finished step of the turn, so a cancelled turn can keep its
+    # completed tool results (nanobot runner.py:116; the loop stores it and
+    # restores it on cancel, loop.py:1082 and :1740).
+    checkpoint_callback: CheckpointCallback | None = None
+    # Pending input drained before every model call and after an answer
+    # (nanobot runner.py:119; the loop's ``_drain_pending``, loop.py:1098).
+    injection_callback: InjectionCallback | None = None
+    # Asked only when the turn would otherwise end with an answer; may wait
+    # for running subagents (nanobot runner.py:120; the loop's
+    # ``_wait_for_pending``, loop.py:1217).
+    terminal_injection_callback: InjectionCallback | None = None
 
 
 @dataclass
@@ -106,7 +145,8 @@ class AgentRunResult:
     ``stop_reason`` is one of ``completed``, ``error``,
     ``empty_final_response`` or ``max_iterations``. ``tool_events`` has one
     ``{"name", "status", "detail"}`` dict per tool call of the run
-    (nanobot runner.py:142).
+    (nanobot runner.py:142). ``had_injections``: at least one injected
+    message was folded into the run.
     """
 
     final_content: str | None
@@ -116,6 +156,7 @@ class AgentRunResult:
     stop_reason: str = "completed"
     error: str | None = None
     tool_events: list[dict[str, str]] = field(default_factory=list)
+    had_injections: bool = False
 
 
 def _add_usage(total: LLMUsage | None, new: LLMUsage | None) -> LLMUsage | None:
@@ -176,6 +217,7 @@ class AgentRunner:
                 context.stop_reason = result.stop_reason
                 context.error = result.error
                 context.tool_events = copy.deepcopy(result.tool_events)
+                context.had_injections = result.had_injections
                 context.exception = None
                 if context.error is not None:
                     await hook.on_error(context)
@@ -210,21 +252,149 @@ class AgentRunner:
         """Run-hook copy of the messages (nanobot runner.py:164 ``_run_context_snapshot``)."""
         return copy.deepcopy(messages) if messages else []
 
+    # --- mid-turn injections (nanobot runner.py:170-306) ---------------------
+
+    @staticmethod
+    def _append_injected_messages(messages: list[dict[str, Any]], injections: list[dict[str, Any]]) -> None:
+        """Append injected messages as they are; the model copy merges adjacent users.
+
+        (nanobot runner.py:170)
+        """
+        messages.extend(injections)
+
+    async def _drain_injections(self, spec: AgentRunSpec, *, terminal: bool = False) -> list[dict[str, Any]]:
+        """One snapshot of pending input as user messages (nanobot runner.py:262).
+
+        Dicts are kept only when they are user messages; other objects become
+        ``{"role": "user", "content": item.content}`` (or ``str(item)``).
+        Blank content is skipped; a failing callback counts as no input.
+        """
+        callback = spec.terminal_injection_callback if terminal else spec.injection_callback
+        if callback is None:
+            return []
+        try:
+            items = await callback()
+        except Exception:
+            logger.opt(exception=True).error("injection_callback failed")
+            return []
+        if not items:
+            return []
+        injected: list[dict[str, Any]] = []
+        for item in items:
+            if item is None:
+                continue
+            if isinstance(item, dict):
+                content = item.get("content")
+                if item.get("role") == "user" and "content" in item and self._has_injection_content(content):
+                    injected.append(item)
+                continue
+            content = item.content if hasattr(item, "content") else str(item)
+            if self._has_injection_content(content):
+                injected.append({"role": "user", "content": content})
+        return injected
+
+    @staticmethod
+    def _has_injection_content(content: Any) -> bool:
+        """nanobot runner.py:299."""
+        if content is None:
+            return False
+        if isinstance(content, str):
+            return bool(content.strip())
+        if isinstance(content, list):
+            return bool(content)
+        return True
+
+    async def _try_drain_injections(
+        self,
+        spec: AgentRunSpec,
+        messages: list[dict[str, Any]],
+        assistant_message: dict[str, Any] | None,
+        injection_cycles: int,
+        *,
+        phase: str = "after error",
+        iteration: int | None = None,
+        wait_at_terminal: bool = False,
+        drain_callback: bool = True,
+    ) -> tuple[bool, int]:
+        """Append one pending-input snapshot; return whether the run continues.
+
+        When input arrives after an answer, the answer (``assistant_message``)
+        is kept in history first, with a ``final_response`` checkpoint.
+        ``wait_at_terminal`` asks the terminal callback when nothing is
+        pending; ``drain_callback=False`` (no iteration left) consumes nothing,
+        so the input stays queued for the next turn. (nanobot runner.py:179,
+        without the goal ``continuation_callback``.)
+        """
+        injections = await self._drain_injections(spec) if drain_callback else []
+        if not injections and wait_at_terminal and drain_callback:
+            injections = await self._drain_injections(spec, terminal=True)
+        if not injections:
+            return False, injection_cycles
+        injection_cycles += 1
+        if assistant_message is not None:
+            messages.append(assistant_message)
+            if iteration is not None:
+                await self._emit_checkpoint(
+                    spec,
+                    {
+                        "phase": "final_response",
+                        "iteration": iteration,
+                        "model": spec.model,
+                        "assistant_message": assistant_message,
+                        "completed_tool_results": [],
+                        "pending_tool_calls": [],
+                    },
+                )
+        self._append_injected_messages(messages, injections)
+        preview = "\n\n".join(m["content"] for m in injections if isinstance(m.get("content"), str))
+        preview = preview[:80] + "..." if len(preview) > 80 else preview
+        logger.info(
+            "Injected {} follow-up message(s) {} (snapshot {}): {}",
+            len(injections),
+            phase,
+            injection_cycles,
+            preview,
+        )
+        return True, injection_cycles
+
+    @staticmethod
+    async def _emit_checkpoint(spec: AgentRunSpec, payload: dict[str, Any]) -> None:
+        """nanobot runner.py:1380."""
+        if spec.checkpoint_callback is not None:
+            await spec.checkpoint_callback(payload)
+
     async def _run_core(
         self,
         spec: AgentRunSpec,
         hook: AgentHook,
         messages: list[dict[str, Any]],
     ) -> AgentRunResult:
-        """The iterations (nanobot runner.py:472-858)."""
+        """The iterations (nanobot runner.py:400-876)."""
+        final_content: str | None = None
+        stop_reason = "completed"
+        error: str | None = None
         tools_used: list[str] = []
         tool_events: list[dict[str, str]] = []
         usage: LLMUsage | None = None
         empty_retries = 0
         # Per-run throttle for repeated attempts at the same outside target.
         workspace_violation_counts: dict[str, int] = {}
+        had_injections = False
+        injection_cycles = 0
 
         for iteration in range(spec.max_iterations):
+            # A resumed iteration must not inherit a previous iteration's
+            # failure (nanobot runner.py:472, fix 5825e15).
+            stop_reason = "completed"
+            error = None
+            # Pending input is cut into a finite snapshot before every model
+            # call: follow-ups that arrived before the first request, during
+            # the previous request or while tools ran (nanobot runner.py:476).
+            drained, injection_cycles = await self._try_drain_injections(
+                spec, messages, None, injection_cycles, phase="before model call"
+            )
+            if drained:
+                had_injections = True
             context = AgentHookContext(iteration=iteration, messages=messages, session_key=spec.session_key)
             await hook.before_iteration(context)
             response, raw_usage = await self._request_model(spec, messages, hook, context)
@@ -239,20 +409,31 @@ class AgentRunner:
                 await hook.emit_reasoning_end()
                 context.streamed_reasoning = True
 
-            # 1. The model wants tools: run them and go round again (runner.py:533-621).
+            # 1. The model wants tools: run them and go round again (runner.py:532-621).
             if response.should_execute_tools:
                 if hook.wants_streaming():
                     await hook.on_stream_end(context, resuming=True)
-                messages.append(
-                    build_assistant_message(
-                        response.content,
-                        tool_calls=[tc.to_openai_tool_call() for tc in response.tool_calls],
-                        reasoning_content=response.reasoning_content,
-                    )
+                assistant_message = build_assistant_message(
+                    response.content,
+                    tool_calls=[tc.to_openai_tool_call() for tc in response.tool_calls],
+                    reasoning_content=response.reasoning_content,
+                )
+                messages.append(assistant_message)
+                await self._emit_checkpoint(
+                    spec,
+                    {
+                        "phase": "awaiting_tools",
+                        "iteration": iteration,
+                        "model": spec.model,
+                        "assistant_message": assistant_message,
+                        "completed_tool_results": [],
+                        "pending_tool_calls": [tc.to_openai_tool_call() for tc in response.tool_calls],
+                    },
                 )
                 await hook.before_execute_tools(context)
                 results: list[Any] = []
                 new_events: list[dict[str, str]] = []
+                completed_tool_results: list[dict[str, Any]] = []
                 for call in response.tool_calls:
                     raw, event = await self._execute_tool_call(
                         spec, call, workspace_violation_counts, hook=hook, context=context
@@ -267,13 +448,26 @@ class AgentRunner:
                         max_chars=spec.max_tool_result_chars,
                         bucket=spec.session_key or "default",
                     )
-                    messages.append(build_tool_message(call.id, call.name, content))
+                    tool_message = build_tool_message(call.id, call.name, content)
+                    messages.append(tool_message)
+                    completed_tool_results.append(tool_message)
                 tool_events.extend(new_events)
                 tools_used.extend(
                     call.name for call, event in zip(response.tool_calls, new_events) if event["status"] == "ok"
                 )
                 context.tool_results = results
                 context.tool_events = list(new_events)
+                await self._emit_checkpoint(
+                    spec,
+                    {
+                        "phase": "tools_completed",
+                        "iteration": iteration,
+                        "model": spec.model,
+                        "assistant_message": assistant_message,
+                        "completed_tool_results": completed_tool_results,
+                        "pending_tool_calls": [],
+                    },
+                )
                 empty_retries = 0
                 await hook.after_iteration(context)
                 continue
@@ -322,38 +516,110 @@ class AgentRunner:
                 context.tool_calls = list(response.tool_calls)
                 clean = hook.finalize_content(context, response.content)
 
-            # The answer is complete: close the stream (runner.py:752; NanoClaw
-            # has no mid-turn injections, so it never continues).
+            final_message: dict[str, Any] | None = None
+            if not response.is_error and not is_blank(clean):
+                final_message = build_assistant_message(clean, reasoning_content=response.reasoning_content)
+
+            # Input that arrived during the answer continues the turn. It is
+            # checked BEFORE the stream is closed, so a streaming channel keeps
+            # its message open (resuming=True). Only an answer may wait for the
+            # terminal callback (nanobot runner.py:729-756).
+            can_make_followup_request = iteration + 1 < spec.max_iterations
+            should_continue, injection_cycles = await self._try_drain_injections(
+                spec,
+                messages,
+                final_message,
+                injection_cycles,
+                phase="after final response",
+                iteration=iteration,
+                wait_at_terminal=(
+                    final_message is not None and response.finish_reason not in _NO_RETRY_FINISH_REASONS
+                ),
+                drain_callback=can_make_followup_request,
+            )
+            if should_continue:
+                had_injections = True
             if hook.wants_streaming():
-                await hook.on_stream_end(context, resuming=False)
+                await hook.on_stream_end(context, resuming=should_continue)
+            if should_continue:
+                await hook.after_iteration(context)
+                continue
 
-            # 3. Model error: stop, keeping history well formed.
+            # 3. Model error: stop, keeping history well formed; input that
+            # arrived meanwhile still gets an answer (runner.py:758-782).
             if response.is_error:
-                final = clean or DEFAULT_ERROR_MESSAGE
+                final_content = clean or DEFAULT_ERROR_MESSAGE
+                stop_reason, error = "error", final_content
                 self._append_model_error_placeholder(messages)
-                context.final_content, context.error, context.stop_reason = final, final, "error"
+                context.final_content, context.error, context.stop_reason = final_content, error, stop_reason
                 await hook.after_iteration(context)
-                return AgentRunResult(final, messages, tools_used, usage, "error", final, tool_events)
+                should_continue, injection_cycles = await self._try_drain_injections(
+                    spec,
+                    messages,
+                    None,
+                    injection_cycles,
+                    phase="after LLM error",
+                    drain_callback=can_make_followup_request,
+                )
+                if should_continue:
+                    had_injections = True
+                    continue
+                break
 
-            # 4. Still nothing to say.
-            if is_blank(clean):
-                final = EMPTY_FINAL_RESPONSE_MESSAGE
-                messages.append(build_assistant_message(final))
-                context.final_content, context.error, context.stop_reason = final, final, "empty_final_response"
+            # 4. Still nothing to say (runner.py:783-801).
+            if final_message is None:
+                final_content = EMPTY_FINAL_RESPONSE_MESSAGE
+                stop_reason, error = "empty_final_response", final_content
+                messages.append(build_assistant_message(final_content))
+                context.final_content, context.error, context.stop_reason = final_content, error, stop_reason
                 await hook.after_iteration(context)
-                return AgentRunResult(final, messages, tools_used, usage, "empty_final_response", final, tool_events)
+                should_continue, injection_cycles = await self._try_drain_injections(
+                    spec,
+                    messages,
+                    None,
+                    injection_cycles,
+                    phase="after empty response",
+                    drain_callback=can_make_followup_request,
+                )
+                if should_continue:
+                    had_injections = True
+                    continue
+                break
 
-            # 5. A normal final answer.
-            messages.append(build_assistant_message(clean, reasoning_content=response.reasoning_content))
-            context.final_content, context.stop_reason = clean, "completed"
+            # 5. A normal final answer (runner.py:803-835).
+            messages.append(final_message)
+            await self._emit_checkpoint(
+                spec,
+                {
+                    "phase": "final_response",
+                    "iteration": iteration,
+                    "model": spec.model,
+                    "assistant_message": final_message,
+                    "completed_tool_results": [],
+                    "pending_tool_calls": [],
+                },
+            )
+            final_content = clean
+            context.final_content, context.stop_reason = final_content, stop_reason
             await hook.after_iteration(context)
-            return AgentRunResult(clean, messages, tools_used, usage, "completed", None, tool_events)
+            break
+        else:
+            # Out of iterations: ask for a summary with tools off, else a fixed message.
+            stop_reason = "max_iterations"
+            final_content, finalize_usage = await self._finalize_after_max_iterations(spec, hook, messages)
+            usage = _add_usage(usage, finalize_usage)
+            messages.append(build_assistant_message(final_content))
 
-        # Out of iterations: ask for a summary with tools off, else a fixed message.
-        final, finalize_usage = await self._finalize_after_max_iterations(spec, hook, messages)
-        usage = _add_usage(usage, finalize_usage)
-        messages.append(build_assistant_message(final))
-        return AgentRunResult(final, messages, tools_used, usage, "max_iterations", None, tool_events)
+        return AgentRunResult(
+            final_content,
+            messages,
+            tools_used,
+            usage,
+            stop_reason,
+            error,
+            tool_events,
+            had_injections=had_injections,
+        )
 
     def _retry_wait_callback(self, spec: AgentRunSpec) -> Callable[[str], Awaitable[None]] | None:
         """Retry waits become RetryWaitEvent (nanobot providers/base.py:1357 ``_retry_notifications``)."""
@@ -388,12 +654,16 @@ class AgentRunner:
             "max_tokens": spec.max_tokens,
             "temperature": spec.temperature,
         }
+        # A dependency that swallowed a cancellation must not start or finish
+        # model work (nanobot runner.py:919-1035 and :1257-1273).
+        _raise_if_cancelling()
         response = await spec.provider.chat_stream_with_retry(
             **kwargs,
             **(stream or {}),
             retry_mode=spec.provider_retry_mode,
             on_retry_wait=self._retry_wait_callback(spec),
         )
+        _raise_if_cancelling()
         response.usage = self._usage_or_estimate(spec.provider, response, kwargs)
         return response
 

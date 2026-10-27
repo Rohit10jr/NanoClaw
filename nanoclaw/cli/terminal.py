@@ -16,8 +16,8 @@ from __future__ import annotations
 import os
 import select
 import sys
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager, nullcontext, redirect_stdout, suppress
+from collections.abc import Callable
+from contextlib import nullcontext, suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -256,9 +256,24 @@ class PromptInput:
     send, Alt+Enter for a new line, multi-line paste.
 
     (nanobot ``_init_prompt_session``, ``_read_interactive_input_async``)
+
+    ``raw_stdout``: output written while the prompt waits keeps its colour
+    codes (``patch_stdout(raw=True)``); the chat sets it when the prompt stays
+    open during a turn. ``bottom_toolbar``: an optional callable whose text
+    is shown under the prompt, refreshed twice a second (NanoClaw's own:
+    "nanoclaw is working" while a turn runs).
     """
 
-    def __init__(self, history_path: Path = DEFAULT_HISTORY_PATH, *, input: Any = None, output: Any = None) -> None:
+    def __init__(
+        self,
+        history_path: Path = DEFAULT_HISTORY_PATH,
+        *,
+        input: Any = None,
+        output: Any = None,
+        raw_stdout: bool = False,
+    ) -> None:
+        self.raw_stdout = raw_stdout
+        self.bottom_toolbar: Callable[[], Any] | None = None
         from prompt_toolkit import PromptSession
         from prompt_toolkit.history import FileHistory
 
@@ -285,29 +300,14 @@ class PromptInput:
         from prompt_toolkit.patch_stdout import patch_stdout
 
         flush_pending_tty_input()
+        extra: dict[str, Any] = {}
+        if self.bottom_toolbar is not None:
+            extra = {"bottom_toolbar": self.bottom_toolbar, "refresh_interval": 0.5}
         try:
-            with patch_stdout():
-                return await self._session.prompt_async(HTML("<b fg='ansiblue'>You:</b> "))
+            with patch_stdout(raw=self.raw_stdout):
+                return await self._session.prompt_async(HTML("<b fg='ansiblue'>You:</b> "), **extra)
         except EOFError as exc:  # Ctrl+D ends the chat like Ctrl+C
             raise KeyboardInterrupt from exc
-
-
-@asynccontextmanager
-async def prompt_suspended() -> AsyncIterator[None]:
-    """Hide a waiting prompt while the body writes to the terminal, then redraw it.
-
-    For a background subagent's follow-up turn, which streams while the
-    prompt waits. prompt_toolkit's ``in_terminal`` suspends the prompt; stdout
-    is pointed at the real terminal meanwhile, because ``patch_stdout``'s
-    proxy would hold every write until the suspension ends and escape the
-    renderer's cursor codes. (nanobot streams these into the previous turn's
-    renderer through that proxy, cli/agent.py:312-321.)
-    """
-    from prompt_toolkit.application import in_terminal
-
-    async with in_terminal():
-        with redirect_stdout(sys.__stdout__) if sys.__stdout__ is not None else nullcontext():
-            yield
 
 
 def stdin_is_interactive() -> bool:
