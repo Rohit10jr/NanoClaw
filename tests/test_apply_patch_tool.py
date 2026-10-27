@@ -299,6 +299,20 @@ def test_apply_patch_registered_with_file_tools(tmp_path):
     assert "apply_patch" in names
 
 
+async def test_default_apply_patch_follows_workspace_restriction(tmp_path):
+    workspace, outside = tmp_path / "workspace", tmp_path / "outside"
+    workspace.mkdir()
+    outside.mkdir()
+    registry = build_default_tools(workspace, restrict_to_workspace=True)
+
+    result = await registry.execute(
+        "apply_patch", {"edits": [{"path": str(outside / "x.txt"), "action": "add", "new_text": "x"}]}
+    )
+
+    assert "outside allowed directory" in result
+    assert not (outside / "x.txt").exists()
+
+
 def test_coding_tool_descriptions_steer_editing_priority():
     """nanobot tests/tools/test_tool_descriptions.py (editing part)."""
     apply_patch = ApplyPatchTool().description.lower()
@@ -323,3 +337,122 @@ def test_coding_tool_descriptions_steer_editing_priority():
     assert ListDirTool().description == (
         "List directory contents, skipping common noise directories (.git, node_modules, __pycache__, etc.)."
     )
+
+
+# ---------------------------------------------------------------------------
+# Edge cases pinned by mutation checks (layer 17)
+# ---------------------------------------------------------------------------
+
+
+async def test_apply_patch_rejects_null_byte_path(tmp_path):
+    result = await ApplyPatchTool(tmp_path).execute(edits=[{"path": "a\0b.txt", "action": "add", "new_text": "x"}])
+
+    assert result == "Error applying patch: patch path contains a null byte: 'a\\x00b.txt'"
+    assert not any(tmp_path.iterdir())
+
+
+async def test_apply_patch_reports_missing_text_fields(tmp_path):
+    target = tmp_path / "f.txt"
+    target.write_text("alpha\n")
+    tool = ApplyPatchTool(tmp_path)
+
+    add_without_text = await tool.execute(edits=[{"path": "new.txt", "action": "add"}])
+    replace_without_new = await tool.execute(edits=[{"path": "f.txt", "action": "replace", "old_text": "alpha"}])
+    replace_without_old = await tool.execute(edits=[{"path": "f.txt", "action": "replace", "new_text": "beta"}])
+    replace_empty_old = await tool.execute(
+        edits=[{"path": "f.txt", "action": "replace", "old_text": "", "new_text": "beta"}]
+    )
+
+    assert add_without_text == "Error applying patch: new_text required for add: new.txt"
+    assert replace_without_new == "Error applying patch: new_text required for replace: f.txt"
+    assert replace_without_old == "Error applying patch: old_text required for replace: f.txt"
+    assert replace_empty_old == "Error applying patch: old_text required for replace: f.txt"
+    assert target.read_text() == "alpha\n"
+    assert not (tmp_path / "new.txt").exists()
+
+
+async def test_apply_patch_add_new_file_normalizes_crlf_text(tmp_path):
+    result = await ApplyPatchTool(tmp_path).execute(edits=[{"path": "n.txt", "action": "add", "new_text": "a\r\nb"}])
+
+    assert result == "Patch applied:\n- add n.txt (+2/-0)"
+    assert (tmp_path / "n.txt").read_bytes() == b"a\nb\n"
+
+
+async def test_apply_patch_replace_reports_missing_old_text(tmp_path):
+    target = tmp_path / "f.txt"
+    target.write_text("alpha\nbeta\n")
+
+    result = await ApplyPatchTool(tmp_path).execute(
+        edits=[{"path": "f.txt", "action": "replace", "old_text": "gamma", "new_text": "delta"}]
+    )
+
+    assert result == "Error applying patch: old_text not found in f.txt"
+    assert target.read_text() == "alpha\nbeta\n"
+
+
+async def test_apply_patch_replace_matches_crlf_old_text_in_lf_file(tmp_path):
+    target = tmp_path / "f.txt"
+    target.write_text("one\ntwo\nthree\n")
+
+    result = await ApplyPatchTool(tmp_path).execute(
+        edits=[{"path": "f.txt", "action": "replace", "old_text": "one\r\ntwo", "new_text": "1\r\n2"}]
+    )
+
+    assert result == "Patch applied:\n- update f.txt (+2/-2)"
+    assert target.read_bytes() == b"1\n2\nthree\n"
+
+
+async def test_apply_patch_replace_terminates_last_line(tmp_path):
+    target = tmp_path / "f.txt"
+    target.write_text("alpha\nbeta")
+
+    result = await ApplyPatchTool(tmp_path).execute(
+        edits=[{"path": "f.txt", "action": "replace", "old_text": "beta", "new_text": "gamma"}]
+    )
+
+    assert "update f.txt" in result
+    assert target.read_text() == "alpha\ngamma\n"
+
+
+async def test_apply_patch_new_file_edited_again_is_still_an_add(tmp_path):
+    result = await ApplyPatchTool(tmp_path).execute(
+        edits=[
+            {"path": "n.txt", "action": "add", "new_text": "alpha"},
+            {"path": "n.txt", "action": "replace", "old_text": "alpha", "new_text": "beta"},
+        ]
+    )
+
+    assert result == "Patch applied:\n- add n.txt (+1/-0)"
+    assert (tmp_path / "n.txt").read_text() == "beta\n"
+
+
+async def test_apply_patch_stats_ignore_line_ending_conversion(tmp_path):
+    """A mixed file becomes CRLF throughout; only the edited line counts as changed."""
+    target = tmp_path / "mixed.txt"
+    target.write_bytes(b"one\r\ntwo\nthree\n")
+
+    result = await ApplyPatchTool(tmp_path).execute(
+        edits=[{"path": "mixed.txt", "action": "replace", "old_text": "three", "new_text": "3"}]
+    )
+
+    assert result == "Patch applied:\n- update mixed.txt (+1/-1)"
+    assert target.read_bytes() == b"one\r\ntwo\r\n3\r\n"
+
+
+async def test_apply_patch_schema_requires_an_edit(tmp_path):
+    result = await build_default_tools(tmp_path).execute("apply_patch", {"edits": []})
+
+    assert is_tool_error(result)
+    assert "at least 1" in result
+
+
+async def test_apply_patch_schema_limits_actions(tmp_path):
+    (tmp_path / "f.txt").write_text("alpha\n")
+
+    result = await build_default_tools(tmp_path).execute(
+        "apply_patch", {"edits": [{"path": "f.txt", "action": "delete"}]}
+    )
+
+    assert is_tool_error(result)
+    assert "must be one of" in result
+    assert "unknown action" not in result

@@ -157,3 +157,55 @@ async def test_use_proxy_is_ignored_for_stdio():
     finally:
         for connection in connections.values():
             await connection.aclose()
+
+
+def test_use_proxy_defaults_off():
+    assert MCPServerConfig().use_proxy is False
+
+
+def _record_mcp_lifecycle(monkeypatch) -> list[str]:
+    events: list[str] = []
+
+    async def connect(self):
+        events.append("mcp.connect")
+
+    async def aclose(self):
+        events.append("mcp.aclose")
+
+    real_close = AgentLoop.close
+
+    async def loop_close(self):
+        events.append("loop.close")
+        await real_close(self)
+
+    monkeypatch.setattr(MCPProvider, "connect", connect)
+    monkeypatch.setattr(MCPProvider, "aclose", aclose)
+    monkeypatch.setattr(AgentLoop, "close", loop_close)
+    return events
+
+
+def test_cli_ask_closes_mcp_after_the_loop(tmp_path, monkeypatch):
+    events = _record_mcp_lifecycle(monkeypatch)
+    path = _write_config(tmp_path, {})
+    assert main(["ask", "hi", "-c", str(path), "-w", str(tmp_path / "ws")], provider=FakeProvider(["ok"])) == 0
+    assert events == ["mcp.connect", "loop.close", "mcp.aclose"]
+
+
+def test_cli_chat_connects_mcp_before_the_first_turn_and_closes_it(tmp_path, monkeypatch):
+    import io
+
+    from nanoclaw.cli import chat as chat_module
+
+    events = _record_mcp_lifecycle(monkeypatch)
+    real_run = chat_module.Chat.run
+
+    async def run(self):
+        events.append("chat.run")
+        await real_run(self)
+
+    monkeypatch.setattr(chat_module.Chat, "run", run)
+    monkeypatch.setattr(chat_module, "install_exit_signal_handlers", lambda console: None)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("hello\nexit\n"))
+    path = _write_config(tmp_path, {})
+    assert main(["chat", "-c", str(path), "-w", str(tmp_path / "ws"), "--no-markdown"], provider=FakeProvider(["Hi!"])) == 0
+    assert [e for e in events if e != "loop.close"] == ["mcp.connect", "chat.run", "mcp.aclose"]

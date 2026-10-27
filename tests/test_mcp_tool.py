@@ -1900,3 +1900,436 @@ async def test_mcp_http_requests_use_selected_transport_without_route_fallback(
             await connection.aclose()
 
 
+# ---------------------------------------------------------------------------
+# Pinned by mutation checks (layer 17)
+# ---------------------------------------------------------------------------
+
+
+def _record_transports(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    used: list[str] = []
+
+    @asynccontextmanager
+    async def stdio_client(_params):
+        used.append("stdio")
+        yield object(), object()
+
+    @asynccontextmanager
+    async def sse_client(_url, httpx_client_factory=None):
+        used.append("sse")
+        yield object(), object()
+
+    @asynccontextmanager
+    async def streamable_http_client(_url, http_client=None):
+        used.append("streamableHttp")
+        yield object(), object(), object()
+
+    async def reachable(_url):
+        return True
+
+    monkeypatch.setattr(sys.modules["mcp.client.stdio"], "stdio_client", stdio_client)
+    monkeypatch.setattr(sys.modules["mcp.client.sse"], "sse_client", sse_client)
+    monkeypatch.setattr(sys.modules["mcp.client.streamable_http"], "streamable_http_client", streamable_http_client)
+    monkeypatch.setattr(mcp_mod, "validate_url_target", lambda _url: (True, ""))
+    monkeypatch.setattr(mcp_mod, "_probe_http_url", reachable)
+    return used
+
+
+def _capture_warnings(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        "nanoclaw.agent.tools.mcp.logger.warning", lambda message, *args: warnings.append(message.format(*args))
+    )
+    return warnings
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("config", "expected"),
+    [
+        pytest.param(MCPServerConfig(command="fake"), "stdio", id="command"),
+        pytest.param(MCPServerConfig(url="https://mcp.example.com/sse"), "sse", id="sse-url"),
+        pytest.param(MCPServerConfig(url="https://mcp.example.com/sse/"), "sse", id="sse-url-slash"),
+        pytest.param(MCPServerConfig(url="https://mcp.example.com/mcp"), "streamableHttp", id="http-url"),
+        pytest.param(MCPServerConfig(type="sse", url="https://mcp.example.com/mcp"), "sse", id="explicit"),
+    ],
+)
+async def test_connect_mcp_servers_picks_the_transport(
+    fake_mcp_runtime: dict[str, object | None], monkeypatch: pytest.MonkeyPatch, config, expected,
+) -> None:
+    used = _record_transports(monkeypatch)
+    fake_mcp_runtime["session"] = _make_fake_session(["demo"])
+    stacks = await connect_mcp_servers({"test": config}, ToolRegistry())
+    for stack in stacks.values():
+        await stack.aclose()
+    assert used == [expected]
+    assert set(stacks) == {"test"}
+
+
+@pytest.mark.asyncio
+async def test_connect_mcp_servers_skips_server_without_command_or_url(
+    fake_mcp_runtime: dict[str, object | None], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    used = _record_transports(monkeypatch)
+    warnings = _capture_warnings(monkeypatch)
+    fake_mcp_runtime["session"] = _make_fake_session(["demo"])
+    stacks = await connect_mcp_servers({"empty": MCPServerConfig()}, ToolRegistry())
+    assert stacks == {}
+    assert used == []
+    assert "MCP server 'empty': no command or url configured, skipping" in warnings
+
+
+@pytest.mark.asyncio
+async def test_connect_mcp_servers_warns_that_use_proxy_is_ignored(
+    fake_mcp_runtime: dict[str, object | None], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _record_transports(monkeypatch)
+    warnings = _capture_warnings(monkeypatch)
+    fake_mcp_runtime["session"] = _make_fake_session(["demo"])
+    stacks = await connect_mcp_servers({"p": MCPServerConfig(command="fake", use_proxy=True)}, ToolRegistry())
+    for stack in stacks.values():
+        await stack.aclose()
+    assert set(stacks) == {"p"}
+    assert any("useProxy is not supported by NanoClaw" in w for w in warnings)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport", ["sse", "streamableHttp"])
+async def test_connect_mcp_servers_skips_unreachable_http_server(
+    fake_mcp_runtime: dict[str, object | None], monkeypatch: pytest.MonkeyPatch, transport: str,
+) -> None:
+    used = _record_transports(monkeypatch)
+    warnings = _capture_warnings(monkeypatch)
+    probed: list[str] = []
+
+    async def unreachable(url):
+        probed.append(url)
+        return False
+
+    monkeypatch.setattr(mcp_mod, "_probe_http_url", unreachable)
+    fake_mcp_runtime["session"] = _make_fake_session(["demo"])
+    stacks = await connect_mcp_servers(
+        {"remote": MCPServerConfig(type=transport, url="https://mcp.example.com/x?token=s")}, ToolRegistry()
+    )
+    assert stacks == {}
+    assert used == []
+    assert probed == ["https://mcp.example.com/x?token=s"]
+    assert "MCP server 'remote': https://mcp.example.com/... unreachable, skipping" in warnings
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport", ["sse", "streamableHttp"])
+async def test_connect_mcp_servers_sends_configured_headers(
+    fake_mcp_runtime: dict[str, object | None], monkeypatch: pytest.MonkeyPatch, transport: str,
+) -> None:
+    _record_transports(monkeypatch)
+    client_kwargs: list[dict[str, object]] = []
+
+    class FakeAsyncClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            client_kwargs.append(kwargs)
+
+        async def __aenter__(self) -> object:
+            return self
+
+        async def __aexit__(self, *exc: object) -> bool:
+            return False
+
+    @asynccontextmanager
+    async def sse_client(_url, httpx_client_factory=None):
+        httpx_client_factory(headers={"X-Factory": "1"})
+        yield object(), object()
+
+    monkeypatch.setattr(mcp_mod.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(sys.modules["mcp.client.sse"], "sse_client", sse_client)
+    fake_mcp_runtime["session"] = _make_fake_session(["demo"])
+    stacks = await connect_mcp_servers(
+        {"remote": MCPServerConfig(type=transport, url="https://mcp.example.com/x", headers={"Authorization": "Bearer t"})},
+        ToolRegistry(),
+    )
+    for stack in stacks.values():
+        await stack.aclose()
+    assert len(client_kwargs) == 1
+    if transport == "sse":
+        assert client_kwargs[0]["headers"] == {
+            "Accept": "application/json, text/event-stream",
+            "Authorization": "Bearer t",
+            "X-Factory": "1",
+        }
+    else:
+        assert client_kwargs[0]["headers"] == {"Authorization": "Bearer t"}
+
+
+@pytest.mark.asyncio
+async def test_connect_mcp_servers_filters_the_read_stream(
+    fake_mcp_runtime: dict[str, object | None], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Stream:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        def __aiter__(self):
+            return self
+
+    raw = Stream()
+    seen: list[object] = []
+
+    @asynccontextmanager
+    async def stdio_client(_params):
+        yield raw, object()
+
+    class ClientSession:
+        def __init__(self, read, _write):
+            seen.append(read)
+
+        async def __aenter__(self):
+            return fake_mcp_runtime["session"]
+
+        async def __aexit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(sys.modules["mcp.client.stdio"], "stdio_client", stdio_client)
+    monkeypatch.setattr(sys.modules["mcp"], "ClientSession", ClientSession)
+    fake_mcp_runtime["session"] = _make_fake_session(["demo"])
+    stacks = await connect_mcp_servers({"test": MCPServerConfig(command="fake")}, ToolRegistry())
+    for stack in stacks.values():
+        await stack.aclose()
+    assert len(seen) == 1
+    assert isinstance(seen[0], mcp_mod._MalformedProgressNotificationFilter)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "enabled_tools",
+    [
+        pytest.param(["demo", "mcp_test_other"], id="raw-and-wrapped-found"),
+        pytest.param(["*", "missing"], id="wildcard"),
+    ],
+)
+async def test_connect_mcp_servers_no_enabled_tools_warning_when_all_match(
+    fake_mcp_runtime: dict[str, object | None], monkeypatch: pytest.MonkeyPatch, enabled_tools,
+) -> None:
+    fake_mcp_runtime["session"] = _make_fake_session(["demo", "other"])
+    warnings = _capture_warnings(monkeypatch)
+    registry = ToolRegistry()
+    stacks = await connect_mcp_servers(
+        {"test": MCPServerConfig(command="fake", enabled_tools=enabled_tools)}, registry
+    )
+    for stack in stacks.values():
+        await stack.aclose()
+    assert registry.tool_names == ["mcp_test_demo", "mcp_test_other"]
+    assert not [w for w in warnings if "enabledTools" in w]
+
+
+def test_mcp_tool_name_limit_boundary_and_hash_of_full_name() -> None:
+    exact = "mcp_" + "a" * 60
+    assert _sanitize_mcp_tool_name(exact) == exact
+    first = _sanitize_mcp_tool_name("mcp_" + "b" * 60 + "_first")
+    second = _sanitize_mcp_tool_name("mcp_" + "b" * 60 + "_second")
+    assert len(first) == len(second) == 64
+    assert first[:55] == second[:55] == ("mcp_" + "b" * 60)[:55]
+    assert first != second
+
+
+def test_wrapper_description_falls_back_to_tool_name() -> None:
+    tool_def = SimpleNamespace(name="demo", description=None, inputSchema=None)
+    wrapper = MCPToolWrapper(SimpleNamespace(call_tool=None), "test", tool_def)
+    assert wrapper.description == "demo"
+    assert wrapper.parameters == {"type": "object", "properties": {}, "required": []}
+
+
+def test_wrapper_replaces_non_object_schema() -> None:
+    tool_def = SimpleNamespace(name="demo", description="d", inputSchema=["not", "a", "schema"])
+    wrapper = MCPToolWrapper(SimpleNamespace(call_tool=None), "test", tool_def)
+    assert wrapper.parameters == {"type": "object", "properties": {}}
+
+
+@pytest.mark.asyncio
+async def test_transient_retry_waits_one_second(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = 0
+
+    async def call_tool(_name: str, arguments: dict) -> object:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ConnectionResetError("reset")
+        return SimpleNamespace(content=[_FakeTextContent("ok")])
+
+    delays: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def fake_sleep(delay, *args, **kwargs):
+        delays.append(delay)
+        await real_sleep(0)
+
+    monkeypatch.setattr(mcp_mod.asyncio, "sleep", fake_sleep)
+    result = await _make_wrapper(SimpleNamespace(call_tool=call_tool), timeout=5).execute()
+    assert result == "ok"
+    assert delays == [1]
+
+
+def test_connection_failure_group_is_transient_only_if_every_member_is() -> None:
+    assert mcp_mod._is_transient_connection_failure(
+        BaseExceptionGroup("g", [ConnectionResetError(), httpx.ConnectError("x")])
+    )
+    assert not mcp_mod._is_transient_connection_failure(
+        BaseExceptionGroup("g", [ConnectionResetError(), ValueError("x")])
+    )
+
+
+def test_session_terminated_reads_the_error_message() -> None:
+    exc = RuntimeError("request failed")
+    exc.error = SimpleNamespace(code=32600, message="Session terminated")
+    assert mcp_mod._is_session_terminated(exc)
+    assert mcp_mod._is_session_terminated(RuntimeError("Connection closed"))
+    assert not mcp_mod._is_session_terminated(RuntimeError("request failed"))
+
+
+@pytest.mark.asyncio
+async def test_execute_empty_content_reports_no_output() -> None:
+    async def call_tool(_name: str, arguments: dict) -> object:
+        return SimpleNamespace(content=[])
+
+    assert await _make_wrapper(SimpleNamespace(call_tool=call_tool)).execute() == "(no output)"
+
+
+def test_is_image_block_accepts_only_image_blobs() -> None:
+    class Embedded:
+        def __init__(self, resource):
+            self.resource = resource
+
+    class Blob:
+        def __init__(self, mime):
+            self.mimeType = mime
+
+    class Text:
+        mimeType = "image/png"
+
+    types = SimpleNamespace(ImageContent=_FakeImageContent, EmbeddedResource=Embedded, BlobResourceContents=Blob)
+    assert mcp_mod._is_image_block(_FakeImageContent("x"), types)
+    assert mcp_mod._is_image_block(Embedded(Blob("image/png")), types)
+    assert not mcp_mod._is_image_block(Embedded(Blob("application/pdf")), types)
+    assert not mcp_mod._is_image_block(Embedded(Blob(None)), types)
+    assert not mcp_mod._is_image_block(Embedded(Text()), types)
+
+
+def _params(schema: dict) -> dict:
+    return MCPToolWrapper(
+        SimpleNamespace(call_tool=None), "test", SimpleNamespace(name="demo", description="d", inputSchema=schema)
+    ).parameters
+
+
+def test_wrapper_keeps_existing_defs_next_to_hoisted_refs() -> None:
+    params = _params({
+        "type": "object",
+        "$defs": {"kept": {"type": "integer"}},
+        "properties": {"a": {"type": "string"}, "b": {"$ref": "#/properties/a"}, "c": {"$ref": "#/$defs/kept"}},
+    })
+    name = params["properties"]["b"]["$ref"].removeprefix("#/$defs/")
+    assert params["$defs"] == {"kept": {"type": "integer"}, name: {"type": "string"}}
+
+
+def test_wrapper_hoisted_ref_name_avoids_existing_defs() -> None:
+    import hashlib
+
+    ref = "#/properties/a"
+    taken = f"ref_{hashlib.sha256(ref.encode()).hexdigest()[:12]}"
+    params = _params({
+        "type": "object",
+        "$defs": {taken: {"type": "boolean"}},
+        "properties": {"a": {"type": "string"}, "b": {"$ref": ref}},
+    })
+    assert params["properties"]["b"]["$ref"] == f"#/$defs/{taken}_"
+    assert params["$defs"][taken] == {"type": "boolean"}
+    assert params["$defs"][f"{taken}_"] == {"type": "string"}
+
+
+def test_wrapper_normalizes_nullable_oneof_items_and_defs() -> None:
+    params = _params({
+        "type": "object",
+        "$defs": {"maybe": {"type": ["integer", "null"]}},
+        "properties": {
+            "choice": {"oneOf": [{"type": "string"}, {"type": "null"}]},
+            "list": {"type": "array", "items": {"type": ["string", "null"]}},
+            "single": {"anyOf": [{"type": "string"}]},
+            "nested": {"type": "object", "properties": {"x": {"type": "string"}}},
+        },
+    })
+    props = params["properties"]
+    assert props["choice"] == {"type": "string", "nullable": True}
+    assert props["list"]["items"] == {"type": "string", "nullable": True}
+    assert props["single"] == {"anyOf": [{"type": "string"}]}
+    assert props["nested"] == {"type": "object", "properties": {"x": {"type": "string"}}, "required": []}
+    assert params["$defs"]["maybe"] == {"type": "integer", "nullable": True}
+    assert params["required"] == []
+
+
+@pytest.mark.parametrize(
+    ("command", "env", "expected_command"),
+    [
+        pytest.param("npx", None, r"C:\os\cmd.exe", id="launcher-not-on-path"),
+        pytest.param("tool.cmd", None, r"C:\os\cmd.exe", id="cmd-script-not-on-path"),
+        pytest.param("run.BAT", None, r"C:\os\cmd.exe", id="bat-script"),
+        pytest.param("npx", {"COMSPEC": r"D:\server\cmd.exe"}, r"D:\server\cmd.exe", id="server-comspec"),
+    ],
+)
+def test_normalize_windows_stdio_command_wraps_scripts(
+    monkeypatch: pytest.MonkeyPatch, command, env, expected_command,
+) -> None:
+    monkeypatch.setattr(mcp_mod.os, "name", "nt", raising=False)
+    monkeypatch.setattr(mcp_mod.shutil, "which", lambda command, path=None: None)
+    monkeypatch.setenv("COMSPEC", r"C:\os\cmd.exe")
+
+    wrapped, args, out_env = _normalize_windows_stdio_command(command, ["serve"], env)
+
+    assert wrapped == expected_command
+    assert args == ["/d", "/c", command, "serve"]
+    assert out_env == env
+
+
+@pytest.mark.parametrize("command", ["python.exe", "tool.COM", "cmd", "powershell", "pwsh.exe"])
+def test_normalize_windows_stdio_command_runs_executables_and_shells_directly(
+    monkeypatch: pytest.MonkeyPatch, command: str,
+) -> None:
+    """Even when PATH would resolve the name to a .cmd shim."""
+    monkeypatch.setattr(mcp_mod.os, "name", "nt", raising=False)
+    monkeypatch.setattr(mcp_mod.shutil, "which", lambda command, path=None: r"C:\shims\shim.cmd")
+
+    assert _normalize_windows_stdio_command(command, ["x"], None) == (command, ["x"], None)
+
+
+@pytest.mark.asyncio
+async def test_failed_server_is_closed_before_connect_returns(
+    fake_mcp_runtime: dict[str, object | None], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    closed: list[bool] = []
+
+    @asynccontextmanager
+    async def stdio_client(_params):
+        try:
+            yield object(), object()
+        finally:
+            await asyncio.sleep(0.01)
+            closed.append(True)
+
+    async def initialize():
+        raise RuntimeError("initialize failed")
+
+    monkeypatch.setattr(sys.modules["mcp.client.stdio"], "stdio_client", stdio_client)
+    fake_mcp_runtime["session"] = SimpleNamespace(initialize=initialize)
+    stacks = await connect_mcp_servers({"bad": MCPServerConfig(command="fake")}, ToolRegistry())
+    assert stacks == {}
+    assert closed == [True]
+
+
+@pytest.mark.asyncio
+async def test_close_connection_ignores_exception_groups() -> None:
+    class Connection:
+        async def aclose(self):
+            raise BaseExceptionGroup("cleanup", [RuntimeError("x")])
+
+    await mcp_mod._close_mcp_connection("s", Connection())
+
+
