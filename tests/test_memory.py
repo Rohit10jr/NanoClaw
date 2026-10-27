@@ -42,11 +42,11 @@ def runtime(provider, window=128_000, max_tokens=1000):
 def test_append_history_numbers_entries(store):
     assert store.append_history("first", session_key="cli:direct") == 1
     assert store.append_history("second") == 2
-    lines = [json.loads(line) for line in store.history_file.read_text().splitlines()]
+    lines = [json.loads(line) for line in store.history_file.read_text(encoding="utf-8").splitlines()]
     assert [e["cursor"] for e in lines] == [1, 2]
     assert lines[0]["session_key"] == "cli:direct" and "session_key" not in lines[1]
     datetime.strptime(lines[0]["timestamp"], "%Y-%m-%d %H:%M")
-    assert store._cursor_file.read_text() == "2"
+    assert store._cursor_file.read_text(encoding="utf-8") == "2"
 
 
 def test_append_history_cleans_and_caps(store):
@@ -72,7 +72,8 @@ def test_invalid_entries_are_ignored(store):
             json.dumps({"cursor": 3, "timestamp": "t"}),
             json.dumps({"cursor": 4, "timestamp": "t", "content": "ok too", "session_key": 5}),
             json.dumps({"cursor": 5, "timestamp": "t", "content": "last"}),
-        ]) + "\n"
+        ]) + "\n",
+        encoding="utf-8",
     )
     assert [e["content"] for e in store.read_unprocessed_history(0)] == ["ok", "last"]
     assert [e["content"] for e in store.read_unprocessed_history(1)] == ["last"]
@@ -118,7 +119,7 @@ async def test_dream_tools_write_only_memory_files(ws, store, tmp_path):
     assert sorted(tools.tool_names) == ["edit_file", "read_file", "write_file"]
     ok = await tools.execute("write_file", {"path": "memory/MEMORY.md", "content": "# Facts\n- likes tea\n"})
     assert not getattr(ok, "is_error", False)
-    assert (ws / "memory/MEMORY.md").read_text() == "# Facts\n- likes tea\n"
+    assert (ws / "memory/MEMORY.md").read_text(encoding="utf-8") == "# Facts\n- likes tea\n"
     assert not getattr(await tools.execute("write_file", {"path": "USER.md", "content": "Name: R"}), "is_error", False)
     refused = await tools.execute("write_file", {"path": "notes.txt", "content": "x"})
     assert refused.is_error
@@ -130,7 +131,7 @@ async def test_dream_tools_write_only_memory_files(ws, store, tmp_path):
     refused = await tools.execute("edit_file", {"path": "AGENTS.md", "old_text": "a", "new_text": "b"})
     assert refused.is_error
     outside = tmp_path / "secret.txt"
-    outside.write_text("s")
+    outside.write_text("s", encoding="utf-8")
     refused = await tools.execute("read_file", {"path": str(outside)})
     assert refused.is_error and "outside allowed directory" in refused
     assert "likes tea" in await tools.execute("read_file", {"path": "memory/MEMORY.md"})
@@ -310,7 +311,7 @@ async def test_summarize_transcript_caps_the_summary(ws, tmp_path, store):
 def test_memory_section_only_when_edited(ws):
     builder = ContextBuilder(ws)
     assert "likes tea" not in builder.build_system_prompt()
-    (ws / "memory/MEMORY.md").write_text("- likes tea\n")
+    (ws / "memory/MEMORY.md").write_text("- likes tea\n", encoding="utf-8")
     prompt = builder.build_system_prompt()
     assert "---\n\n- likes tea\n\n\n---\n\n# Skills\n" in prompt  # bare, as nanobot 32f5cc7
     assert prompt.index("# Tool Usage Notes") < prompt.index("- likes tea")

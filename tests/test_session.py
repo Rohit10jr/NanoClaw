@@ -2,10 +2,12 @@
 
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
 
+from conftest import symlink_or_skip
 from nanoclaw.session import Session, SessionManager
 from nanoclaw.session.manager import find_legal_message_start
 
@@ -222,7 +224,7 @@ def test_storage_inside_the_workspace_is_refused(ws):
 def test_workspace_id_is_created_once_and_reused(ws, root):
     first = SessionManager(ws, sessions_root=root)
     marker = ws / ".nanoclaw" / "workspace-id"
-    workspace_id = marker.read_text().strip()
+    workspace_id = marker.read_text(encoding="utf-8").strip()
     assert len(workspace_id) == 32
     assert first.sessions_dir == root.resolve() / workspace_id
     assert SessionManager(ws, sessions_root=root).sessions_dir == first.sessions_dir
@@ -251,7 +253,7 @@ def test_history_follows_a_moved_workspace(tmp_path, root):
 
 def test_invalid_workspace_id_is_an_error(ws, root):
     (ws / ".nanoclaw").mkdir()
-    (ws / ".nanoclaw" / "workspace-id").write_text("not-an-id\n")
+    (ws / ".nanoclaw" / "workspace-id").write_text("not-an-id\n", encoding="utf-8")
     with pytest.raises(RuntimeError, match="workspace identity marker is invalid"):
         SessionManager(ws, sessions_root=root)
 
@@ -259,12 +261,13 @@ def test_invalid_workspace_id_is_an_error(ws, root):
 def test_symlinked_workspace_id_is_refused(ws, root, tmp_path):
     (ws / ".nanoclaw").mkdir()
     target = tmp_path / "elsewhere"
-    target.write_text("0" * 32 + "\n")
-    (ws / ".nanoclaw" / "workspace-id").symlink_to(target)
+    target.write_text("0" * 32 + "\n", encoding="utf-8")
+    symlink_or_skip(ws / ".nanoclaw" / "workspace-id", target)
     with pytest.raises(RuntimeError, match="must not be a symlink"):
         SessionManager(ws, sessions_root=root)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits have no meaning on Windows")
 def test_sessions_root_is_private(ws, root):
     SessionManager(ws, sessions_root=root)
     assert (root.stat().st_mode & 0o777) == 0o700

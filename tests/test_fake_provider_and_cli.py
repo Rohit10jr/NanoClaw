@@ -54,7 +54,7 @@ def test_cli_ask_gives_the_model_the_default_tools_in_the_workspace(capsys, tmp_
 
     names = sorted(d["function"]["name"] for d in fake.calls[0].tools)
     assert names == ["edit_file", "exec", "list_dir", "read_file", "spawn", "web_fetch", "web_search", "write_file"]
-    assert (workspace / "note.txt").read_text() == "hi"  # relative path landed in the workspace
+    assert (workspace / "note.txt").read_text(encoding="utf-8") == "hi"  # relative path landed in the workspace
     captured = capsys.readouterr()
     assert captured.out.strip() == "Saved."
     assert "  ↳ write note.txt" in captured.err  # progress line (layer 10)

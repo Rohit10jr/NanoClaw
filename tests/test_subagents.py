@@ -200,7 +200,7 @@ async def test_wait_true_child_error_is_a_tool_error(ws, tmp_path):
 async def test_subagent_system_prompt(ws, tmp_path):
     sync_workspace_templates(ws)
     (ws / "skills" / "release").mkdir(parents=True)
-    (ws / "skills" / "release" / "SKILL.md").write_text("---\nname: release\ndescription: How we release.\n---\n")
+    (ws / "skills" / "release" / "SKILL.md").write_text("---\nname: release\ndescription: How we release.\n---\n", encoding="utf-8")
     prompt = SubagentManager(ws)._build_subagent_prompt()
     assert prompt.startswith(
         "# Subagent\n\nYou are a subagent spawned by the main agent to complete a specific task.\n"

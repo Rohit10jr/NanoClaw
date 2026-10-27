@@ -1,5 +1,6 @@
 """The runner driving the real default tools, with a scripted model."""
 
+from conftest import requires_posix_shell
 from nanoclaw.agent.runner import AgentRunner, AgentRunSpec
 from nanoclaw.agent.tools import build_default_tools
 from nanoclaw.providers import FakeProvider, LLMResponse, ToolCallRequest
@@ -9,8 +10,9 @@ def tool_turn(name, args, call_id):
     return LLMResponse(content=None, tool_calls=[ToolCallRequest(call_id, name, args)], finish_reason="tool_calls")
 
 
+@requires_posix_shell
 async def test_model_reads_edits_and_verifies_a_file(tmp_path):
-    (tmp_path / "config.ini").write_text("[server]\nport = 8080\nhost = localhost\n")
+    (tmp_path / "config.ini").write_text("[server]\nport = 8080\nhost = localhost\n", encoding="utf-8")
     fake = FakeProvider(
         [
             tool_turn("list_dir", {"path": "."}, "c1"),
@@ -30,7 +32,7 @@ async def test_model_reads_edits_and_verifies_a_file(tmp_path):
 
     assert result.stop_reason == "completed"
     assert result.tools_used == ["list_dir", "read_file", "edit_file", "exec"]
-    assert (tmp_path / "config.ini").read_text() == "[server]\nport = 9090\nhost = localhost\n"
+    assert (tmp_path / "config.ini").read_text(encoding="utf-8") == "[server]\nport = 9090\nhost = localhost\n"
     tool_outputs = {m["tool_call_id"]: m["content"] for m in result.messages if m["role"] == "tool"}
     assert tool_outputs["c1"] == "📄 config.ini"
     assert tool_outputs["c2"].startswith("1| [server]\n2| port = 8080")
@@ -39,7 +41,7 @@ async def test_model_reads_edits_and_verifies_a_file(tmp_path):
 
 
 async def test_bad_arguments_reach_the_model_which_then_corrects_itself(tmp_path):
-    (tmp_path / "a.txt").write_text("hello\n")
+    (tmp_path / "a.txt").write_text("hello\n", encoding="utf-8")
     fake = FakeProvider(
         [
             tool_turn("read_file", {"file": "a.txt", "limit": "ten"}, "c1"),

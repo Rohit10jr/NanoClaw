@@ -10,6 +10,7 @@ from unittest.mock import patch
 import httpx
 import pytest
 
+from conftest import requires_posix_shell, symlink_or_skip
 from nanoclaw.__main__ import main
 from nanoclaw.agent.loop import AgentLoop
 from nanoclaw.agent.runner import AgentRunner, AgentRunSpec
@@ -54,15 +55,15 @@ def _dns_and_whitelist(fake_dns):
 def ws(tmp_path):
     path = tmp_path / "ws"
     (path / "memory").mkdir(parents=True)
-    (path / "memory" / "history.jsonl").write_text('{"cursor": 1}\n')
-    (path / "notes.txt").write_text("inside\n")
+    (path / "memory" / "history.jsonl").write_text('{"cursor": 1}\n', encoding="utf-8")
+    (path / "notes.txt").write_text("inside\n", encoding="utf-8")
     return path
 
 
 @pytest.fixture
 def outside(tmp_path):
     path = tmp_path / "secret.txt"
-    path.write_text("outside\n")
+    path.write_text("outside\n", encoding="utf-8")
     return path
 
 
@@ -236,6 +237,7 @@ async def test_pinned_transport_connects_to_the_checked_addresses(fake_dns):
 # --- exec: always-on checks ------------------------------------------------
 
 
+@requires_posix_shell
 async def test_exec_blocks_internal_urls_even_unrestricted(ws):
     tool = ExecTool(working_dir=ws)
     out = await tool.execute(command="curl -s http://169.254.169.254/latest/meta-data/")
@@ -245,6 +247,7 @@ async def test_exec_blocks_internal_urls_even_unrestricted(ws):
     assert "https://public.test/ok" in out
 
 
+@requires_posix_shell
 async def test_unrestricted_exec_and_files_can_leave_the_workspace(ws, outside):
     assert "outside" in await ExecTool(working_dir=ws).execute(command=f"cat {outside}")
     assert "outside" in await ExecTool(working_dir=ws).execute(command="cat ../secret.txt")
@@ -268,7 +271,7 @@ async def test_restricted_reads_and_writes_stay_inside(ws, outside):
 
     write = WriteFileTool(ws, restrict_to_workspace=True)
     assert await write.execute(path=str(outside), content="x") == boundary(outside, ws)
-    assert outside.read_text() == "outside\n"
+    assert outside.read_text(encoding="utf-8") == "outside\n"
     assert "Successfully wrote" in await write.execute(path="sub/new.txt", content="x")
 
     edit = EditFileTool(ws, restrict_to_workspace=True)
@@ -280,8 +283,8 @@ async def test_restricted_reads_and_writes_stay_inside(ws, outside):
 
 
 async def test_restricted_symlink_escape_is_blocked(ws, outside):
-    (ws / "link.txt").symlink_to(outside)
-    (ws / "linkdir").symlink_to(outside.parent)
+    symlink_or_skip(ws / "link.txt", outside)
+    symlink_or_skip(ws / "linkdir", outside.parent)
     read = ReadFileTool(ws, restrict_to_workspace=True)
     assert await read.execute(path="link.txt") == boundary("link.txt", ws)
     assert await read.execute(path="linkdir/secret.txt") == boundary("linkdir/secret.txt", ws)
@@ -401,12 +404,15 @@ def test_exec_guard_allows_resolved_home_inside_workspace(ws, monkeypatch):
     assert ExecTool(working_dir=ws, restrict_to_workspace=True)._guard_command("cat ~/notes.txt", str(ws)) is None
 
 
+@requires_posix_shell
 async def test_restricted_exec_allows_resolved_home_inside_workspace(ws, monkeypatch):
     monkeypatch.setenv("HOME", str(ws))
+    monkeypatch.setenv("USERPROFILE", str(ws))  # where Windows looks for ~
     out = await ExecTool(working_dir=ws, restrict_to_workspace=True).execute(command="cat ~/notes.txt")
     assert "inside" in out and "Command blocked" not in out
 
 
+@requires_posix_shell
 async def test_restricted_exec_working_dir(ws, tmp_path):
     tool = ExecTool(working_dir=ws, restrict_to_workspace=True)
     assert await tool.execute(command="pwd", working_dir=str(tmp_path)) == (
@@ -448,18 +454,30 @@ async def test_ssrf_errors_get_the_boundary_note_not_the_retry_hint(ws):
     assert RETRY_HINT not in tool_message
 
 
-async def test_repeated_workspace_violations_escalate(ws, outside):
+async def _escalation_messages(ws, outside, third):
     tools = build_default_tools(ws, restrict_to_workspace=True)
-    third = calls(("read_file", {"path": str(outside)}), ("exec", {"command": f"cat {outside}"}))
     provider = FakeProvider(
         [calls(("read_file", {"path": str(outside)})), calls(("list_dir", {"path": str(outside)})), third, "ok"]
     )
     result = await AgentRunner().run(AgentRunSpec([{"role": "user", "content": "go"}], tools, provider))
-    tool_messages = [m["content"] for m in result.messages if m["role"] == "tool"]
+    return [m["content"] for m in result.messages if m["role"] == "tool"]
+
+
+async def test_repeated_workspace_violations_escalate(ws, outside):
+    tool_messages = await _escalation_messages(ws, outside, calls(("read_file", {"path": str(outside)})))
     assert tool_messages[0] == boundary(outside, ws) + RETRY_HINT
     assert tool_messages[1] == boundary(outside, ws) + RETRY_HINT
     assert tool_messages[2].startswith("Error: refusing repeated workspace-bypass attempts.\n")
-    assert f"You have tried to access '{str(outside).lower()}' (or an equivalent path) 3 times" in tool_messages[2]
+    # The target is shown resolved, lower-cased and with "/" separators on every OS, as nanobot.
+    target = outside.resolve().as_posix().lower()
+    assert f"You have tried to access '{target}' (or an equivalent path) 3 times" in tool_messages[2]
+
+
+@requires_posix_shell
+async def test_exec_counts_toward_the_same_escalation(ws, outside):
+    third = calls(("read_file", {"path": str(outside)}), ("exec", {"command": f"cat {outside}"}))
+    tool_messages = await _escalation_messages(ws, outside, third)
+    assert tool_messages[2].startswith("Error: refusing repeated workspace-bypass attempts.\n")
     assert tool_messages[3].startswith("Error: refusing repeated workspace-bypass attempts.\n")  # exec, same target
     assert "4 times" in tool_messages[3]
 
