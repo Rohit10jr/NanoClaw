@@ -2,8 +2,8 @@
 
 Mirrors the classic chat of nanobot/cli/terminal.py and nanobot/cli/stream.py:
 a prompt_toolkit prompt with saved input history, rich for Markdown replies,
-dim "↳" progress lines, and a "thinking" spinner. nanobot's streaming
-renderer and reasoning display are left for phase 2 (streaming).
+dim "↳" progress lines, and a "thinking" spinner. The spinner and nanobot's
+streaming renderer and reasoning display are in nanoclaw/cli/stream.py.
 """
 
 from __future__ import annotations
@@ -11,19 +11,21 @@ from __future__ import annotations
 import os
 import select
 import sys
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager, nullcontext, suppress
+from collections.abc import Callable
+from contextlib import nullcontext, suppress
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from rich.console import Console
 from rich.markdown import Markdown
-from rich.markup import escape
 from rich.text import Text
+
+# The spinner, the escaped progress-line markup and the bot name live with the
+# streaming renderer (as in nanobot cli/stream.py); re-exported from here.
+from nanoclaw.cli.stream import BOT_NAME, ThinkingSpinner, progress_line_markup
 
 # nanobot terminal.py:51
 EXIT_COMMANDS = {"exit", "quit", "/exit", "/quit", ":q"}
-BOT_NAME = "nanoclaw"
 # nanobot keeps it in ~/.nanobot/history/cli_history (config/paths.py:64).
 DEFAULT_HISTORY_PATH = Path("~/.nanoclaw/history/cli_history")
 
@@ -68,56 +70,6 @@ def print_agent_response(
     console.print(f"[cyan]{BOT_NAME}[/cyan]")
     console.print(response_renderable(response or "", render_markdown, render_as_text=render_as_text))
     console.print()
-
-
-def progress_line_markup(text: str) -> str:
-    """A dim "↳" line. The text is escaped: nanobot prints it as rich markup,
-    so a command like ``echo "[/x]"`` crashes its turn (UPSTREAM_BUGS.md, bug 6)."""
-    return f"  [dim]↳ {escape(text)}[/dim]"
-
-
-def _clear_current_line(console: Console) -> None:
-    """Erase the spinner's line before printing lasting output. (nanobot ``stream.py:26``)"""
-    file = console.file
-    if not getattr(file, "isatty", lambda: False)():
-        return
-    file.write("\r\x1b[2K")
-    file.flush()
-
-
-class ThinkingSpinner:
-    """Shows '<name> is thinking...' while the agent works; pauses for output lines.
-
-    (nanobot ``cli/stream.py`` ``ThinkingSpinner``)
-    """
-
-    def __init__(self, console: Console, bot_name: str = BOT_NAME) -> None:
-        self._console = console
-        self._spinner = console.status(f"[dim]{bot_name} is thinking...[/dim]", spinner="dots")
-        self._active = False
-
-    def __enter__(self) -> ThinkingSpinner:
-        self._spinner.start()
-        self._active = True
-        return self
-
-    def __exit__(self, *exc: object) -> Literal[False]:
-        self._active = False
-        self._spinner.stop()
-        _clear_current_line(self._console)
-        return False
-
-    @contextmanager
-    def pause(self) -> Iterator[None]:
-        """Temporarily stop the spinner so a line prints cleanly."""
-        if self._active:
-            self._spinner.stop()
-            _clear_current_line(self._console)
-        try:
-            yield
-        finally:
-            if self._active:
-                self._spinner.start()
 
 
 def print_progress_line(console: Console, text: str, spinner: ThinkingSpinner | None = None) -> None:
