@@ -7,8 +7,6 @@ each provider translates to and from its own wire format.
 
 from __future__ import annotations
 
-from loguru import logger
-
 import asyncio
 import json
 import re
@@ -19,6 +17,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any
+
+from loguru import logger
 
 # Added to a server's Retry-After before retrying (nanobot base.py:41).
 RETRY_AFTER_BUFFER = 1
