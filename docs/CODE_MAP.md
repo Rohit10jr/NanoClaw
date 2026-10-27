@@ -658,6 +658,22 @@ Note: [`notes/14-bus-workers.md`](notes/14-bus-workers.md). Links point at nanob
 | Subagent reports on the bus (`agent/subagent.py`) | [`agent/subagent.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/subagent.py) | Same system-message report |
 | `Chat` over the bus (`cli/chat.py`) | [`cli/agent.py:322-445`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/cli/agent.py#L322) | Prompt stays open during a turn (difference #1) |
 
+## Layer 15 — Robustness
+
+Note: [`notes/15-robustness.md`](notes/15-robustness.md). Links point at nanobot `c4dac64`.
+
+| NanoClaw | nanobot (`c4dac64`) | How it compares |
+|---|---|---|
+| `restore_runtime_checkpoint`, `runtime_checkpoint_is_well_formed`, `discard_runtime_checkpoint` (`session/recovery.py`) | [`session/recovery.py:216, 278, 376`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/session/recovery.py#L216) | Byte-identical on 21 checkpoint cases; JSONL storage |
+| Restore stage in `AgentLoop._restore_turn` (`agent/loop.py`) | [`agent/loop.py:2134`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/loop.py#L2134) | Same order: checkpoint, user-only tail, then commands |
+| `ContextGovernor`, `ContextGovernanceConfig`, `ContextCompactionState`, `ModelRequestState` (`agent/context_governance.py`) | [`agent/context_governance.py:126-262`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/context_governance.py#L126) | Same; no provider conversation state or native compaction |
+| `ContextGovernor.prepare_request`, `request_pressure`, `_compact_request_history`, `_fit_pending_file_reads` | [`:716, 506, 623, 458`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/context_governance.py#L716) | 0 differences on 109 checks |
+| Transcript repair helpers, `apply_tool_result_budget`, `merge_adjacent_user_messages_for_model` | [`agent/context_governance.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/context_governance.py) | Same |
+| `ContextWindowExceededError` (moved from `agent/loop.py`, re-exported there) | [`agent/context_governance.py:79`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/context_governance.py#L79) | Same |
+| `AgentRunSpec.context_window_tokens`, `consolidate_history`, `accepted_boundary`, `active_summary`; `AgentRunResult.summary_checkpoint` (`agent/runner.py`) | [`agent/runner.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/runner.py) | Same call site, before every request |
+| `SessionSummaryCheckpoint` (`session/summary.py`); commit in `AgentLoop._save_turn` | [`session/summary.py:30`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/session/summary.py#L30) | Same boundary rule |
+| Subagent compaction, `persist=False` (`agent/subagent.py`) | [`agent/subagent.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/subagent.py) | Same; no child transcript saved |
+
 [nb-pta]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/providers/base.py#L118
 [nb-tcr]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/providers/base.py#L72
 [nb-tcr-hvn]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/providers/base.py#L81

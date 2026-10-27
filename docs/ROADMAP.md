@@ -189,7 +189,7 @@ be used unchanged on top of it. Progress: [`PHASE2_PROGRESS.md`](PHASE2_PROGRESS
 | 12 | Foundations | Config file, logging, provider retries, richer usage, iteration limit setting | `config/`, `providers/base.py` (`chat_with_retry`), `llm_usage/` | ~600 | ✅ done |
 | 13 | Hooks, events, streaming | Hook system, typed events, streamed replies and reasoning | `agent/hook.py`, `turn_hooks.py`, `progress_hook.py`, `bus/outbound_events.py`, `chat_stream` | ~900 | ✅ done |
 | 14 | Bus and session workers | Message bus, `AgentLoop.run()`, `TurnDelivery`, command router, `/stop`, mid-turn injections | `bus/`, `agent/loop.py`, `agent/turn_delivery.py`, `command/` | ~1,000 | ✅ done |
-| 15 | Robustness | Checkpoints and crash recovery; compaction between tool calls (also subagents) | `session/recovery.py`, `agent/context_governance.py` | ~600 | |
+| 15 | Robustness | Checkpoints and crash recovery; compaction between tool calls (also subagents) | `session/recovery.py`, `agent/context_governance.py` | ~600 | ✅ done |
 | 16 | Shell | Exec sessions; Windows PowerShell | `agent/tools/exec_session.py`, `shell.py`, `_windows_job.py` | ~600 | |
 | 17 | More tools | `apply_patch`, `rg`, file-state dedupe, MCP | `apply_patch.py`, `rg.py`, `file_state.py`, `mcp.py` | ~900 | |
 | 18 | Isolation | bubblewrap sandbox, separate project folder | `sandbox.py`, `security/workspace_access.py` | ~350 | |
