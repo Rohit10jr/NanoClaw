@@ -353,3 +353,94 @@ async def test_system_message_without_override_routes_to_the_named_chat(ws, tmp_
     assert rig.saved("system:cli:b")[0]["content"] == "[report]"
     assert not any(isinstance(e, SessionTurnStarted) for e in rig.lifecycle)  # no lifecycle for system turns
     assert any(isinstance(e, TurnRunStatusChanged) and e.status == "idle" for e in rig.lifecycle)
+
+
+# --- mutation-check gaps (layer 14) -------------------------------------------------
+
+
+async def test_each_streamed_segment_gets_its_own_stream_id(ws, tmp_path):
+    """nanobot TurnDelivery: a segment that ends without ``merge_next`` moves the
+    stream id on, so text before tools and the answer are separate messages."""
+    async with Rig(ws, tmp_path, [call("echo", {"text": "x"}, content="Checking."), "Done."]) as rig:
+        await rig.send("go")
+        await rig.settle(1)
+    ends = [m.event for m in rig.outbound if isinstance(m.event, StreamEndEvent)]
+    deltas = [m.event for m in rig.outbound if isinstance(m.event, StreamDeltaEvent)]
+    assert [e.stream_id.rsplit(":", 1)[1] for e in ends] == ["0", "1"]
+    assert {d.stream_id for d in deltas if d.content == "Checking."} == {ends[0].stream_id}
+    assert {d.stream_id for d in deltas if d.content == "Done."} == {ends[1].stream_id}
+
+
+async def test_a_system_turn_publishes_no_progress(ws, tmp_path):
+    """Progress is a lifecycle notification: only user turns publish it
+    (nanobot bus/notification_delivery.py:34)."""
+    script = [call("echo", {"text": "x"}, content="Checking."), "Noted."]
+    async with Rig(ws, tmp_path, script) as rig:
+        msg = InboundMessage(channel="system", sender_id="subagent", chat_id="cli:b", content="[report]")
+        await rig.loop.bus.publish_inbound(msg)
+        await rig.settle(1)
+    assert rig.texts() == ["Noted."]
+    assert not any(isinstance(m.event, ProgressEvent) for m in rig.outbound)
+
+
+async def test_input_a_command_produces_while_busy_joins_the_running_turn(ws, tmp_path):
+    """nanobot loop.py:849: a command answered inline that returns agent input
+    has that input queued on the session (here: injected into the running turn)."""
+    async with Rig(ws, tmp_path, [call("slow", {"text": "g"}), "Done."]) as rig:
+
+        async def again(ctx):
+            return InboundMessage(
+                channel=ctx.msg.channel,
+                sender_id=ctx.msg.sender_id,
+                chat_id=ctx.msg.chat_id,
+                content="again please",
+                metadata={"original_command": "/again"},
+            )
+
+        rig.loop.commands.exact("/again", again)
+        await rig.send("work")
+        await rig.slow.running("g").wait()
+        await rig.send("/again")
+        await rig.until(lambda: rig.loop._pending_queues["cli:a"].qsize() == 1)
+        rig.slow.gate("g").set()
+        await rig.settle(1)
+    assert rig.texts() == ["Done."]
+    assert rig.provider.calls[1].messages[-1]["content"].startswith("again please")
+
+
+async def test_the_worker_keeps_serving_after_one_message_fails(ws, tmp_path, monkeypatch):
+    """nanobot loop.py:1594: a failure on one message is logged and the worker
+    continues FIFO with the rest of the session's inbox."""
+    async with Rig(ws, tmp_path, ["Second done."]) as rig:
+        original = rig.loop._dispatch_one
+
+        async def flaky(msg, pending):
+            if msg.content == "boom":
+                raise RuntimeError("dispatch failed")
+            return await original(msg, pending)
+
+        monkeypatch.setattr(rig.loop, "_dispatch_one", flaky)
+        # Both arrive before the worker starts, so they share its inbox.
+        await rig.send("boom")
+        await rig.send("second")
+        await rig.settle(1)
+    assert rig.texts() == ["Second done."]
+
+
+async def test_cancelling_a_worker_before_it_started_drops_its_inbox(ws, tmp_path):
+    """A worker cancelled before its first step never ran its own cleanup;
+    cancel_active_tasks drops its inbox so later input starts a new worker,
+    and a queued session command still gets its completion."""
+    async with Rig(ws, tmp_path, ["Fresh."]) as rig:
+        loop = rig.loop
+        first = InboundMessage(channel="cli", sender_id="user", chat_id="a", content="never")
+        compact = InboundMessage(channel="cli", sender_id="user", chat_id="a", content="/compact")
+        await loop._enqueue_session_message(first)
+        await loop._enqueue_session_message(compact)
+        assert await loop.cancel_active_tasks("cli:a") == 1
+        assert loop._pending_queues == {} and loop._active_tasks == {}
+        await rig.until(lambda: rig.texts() == [""])  # the queued /compact's empty completion
+        await rig.send("hello")
+        await rig.settle(2)
+    assert rig.texts() == ["", "Fresh."]
+    assert all("never" not in m.get("content", "") for m in rig.saved())
