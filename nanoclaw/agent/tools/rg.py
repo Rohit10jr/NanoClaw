@@ -12,9 +12,11 @@ It is registered only when ``tools.exec.enable`` is on and ``rg`` is on PATH
 (with the exec PATH settings), as in nanobot. nanobot then drops its own
 ``grep``/``find_files`` tools (loader.py:130); NanoClaw has neither.
 
-Differences from nanobot are those of ``ExecTool`` (shell.py docstring): the
-command guard runs on every call, not only in restricted mode. nanobot also
-requires ``tools.file.enable``, a setting NanoClaw doesn't have.
+The command guard runs only in restricted mode, as in nanobot. ``exec``
+runs it on every command (shell.py docstring), but rg runs no shell, so its
+deny list and internal-URL check would only block searches for text such as
+``rm -rf`` or ``shutdown``. nanobot also requires ``tools.file.enable``, a
+setting NanoClaw doesn't have.
 """
 
 from __future__ import annotations
@@ -71,6 +73,22 @@ class RgTool(ExecTool):
         }
         schema["required"] = ["args"]
         return schema
+
+    def _guard_command(
+        self,
+        command: str,
+        cwd: str,
+        *,
+        restrict_to_workspace: bool | None = None,
+        workspace_root: str | None = None,
+    ) -> ToolResult | None:
+        # nanobot's rule (shell.py:446): the guard runs only in restricted mode.
+        should_restrict = self.restrict_to_workspace if restrict_to_workspace is None else restrict_to_workspace
+        if not should_restrict:
+            return None
+        return super()._guard_command(
+            command, cwd, restrict_to_workspace=restrict_to_workspace, workspace_root=workspace_root
+        )
 
     async def execute(self, args: list[str], **kwargs: Any) -> str:  # type: ignore[override]
         if not args:

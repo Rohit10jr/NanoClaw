@@ -263,12 +263,33 @@ async def test_missing_executable_is_reported(tmp_path, monkeypatch):
     assert "rg" in result
 
 
-def test_guard_sees_the_joined_argv(tmp_path):
-    # NanoClaw runs the command guard on every call (shell.py docstring), on
-    # shlex.join(["rg", *args]); nanobot only in restricted mode.
-    blocked = RgTool(working_dir=str(tmp_path))._prepare_command(["rg", "x; shutdown", "."])
-    assert isinstance(blocked, str) and "blocked" in blocked.lower()
-    prepared = RgTool(working_dir=str(tmp_path))._prepare_command(["rg", "-F", "hello | $HOME", "."])
+def test_guard_runs_only_in_restricted_mode(tmp_path):
+    # rg runs no shell, so unrestricted it skips the guard, as in nanobot
+    # (exec runs it on every command): searching for deny-listed words or an
+    # internal URL is allowed.
+    tool = RgTool(working_dir=str(tmp_path))
+    for args in (["rm -rf", "."], ["x; shutdown", "."], ["http://169.254.169.254/latest", "."]):
+        prepared = tool._prepare_command(["rg", *args])
+        assert not isinstance(prepared, str), args
+        assert prepared.command == ["rg", *args]
+    prepared = tool._prepare_command(["rg", "-F", "hello | $HOME", "."])
     assert not isinstance(prepared, str)
     assert prepared.command == ["rg", "-F", "hello | $HOME", "."]
     assert Path(prepared.cwd) == tmp_path
+
+    # Restricted: the full guard on shlex.join(["rg", *args]), as nanobot.
+    restricted = RgTool(working_dir=str(tmp_path), restrict_to_workspace=True)
+    blocked = restricted._prepare_command(["rg", "x; shutdown", "."])
+    assert isinstance(blocked, str) and "blocked" in blocked.lower()
+    outside = restricted._prepare_command(["rg", "x", "/etc"])
+    assert isinstance(outside, str) and "blocked" in outside.lower()
+
+
+@pytest.mark.asyncio
+async def test_search_for_deny_listed_text_runs_unrestricted(tmp_path):
+    if shutil.which("rg") is None:
+        pytest.skip("ripgrep is not installed")
+    (tmp_path / "notes.txt").write_text("never run rm -rf here\n", encoding="utf-8")
+    result = await RgTool(working_dir=str(tmp_path)).execute(args=["-F", "rm -rf", "."])
+    assert "blocked" not in result
+    assert "never run rm -rf here" in result
