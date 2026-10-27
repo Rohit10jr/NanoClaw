@@ -197,6 +197,8 @@ async def test_connection_error_becomes_error_response():
         ({"output_text": [{"type": "text", "text": "out"}]}, "out", False),
         (completion({"content": [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]}), "ab", False),
         (completion({"content": [{"type": "thinking", "text": "hidden"}, {"type": "text", "text": "shown"}]}), "shown", False),
+        # Bare strings in a parts list count as text (nanobot openai_compat_provider.py:1349).
+        (completion({"content": ["x", {"type": "text", "text": "y"}]}), "xy", False),
     ],
 )
 def test_parse_edge_cases(data, content, is_error):
