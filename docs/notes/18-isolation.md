@@ -81,7 +81,7 @@ with tests that fail without it; the sandbox line added to the runtime block.
 
 ## Tests
 
-Layer 18 adds 89 tests (1,986 → 2,075): `tests/test_sandbox.py` (nanobot's
+Layer 18 adds 115 tests (1,986 → 2,101): `tests/test_sandbox.py` (nanobot's
 bwrap, unknown-backend and platform tests, bind roots, forced restriction,
 live runs, sandbox under a project scope) and `tests/test_workspace_scope.py`
 (scopes, file tools, prompt, runtime block, subagents, CLI, an end-to-end
@@ -89,4 +89,26 @@ live runs, sandbox under a project scope) and `tests/test_workspace_scope.py`
 
 ### Mutation checks
 
-MUTATION_RESULTS
+214 rules were broken on purpose:
+
+| Area | Rules | Caught at once | Gaps closed with tests | Equivalent | Result |
+|---|---|---|---|---|---|
+| Sandbox and its wiring | 76 | 59 | 16 | 1 | 75 caught |
+| Workspace scope | 59 | 37 | 22 | 0 | 59 caught |
+| Project wiring (file tools, prompt, loop, subagents, CLI) | 79 | 58 | 14 | 7 | 72 caught |
+
+26 new tests close the gaps, for example: `$VAR`/`~` expansion of bind paths
+and a relative bind becoming an absolute mount; the full list of optional
+system mounts; `edit_file`, `apply_patch` and `list_dir` keeping the
+sandbox's restriction; scope validation (NUL in the path, wrong types); the
+host-sandbox environment markers; both bracket escapes in the runtime block;
+Dream keeping its restriction and never seeing `# Current Project`;
+subagents binding the given scope without a parent turn; `chat -p`.
+
+Equivalent (8): values that a later check drops anyway (a blank bind path
+becomes `.`, which is relative), extra read roots never consulted when
+unrestricted, scopes that always equal the loop's on the paths concerned, and
+a context reset in a task that ends right after. The split `wait_for` test,
+which failed four times under parallel load, now waits for a file the test
+creates instead of a sleep.
+

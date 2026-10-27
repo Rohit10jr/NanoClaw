@@ -99,16 +99,16 @@ Legend: ⏳ in progress · ✅ done and verified · ⛔ blocked
 | Docs | note 17, CODE_MAP, README, ROADMAP, notes 03/06/07/08/09 | main session | — | ✅ |
 | PR | `p2/layer-17` → `main` | main session | PR #9 | ✅ |
 
-## Layer 18 — isolation: bubblewrap sandbox, separate project folder (`p2/layer-18`) ⏳
+## Layer 18 — isolation: bubblewrap sandbox, separate project folder (`p2/layer-18`) ✅
 
 | Task | Scope (files) | Sub-agent | Verification | Status |
 |---|---|---|---|---|
 | 18.1 Sandbox | new `agent/tools/sandbox.py` (bubblewrap), `exec`/`rg` wrapping, `tools.exec.sandbox` forcing restriction, bind roots in the guard | sub-agent (worktree), parallel | 62 cases: 60 identical, 2 deliberate (no seatbelt); bubblewrap installed, live tests run | ✅ |
 | 18.2 Project folder | workspace scope, `--project`, tools resolving against the project, `# Current Project` prompt section, `AGENTS.md` from the project, subagents | sub-agent (worktree), parallel | 564 checks identical | ✅ |
 | Integration | merge, sandbox restriction under a project scope (gap found and fixed), sandbox line in the runtime block | main session | 1 conflict; comparisons re-run; 2,075 passed, 6 skipped | ✅ |
-| Mutation checks | ~110 rules | sub-agent (worktree) | | ⏳ |
+| Mutation checks | 214 rules | sub-agent (worktree) | 206 caught, 8 equivalent (26 tests added); 2,101 passed | ✅ |
 | Docs | note 18, CODE_MAP, README, ROADMAP, notes 03/04/08/09 | main session | — | ✅ |
-| PR | `p2/layer-18` → `main` | main session | | ⏳ |
+| PR | `p2/layer-18` → `main` | main session | PR #10 | ✅ |
 
 ## Blockers and open items
 
