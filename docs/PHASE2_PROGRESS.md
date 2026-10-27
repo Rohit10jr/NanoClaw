@@ -50,9 +50,19 @@ Legend: ⏳ in progress · ✅ done and verified · ⛔ blocked
 | Docs | note 13, CODE_MAP, README, notes 02/10, UPSTREAM_BUGS (bug 6 in reasoning lines) | main session | — | ✅ |
 | PR | `p2/layer-13` → `main` | main session | PR #5 | ✅ |
 
+## Layer 14 — bus, session workers, `/stop`, injections (`p2/layer-14`) ⏳
+
+| Task | Scope (files) | Sub-agent | Verification | Status |
+|---|---|---|---|---|
+| 14.1 Bus and command router | new `bus/events.py`, `bus/queue.py`, `command/router.py`, `command/builtin.py`; chat uses the router | sub-agent (worktree), phase A | | ⏳ |
+| 14.2 Runner injections and cancellation | `agent/runner.py` | sub-agent (worktree), phase A | | ⏳ |
+| 14.3 Bus-driven loop | `AgentLoop.run()`, per-session workers, `TurnDelivery`, `/stop` cancelling the turn, injection draining, subagent reports on the bus, chat over the bus | phase B | | |
+| Comparison, mutation checks, docs, PR | | | | |
+
 ## Blockers and open items
 
 | Item | Status |
 |---|---|
 | Real-model tests need API keys as environment secrets | Open; FakeProvider only until then |
-| PR #2 (docs) not merged; layer 11 branches from it | Open |
+| PRs #2–#4 merged; #5 (layer 13) open | — |
+| Rewrite earlier commits to the user's author | After phase 2 (user decision) |
