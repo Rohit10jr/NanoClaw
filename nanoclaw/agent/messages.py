@@ -7,6 +7,7 @@ templates/agent/max_iterations_message.md) so behaviour matches.
 from __future__ import annotations
 
 import re
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 TRUNCATED_SUFFIX = "\n... (truncated)"
@@ -81,19 +82,133 @@ def is_blank(text: str | None) -> bool:
     return text is None or not text.strip()
 
 
-_THINKING_TAG = r"(?:think|thinking|thought)"
+# Inline reasoning tags. Copied from nanobot utils/helpers.py:156-170.
+def _tag_regex(tags: tuple[str, ...]) -> str:
+    return rf"(?:{'|'.join(re.escape(tag) for tag in tags)})"
+
+
+_THINKING_TAGS = ("think", "thinking", "thought")
+_THINKING_TAG = _tag_regex(_THINKING_TAGS)
+_INLINE_SELF_CLOSING_THINKING_TAG = r"(?:thinking)"
+_THINKING_TAG_PREFIX = "|".join(
+    sorted(
+        {re.escape(tag[:i]) for tag in _THINKING_TAGS for i in range(1, len(tag) + 1)},
+        key=len,
+        reverse=True,
+    )
+)
+_PARTIAL_THINKING_TAG = rf"</?(?:{_THINKING_TAG_PREFIX})>?"
 
 
 def strip_think(text: str) -> str:
     """Remove inline reasoning blocks some models put in their answer text.
 
     Local reasoning models (DeepSeek-R1, Qwen3 via Ollama, ...) often reply
-    with ``<think>...</think>answer``. Removes closed blocks and an unclosed
-    block at the start. nanobot's version (utils/helpers.py strip_think) also
-    cleans up malformed tags and streaming fragments.
+    with ``<think>...</think>answer``. Copied from nanobot utils/helpers.py:173
+    and handles, in order:
+
+    1. closed ``<think>`` / ``<thinking>`` / ``<thought>`` blocks;
+    2. an unclosed block at the start (a stream still inside the block);
+    3. ``<thinking/>`` markers at the edges;
+    4. malformed opening tags with no ``>`` (``<think广场...``);
+    5. orphan closing tags at the very start or end only;
+    6. harmony-style ``<channel|>`` markers at the start only;
+    7. a partial control tag cut off at the end of a stream chunk (``<thi``).
+
+    Edge-only rules (5, 6) keep prose that discusses these tokens intact.
     """
+    # Every supported control tag contains '<'; ordinary text only needs trimming.
     if "<" not in text:
         return text.strip()
     text = re.sub(rf"<(?P<tag>{_THINKING_TAG})>[\s\S]*?</(?P=tag)>", "", text)
     text = re.sub(rf"^\s*<{_THINKING_TAG}>[\s\S]*$", "", text)
+    text = re.sub(rf"^\s*<{_INLINE_SELF_CLOSING_THINKING_TAG}/>\s*", "", text)
+    text = re.sub(rf"\s*<{_INLINE_SELF_CLOSING_THINKING_TAG}/>\s*$", "", text)
+    # Not \w after the tag name: in Unicode mode it matches CJK text too.
+    text = re.sub(rf"<{_THINKING_TAG}(?![A-Za-z0-9_\-:>/])", "", text)
+    text = re.sub(rf"^\s*</{_THINKING_TAG}>\s*", "", text)
+    text = re.sub(rf"\s*</{_THINKING_TAG}>\s*$", "", text)
+    text = re.sub(r"^\s*<\|?channel\|?>\s*", "", text)
+    partial_control_tag = (
+        rf"{_PARTIAL_THINKING_TAG}|"
+        r"<\|?(?:c|ch|cha|chan|chann|channe|channel)(?:\|?>?)?"
+    )
+    text = re.sub(rf"(?:{partial_control_tag})$", "", text)
+    text = re.sub(r"^\s*<\|?$", "", text)
     return text.strip()
+
+
+def strip_reasoning_tags(text: object) -> str:
+    """Remove wrapper tags from text already known to be reasoning.
+
+    (nanobot utils/helpers.py:232)
+    """
+    if not isinstance(text, str):
+        return ""
+    if "<" not in text:
+        return text.strip()
+    text = re.sub(rf"^\s*<{_THINKING_TAG}/>\s*", "", text)
+    text = re.sub(rf"\s*<{_THINKING_TAG}/>\s*$", "", text)
+    text = re.sub(rf"^\s*<{_THINKING_TAG}>\s*", "", text)
+    text = re.sub(rf"\s*</{_THINKING_TAG}>\s*$", "", text)
+    text = re.sub(rf"\s*(?:{_PARTIAL_THINKING_TAG})$", "", text)
+    return text.strip()
+
+
+def extract_think(text: str) -> tuple[str | None, str]:
+    """Split inline reasoning from the answer: ``(thinking, cleaned_text)``.
+
+    Only closed blocks count as thinking; joined with blank lines.
+    (nanobot utils/helpers.py:245)
+    """
+    if "<" not in text:
+        return None, text.strip()
+    parts = [
+        m.group(2).strip()
+        for m in re.finditer(rf"<(?P<tag>{_THINKING_TAG})>([\s\S]*?)</(?P=tag)>", text)
+    ]
+    thinking = "\n\n".join(parts) if parts else None
+    return thinking, strip_think(text)
+
+
+def extract_reasoning(reasoning_content: str | None, content: str | None) -> tuple[str | None, str | None]:
+    """``(reasoning_text, cleaned_content)`` from one model response.
+
+    A dedicated ``reasoning_content`` field wins; otherwise closed inline
+    ``<think>`` blocks in ``content`` are the reasoning. Inline tags are
+    always stripped from the answer. (nanobot utils/helpers.py:297, without
+    Anthropic ``thinking_blocks``, which NanoClaw's provider never returns.)
+    """
+    if reasoning_content:
+        return strip_reasoning_tags(reasoning_content), strip_think(content) if content else content
+    if content:
+        return extract_think(content)
+    return None, content
+
+
+class IncrementalThinkExtractor:
+    """Surface inline ``<think>`` reasoning from a growing stream buffer.
+
+    Feed it the whole buffer after each delta; it emits only the reasoning
+    text it hasn't emitted yet. (nanobot utils/helpers.py:261)
+    """
+
+    __slots__ = ("_emitted",)
+
+    def __init__(self) -> None:
+        self._emitted = ""
+
+    def reset(self) -> None:
+        self._emitted = ""
+
+    async def feed(self, buf: str, emit: Callable[[str], Awaitable[Any]]) -> bool:
+        """Emit new thinking found in ``buf``; True if anything was emitted."""
+        thinking, _ = extract_think(buf)
+        if not thinking or thinking == self._emitted:
+            return False
+        new = thinking[len(self._emitted):]
+        if not new.strip():
+            return False
+        self._emitted = thinking
+        await emit(new)
+        return True

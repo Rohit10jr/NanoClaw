@@ -69,7 +69,7 @@ The commands NanoClaw has, with nanobot's descriptions and texts
 
 | Change | Why | nanobot |
 |---|---|---|
-| Runner: `on_progress` callback, called before tools run with the model's text (`<think>` removed) and the tool hints | The progress lines | `AgentProgressHook.before_execute_tools` (`progress_hook.py:135`); a small slice of hooks (phase 2) |
+| Runner: `on_progress` callback, called before tools run with the model's text (`<think>` removed) and the tool hints | The progress lines | `AgentProgressHook.before_execute_tools` (`progress_hook.py:135`); a small slice of hooks. *(Layer 13: replaced by nanobot's hooks; `on_progress` is still accepted and adapted into a progress hook)* |
 | Loop: `process_direct(on_progress=)`, `process_subagent_result(on_progress=)` | Pass it through | `process_direct(on_progress=)` |
 | Loop: saves the last turn's token use in the session (`_last_usage`) | `/status` | `loop.py:2217` |
 | Loop: `start_time` | `/status` uptime | `_start_time` |
@@ -85,7 +85,7 @@ The commands NanoClaw has, with nanobot's descriptions and texts
 | 2 | Ctrl+C while the agent works | Ends the chat, as nanobot |
 | 3 | Progress lines in `ask` | Yes, on stderr (stdout keeps only the reply) |
 | 4 | Name in the banner and header | `nanoclaw`, no emoji (as in layer 4) |
-| — | Streaming | Phase 2 (it changes the provider, the runner and needs hooks; see the plan discussion) |
+| — | Streaming | Phase 2 (it changes the provider, the runner and needs hooks; see the plan discussion). *Done in layer 13* |
 
 ## Differences from nanobot (deliberate)
 
@@ -93,7 +93,7 @@ The commands NanoClaw has, with nanobot's descriptions and texts
 |---|---|---|---|---|---|
 | 1 | Default chat | Full-screen native app; the Python prompt with `--classic` | The Python prompt (classic) only | The native app is a separate program | Phase 2: TUI |
 | 2 | Progress-line text | Printed as rich markup: `[/x]` crashes, `[red]`/`[a-z]` vanish ([upstream bug 6](../UPSTREAM_BUGS.md#6-progress-lines-are-printed-as-rich-markup)) | Escaped, shown as typed | Bug fix | — |
-| 3 | Replies appear | Streamed word by word | Whole, after the spinner | No streaming yet | Phase 2: Streaming |
+| 3 | Replies appear | Streamed word by word | Whole, after the spinner | No streaming yet *(layer 13: streamed, as nanobot)* | Phase 2: Streaming |
 | 4 | Commands | 17, plus `!shell` | The 8 above | The others need model presets, goals, triggers, Dream history, prompt overrides, pairing, the Web UI | Phase 2, with those features |
 | 5 | `/stop` | Also cancels a running turn (from other channels) | Cancels subagents only | In the classic chat you can't type during a turn in either project | Phase 2: cancellation |
 | 6 | `/dream` | Runs in the background; "Dreaming..." then a later message; also commits memory to git | Waits for Dream with the spinner, then prints the result | Same output, simpler; no git history (layer 6) | — |
@@ -108,8 +108,8 @@ The commands NanoClaw has, with nanobot's descriptions and texts
 | nanobot feature | Where | Later phase |
 |---|---|---|
 | Full-screen native terminal app, themes | `cli/tui_launcher.py`, `--theme` | **Phase 2: Web UI / TUI** |
-| Streaming replies | `cli/stream.py` `StreamRenderer`, provider `chat_stream` | **Phase 2: Streaming** |
-| Showing the model's reasoning | `_ReasoningBuffer`, `show_reasoning` | **Phase 2: Streaming** |
+| Streaming replies | `cli/stream.py` `StreamRenderer`, provider `chat_stream` | **Done in layer 13** |
+| Showing the model's reasoning | `_ReasoningBuffer`, `show_reasoning` | **Done in layer 13** |
 | `/restart`, `/model`, `/goal`, `/trigger`, `/dream-log`, `/dream-restore`, `/dream-prompt`, `/evaluator-prompt`, `/pairing`, `!shell` | `command/builtin.py` | **Phase 2**, with model presets, goals, cron triggers, memory git history, prompt overrides, channels, Web UI |
 | Cancelling a running turn | `_cancel_active_tasks` | **Phase 2: cancellation** |
 | `--logs`, per-channel progress settings (`send_progress`, `send_tool_hints`) | `cli/agent.py`, `ChannelsConfig` | **Phase 2: Logging, configuration** |

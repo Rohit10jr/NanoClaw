@@ -17,7 +17,7 @@ from nanoclaw.config.loader import (
     save_config,
     set_config_path,
 )
-from nanoclaw.config.schema import AgentDefaults, Config, ProviderConfig, ToolsConfig
+from nanoclaw.config.schema import AgentDefaults, ChannelsConfig, Config, ProviderConfig, ToolsConfig
 
 __all__ = [
     "AgentDefaults",
@@ -26,6 +26,7 @@ __all__ = [
     "ConfigEnvError",
     "ConfigIssue",
     "ConfigLoadError",
+    "ChannelsConfig",
     "ProviderConfig",
     "ToolsConfig",
     "apply_env_overrides",

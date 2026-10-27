@@ -28,6 +28,7 @@ recovery, governance) for later.
 | 10 | Terminal chat (CLI) | done |
 | 11 | Catch up with upstream nanobot (`c4dac64`) | done |
 | 12 | Foundations: config file, logging, retries, token usage | done |
+| 13 | Hooks, events, streaming replies | done |
 
 Phase 1 (the core agent) is complete. Phase 2 builds the production backend
 (layers 11–25; progress in [`docs/PHASE2_PROGRESS.md`](docs/PHASE2_PROGRESS.md)).
@@ -91,6 +92,10 @@ at once. `"providerRetryMode": "persistent"` keeps retrying. Add `--logs` to
 Conversations are saved in `~/.nanoclaw/sessions/`, outside the workspace, so
 the agent's file tools can't edit them. Use `--session NAME` to keep several
 separate conversations (default `cli:direct`).
+
+Replies stream word by word, with the model's reasoning shown as dim `✻` lines
+(as in nanobot; turn lines off with `channels.sendProgress`, `sendToolHints`,
+`showReasoning` in the config). `nanoclaw ask` keeps stdout for the reply only.
 
 In the chat, slash commands: `/new` (start over), `/compact`, `/stop` (cancel
 background subagents), `/status`, `/history [n]`, `/dream`, `/skill`, `/help`.

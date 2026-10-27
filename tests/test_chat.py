@@ -122,8 +122,9 @@ async def test_progress_lines_show_model_text_and_tool_hints(ws, tmp_path):
     chat, _, out = make_chat(ws, tmp_path, script, ["go"])
     await chat.run()
     text = out.getvalue()
-    assert "  ↳ Let me check.\n  ↳ $ echo hi\n  ↳ ls .\n" in text
-    assert "\nnanoclaw\nAll done.\n" in text
+    # The text before the tools streams as part of the answer, the hints are
+    # progress lines under the same name line (nanobot's streaming chat).
+    assert "\nnanoclaw\nLet me check.\n  ↳ $ echo hi\n  ↳ ls .\nAll done.\n" in text
 
 
 async def test_progress_text_is_not_treated_as_markup(ws, tmp_path):
@@ -349,13 +350,15 @@ async def test_background_result_is_printed_while_waiting_for_input(ws, tmp_path
     chat, provider, out = make_chat(
         ws, tmp_path, [call("spawn", {"task": "check weather", "label": "Weather"}), "On it.", "It is sunny."], []
     )
-    original_print = chat.print_async
+    original_output = chat.output_above_prompt
 
-    async def print_async(write):
-        await original_print(write)
+    @contextlib.asynccontextmanager
+    async def output_above_prompt():
+        async with original_output():
+            yield
         printed.set()
 
-    chat.print_async = print_async
+    chat.output_above_prompt = output_above_prompt
 
     async def wait_then_exit():
         await asyncio.wait_for(printed.wait(), 5)
@@ -483,10 +486,14 @@ async def test_new_and_status_with_a_running_subagent(ws, tmp_path):
 async def test_compact_failure_is_reported(ws, tmp_path, monkeypatch):
     chat, _, out = make_chat(ws, tmp_path, [], ["/compact"])
 
-    async def failed(session_key):
+    session = chat.loop.sessions.get_or_create(chat.session_key)
+    session.add_message("user", "hello")
+    chat.loop.sessions.save(session)
+
+    async def failed(*args, **kwargs):
         return None  # archiving produced nothing
 
-    monkeypatch.setattr(chat.loop, "compact_session", failed)
+    monkeypatch.setattr(chat.loop.consolidator, "archive_session", failed)
     await chat.run()
     assert "  ↳ Compressing context…\n  ↳ Unable to compact context.\n" in out.getvalue()
 

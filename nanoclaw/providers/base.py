@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
@@ -20,6 +21,11 @@ from typing import Any
 
 from loguru import logger
 
+# Longest silence allowed between two streamed chunks (nanobot base.py:38-40).
+STREAM_IDLE_TIMEOUT_ENV = "NANOCLAW_STREAM_IDLE_TIMEOUT_S"
+DEFAULT_STREAM_IDLE_TIMEOUT_S = 90.0
+MAX_STREAM_IDLE_TIMEOUT_S = 3600.0
+
 # Added to a server's Retry-After before retrying (nanobot base.py:41).
 RETRY_AFTER_BUFFER = 1
 
@@ -27,9 +33,44 @@ RETRY_AFTER_BUFFER = 1
 # (nanobot ``RetryEventCallback``).
 RetryWaitCallback = Callable[[str], Awaitable[None]]
 
+# Streaming callbacks (nanobot base.py:1085 ``chat_stream`` parameters).
+# A tool-call delta is ``{"index", "call_id", "name", "arguments_delta"}``.
+ContentDeltaCallback = Callable[[str], Awaitable[None]]
+ToolCallDeltaCallback = Callable[[dict[str, Any]], Awaitable[None]]
+StreamRecoverCallback = Callable[[], Awaitable[None]]
+
 # finish_reason values after which tool calls may run. Anything else
 # ("length", "content_filter", "error", ...) means the turn was cut short.
 _TOOL_CAPABLE_FINISH_REASONS = frozenset({"tool_calls", "function_call", "stop"})
+
+
+def resolve_stream_idle_timeout_s(
+    *,
+    env_value: str | None = None,
+    default: float = DEFAULT_STREAM_IDLE_TIMEOUT_S,
+    maximum: float = MAX_STREAM_IDLE_TIMEOUT_S,
+) -> float:
+    """The streaming idle timeout in seconds, from ``NANOCLAW_STREAM_IDLE_TIMEOUT_S``.
+
+    Invalid or non-positive values fall back to the default (90s); values
+    above an hour are clamped. ``env_value`` replaces the environment, for
+    tests. (nanobot base.py:50)
+    """
+    raw = os.environ.get(STREAM_IDLE_TIMEOUT_ENV) if env_value is None else env_value
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        logger.warning("Ignoring invalid {}={!r}; using {}", STREAM_IDLE_TIMEOUT_ENV, raw, default)
+        return default
+    if value <= 0:
+        logger.warning("Ignoring non-positive {}={!r}; using {}", STREAM_IDLE_TIMEOUT_ENV, raw, default)
+        return default
+    if value > maximum:
+        logger.warning("Clamping {}={!r} to {}", STREAM_IDLE_TIMEOUT_ENV, raw, maximum)
+        return maximum
+    return value
 
 
 def parse_tool_arguments(arguments: Any) -> Any:
@@ -85,7 +126,8 @@ class LLMUsage:
     """Token counts reported by, or estimated for, one or more model calls.
 
     Mirrors nanobot llm_usage/types.py (``LLMUsage``) without the streaming
-    timing fields (NanoClaw doesn't stream yet).
+    timing fields (``ttft_ms``/``generation_ms``: NanoClaw has no call
+    observer to report them to).
 
     ``input_tokens`` includes cache reads and writes. ``None`` cache counts
     mean the provider didn't report them; ``0`` means it reported none.
@@ -357,6 +399,11 @@ def sanitize_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
 class LLMProvider(ABC):
     """Base class for model backends."""
 
+    # True when chat_stream itself accepts ``on_stream_recover`` (it restarts
+    # a stalled stream internally). nanobot base.py:1278; no NanoClaw provider
+    # does yet, so the retry loop calls the recover callback instead.
+    supports_stream_recover_callback = False
+
     def __init__(
         self,
         api_key: str | None = None,
@@ -398,6 +445,116 @@ class LLMProvider(ABC):
             return await self.chat(**kwargs)
         except Exception as exc:
             return self._error_response_from_exception(exc)
+
+    # --- streaming (nanobot base.py:1085-1297) -----------------------------------
+
+    async def chat_stream(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        max_tokens: int = 4096,
+        temperature: float = 0.7,
+        tool_choice: str | dict[str, Any] | None = None,
+        on_content_delta: ContentDeltaCallback | None = None,
+        on_thinking_delta: ContentDeltaCallback | None = None,
+        on_tool_call_delta: ToolCallDeltaCallback | None = None,
+    ) -> LLMResponse:
+        """Like :meth:`chat`, calling ``on_content_delta`` with each piece of text.
+
+        Returns the same ``LLMResponse`` as :meth:`chat`. This default makes a
+        normal call (bounded by the stream idle timeout) and delivers the whole
+        content as a single delta; the thinking and tool-call callbacks are not
+        called. Providers that can stream natively override it.
+        (nanobot base.py:1085)
+        """
+        _ = on_thinking_delta, on_tool_call_delta
+        response = await asyncio.wait_for(
+            self.chat(
+                messages=messages,
+                tools=tools,
+                model=model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                tool_choice=tool_choice,
+            ),
+            timeout=resolve_stream_idle_timeout_s(),
+        )
+        if on_content_delta and response.content:
+            await on_content_delta(response.content)
+        return response
+
+    async def safe_chat_stream(self, **kwargs: Any) -> LLMResponse:
+        """:meth:`chat_stream`, turning unexpected exceptions into error responses.
+
+        (nanobot base.py:1147 ``_safe_chat_stream``, without the TTFT timing that
+        only feeds nanobot's call observer.)
+        """
+        try:
+            return await self.chat_stream(**kwargs)
+        except Exception as exc:
+            return self._error_response_from_exception(exc)
+
+    async def chat_stream_with_retry(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        max_tokens: int = 4096,
+        temperature: float = 0.7,
+        tool_choice: str | dict[str, Any] | None = None,
+        on_content_delta: ContentDeltaCallback | None = None,
+        on_thinking_delta: ContentDeltaCallback | None = None,
+        on_tool_call_delta: ToolCallDeltaCallback | None = None,
+        on_stream_recover: StreamRecoverCallback | None = None,
+        retry_mode: str = "standard",
+        on_retry_wait: RetryWaitCallback | None = None,
+    ) -> LLMResponse:
+        """:meth:`chat_stream` under the :meth:`chat_with_retry` policy (nanobot base.py:1230).
+
+        Once text has reached ``on_content_delta`` a failed stream is not
+        retried, since the user has already seen part of an answer. The
+        exception is an idle timeout: ``on_stream_recover`` is awaited (the
+        caller starts a new output segment) and the request is retried; without
+        that callback the retry runs with all delta callbacks switched off.
+        Thinking and tool-call deltas don't block retries.
+        """
+        has_streamed_content = False
+
+        async def _tracking_delta(text: str) -> None:
+            nonlocal has_streamed_content
+            if text:
+                has_streamed_content = True
+            if on_content_delta:
+                await on_content_delta(text)
+
+        async def _recover_stream() -> None:
+            nonlocal has_streamed_content
+            if on_stream_recover:
+                await on_stream_recover()
+            has_streamed_content = False
+
+        kwargs: dict[str, Any] = dict(
+            messages=messages,
+            tools=tools,
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            tool_choice=tool_choice,
+            on_content_delta=_tracking_delta if on_content_delta is not None else None,
+            on_thinking_delta=on_thinking_delta,
+            on_tool_call_delta=on_tool_call_delta,
+        )
+        if on_stream_recover and self.supports_stream_recover_callback:
+            kwargs["on_stream_recover"] = _recover_stream
+        return await self._run_with_retry(
+            kwargs,
+            retry_mode=retry_mode,
+            on_retry_wait=on_retry_wait,
+            call=self.safe_chat_stream,
+            should_retry_guard=lambda: not has_streamed_content,
+            on_stream_recover=_recover_stream if on_stream_recover else None,
+        )
 
     @staticmethod
     def _error_response_from_exception(exc: Exception) -> LLMResponse:
@@ -539,8 +696,18 @@ class LLMProvider(ABC):
         *,
         retry_mode: str,
         on_retry_wait: RetryWaitCallback | None,
+        call: Callable[..., Awaitable[LLMResponse]] | None = None,
+        should_retry_guard: Callable[[], bool] | None = None,
+        on_stream_recover: StreamRecoverCallback | None = None,
     ) -> LLMResponse:
-        """The retry loop (nanobot base.py:1580), without image stripping or status events."""
+        """The retry loop (nanobot base.py:1580), without image stripping or status events.
+
+        ``call`` is :meth:`safe_chat` (the default) or :meth:`safe_chat_stream`
+        (nanobot base.py:1388). For streams, ``should_retry_guard()`` turns
+        False once text was shown, and ``on_stream_recover`` lets a retry after
+        an idle timeout start a new output segment.
+        """
+        call = call or self.safe_chat
         delays = self._CHAT_RETRY_DELAYS
         persistent = retry_mode == "persistent"
         attempt = 0
@@ -548,9 +715,29 @@ class LLMProvider(ABC):
         identical_error_count = 0
         while True:
             attempt += 1
-            response = await self.safe_chat(**kwargs)
+            response = await call(**kwargs)
             if response.finish_reason != "error":
                 return response
+
+            # Text already shown can't be taken back, so only a stalled stream
+            # is retried (nanobot base.py:1621-1645).
+            if should_retry_guard is not None and not should_retry_guard():
+                if (response.error_kind or "").lower() != "timeout":
+                    logger.warning("LLM stream failed after content was emitted; skipping retry")
+                    return response
+                if on_stream_recover:
+                    logger.warning(
+                        "LLM stream stalled after content was emitted; starting a new stream segment and retrying"
+                    )
+                    await on_stream_recover()
+                else:
+                    logger.warning(
+                        "LLM stream stalled after content was emitted; suppressing delta callbacks and retrying"
+                    )
+                    kwargs["on_content_delta"] = None
+                    kwargs["on_thinking_delta"] = None
+                    kwargs["on_tool_call_delta"] = None
+                    should_retry_guard = None
 
             error_key = (response.content or "").strip().lower() or None
             if error_key and error_key == last_error_key:

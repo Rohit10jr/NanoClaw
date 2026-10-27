@@ -5,6 +5,9 @@ nanobot/cli/agent.py:266-443) and the slash commands it shares with the other
 channels (nanobot/command/builtin.py, command/router.py). One difference in
 shape: nanobot's chat talks to the agent over its message bus; NanoClaw calls
 the loop directly and watches the subagent result queue (layer 8).
+
+Since layer 13 replies stream: each turn gets a new StreamRenderer and a
+:class:`TurnOutput` that draws the turn's events (nanobot cli/agent.py:310-443).
 """
 
 from __future__ import annotations
@@ -13,28 +16,38 @@ import asyncio
 import re
 import sys
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from rich.console import Console
 
 from nanoclaw import __version__
 from nanoclaw.agent.loop import DREAM_NO_INPUT_MESSAGE, LAST_USAGE_KEY, AgentLoop, ContextWindowExceededError
+from nanoclaw.agent.runner import AgentRunResult
+from nanoclaw.cli.stream import StreamRenderer
 from nanoclaw.cli.terminal import (
     BOT_NAME,
     ThinkingSpinner,
+    TurnOutput,
     is_exit_command,
     print_agent_response,
     print_progress_line,
+    progress_event_text,
     restore_terminal,
     sanitize_surrogates,
 )
+from nanoclaw.events import AgentEvent, EventSink
+
+if TYPE_CHECKING:
+    from nanoclaw.config import ChannelsConfig
 
 CHANNEL = "cli"
 ReadInput = Callable[[], Awaitable[str]]
-# Runs a printing function so its output lands above a waiting prompt.
-PrintAsync = Callable[[Callable[[], None]], Awaitable[None]]
+# Wraps output written while the prompt may be waiting (a background
+# subagent's follow-up turn), so it lands above the prompt.
+OutputAbovePrompt = Callable[[], AbstractAsyncContextManager[None]]
 
 _HISTORY_DEFAULT_COUNT = 10
 _HISTORY_MAX_COUNT = 50
@@ -179,8 +192,9 @@ def build_status_content(
     )
 
 
-async def _print_directly(write: Callable[[], None]) -> None:
-    write()
+@asynccontextmanager
+async def _output_directly() -> AsyncIterator[None]:
+    yield
 
 
 class Chat:
@@ -194,26 +208,56 @@ class Chat:
         console: Console,
         read_input: ReadInput,
         render_markdown: bool = True,
-        print_async: PrintAsync = _print_directly,
+        output_above_prompt: OutputAbovePrompt = _output_directly,
+        channels: ChannelsConfig | None = None,
     ) -> None:
         self.loop = loop
         self.session_key = session_key
         self.console = console
         self.read_input = read_input
         self.render_markdown = render_markdown
-        self.print_async = print_async
+        self.output_above_prompt = output_above_prompt
+        # sendProgress / sendToolHints / showReasoning (nanobot ``channels_config``).
+        self.channels = channels
         self._turn_lock = asyncio.Lock()
+        self._renderer: StreamRenderer | None = None
 
     # -- output -----------------------------------------------------------
 
-    def _reply(self, text: str, *, as_text: bool = False) -> None:
-        print_agent_response(self.console, text, render_markdown=self.render_markdown, render_as_text=as_text)
+    def _reply(self, text: str, *, as_text: bool = False, show_header: bool = True) -> None:
+        print_agent_response(
+            self.console, text, render_markdown=self.render_markdown, render_as_text=as_text, show_header=show_header
+        )
 
-    def _progress(self, spinner: ThinkingSpinner | None = None) -> Callable[..., Awaitable[None]]:
-        async def on_progress(content: str, *, tool_hint: bool = False, **_: Any) -> None:
-            print_progress_line(self.console, content, spinner)
+    def _new_turn_output(self) -> TurnOutput:
+        """A fresh renderer for each turn (nanobot cli/agent.py:391)."""
+        self._renderer = StreamRenderer(render_markdown=self.render_markdown, bot_name=BOT_NAME, console=self.console)
+        return TurnOutput(self._renderer, self.channels)
 
-        return on_progress
+    async def _streamed_turn(self, run: Callable[[EventSink], Awaitable[AgentRunResult]]) -> None:
+        """Run a turn with streaming output, then print the reply unless it streamed.
+
+        nanobot cli/agent.py:405-428: when the answer was not streamed (or is
+        an error) the renderer is closed and the whole reply printed, without
+        the name line if the renderer already printed it.
+        """
+        output = self._new_turn_output()
+        renderer = output.renderer
+        try:
+            result = await run(output.events)
+        except ContextWindowExceededError as exc:
+            await renderer.close()
+            self._reply(f"Error: {exc}", as_text=True, show_header=not renderer.header_printed)
+            return
+        except BaseException:
+            await renderer.close()
+            raise
+        reply = result.final_content or ""
+        if reply and not output.answer_on_screen(result.stop_reason):
+            await renderer.close()
+            self._reply(reply, show_header=not renderer.header_printed)
+        elif not renderer.streamed:
+            await renderer.close()
 
     def banner(self) -> None:
         """nanobot agent.py:271 (with the model name)."""
@@ -231,6 +275,9 @@ class Chat:
         try:
             while True:
                 try:
+                    # Stop the spinner before the prompt (nanobot cli/agent.py:363).
+                    if self._renderer:
+                        self._renderer.stop_for_input()
                     user_input = sanitize_surrogates(await self.read_input())
                 except (KeyboardInterrupt, EOFError):
                     restore_terminal()
@@ -255,43 +302,25 @@ class Chat:
             await self.loop.close()
 
     async def turn(self, content: str) -> None:
-        """One user message: spinner and progress lines while it works, then the reply."""
+        """One user message: the reply streams in, with progress lines while it works."""
         async with self._turn_lock:
-            spinner = ThinkingSpinner(self.console)
-            try:
-                with spinner:
-                    result = await self.loop.process_direct(
-                        content, session_key=self.session_key, channel=CHANNEL, on_progress=self._progress(spinner)
-                    )
-            except ContextWindowExceededError as exc:
-                self._reply(f"Error: {exc}", as_text=True)
-                return
-            self._reply(result.final_content or "")
+            await self._streamed_turn(
+                lambda events: self.loop.process_direct(
+                    content, session_key=self.session_key, channel=CHANNEL, events=events, streaming=True
+                )
+            )
 
     async def _deliver_subagent_results(self) -> None:
-        """Background subagent results become follow-up turns, printed when they
-        finish, above the prompt if it's waiting (nanobot agent.py:296-350)."""
+        """Background subagent results become follow-up turns that stream like
+        user turns, above the prompt if it's waiting (nanobot agent.py:296-350)."""
         while True:
             report = await self.loop.subagents.results.get()
-            async with self._turn_lock:
-                lines: list[str] = []
-
-                async def collect(content: str, *, tool_hint: bool = False, **_: Any) -> None:
-                    lines.append(content)
-
-                try:
-                    result = await self.loop.process_subagent_result(report, on_progress=collect)
-                    reply, as_text = result.final_content or "", False
-                except ContextWindowExceededError as exc:
-                    reply, as_text = f"Error: {exc}", True
-
-                def write() -> None:
-                    for line in lines:
-                        print_progress_line(self.console, line)
-                    if reply.strip():
-                        self._reply(reply, as_text=as_text)
-
-                await self.print_async(write)
+            async with self._turn_lock, self.output_above_prompt():
+                await self._streamed_turn(
+                    lambda events: self.loop.process_subagent_result(report, events=events, streaming=True)
+                )
+                if self._renderer:
+                    self._renderer.stop_for_input()
 
     # -- slash commands ---------------------------------------------------
 
@@ -324,12 +353,15 @@ class Chat:
         self._reply("New session started.")
 
     async def cmd_compact(self) -> None:
-        """Summarize now. nanobot reports this as progress lines (compaction events)."""
-        summary = await self.loop.compact_session(self.session_key)
-        if summary == "":
-            return  # nothing to compact: nanobot emits no event either
-        print_progress_line(self.console, "Compressing context…")
-        print_progress_line(self.console, "Context compacted." if summary else "Unable to compact context.")
+        """Summarize now; the compaction events are printed as progress lines
+        (nanobot command/builtin.py:358, terminal.py:372). Nothing to compact
+        prints nothing."""
+
+        async def show(event: AgentEvent) -> None:
+            if (text := progress_event_text(event)) is not None:
+                print_progress_line(self.console, text)
+
+        await self.loop.compact_session(self.session_key, events=EventSink(show))
 
     async def cmd_stop(self) -> None:
         """Cancel this chat's background subagents (nanobot ``cmd_stop``)."""

@@ -16,6 +16,7 @@ Dream (``AgentLoop.run_dream``) later reads new journal entries and edits
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import uuid
@@ -23,13 +24,14 @@ from collections.abc import Callable, Iterator
 from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from loguru import logger
 
 from nanoclaw.agent.messages import build_assistant_message, strip_think, truncate_text
 from nanoclaw.agent.tools import Tool, ToolRegistry, ToolResult
 from nanoclaw.agent.tools.filesystem import EditFileTool, ReadFileTool, WriteFileTool
+from nanoclaw.events import NO_EVENTS, CompactionReason, ContextCompactionEvent, EventSink
 from nanoclaw.runtime_context import public_history_message
 from nanoclaw.session.manager import Session, SessionManager
 from nanoclaw.session.summary import is_summary_checkpoint, session_summary_from_metadata
@@ -834,12 +836,22 @@ class Consolidator:
             session, archive_end=archive_end, runtime=runtime, input_token_budget=self._input_token_budget(runtime)
         )
 
-    async def compact_idle_session(self, session_key: str, *, runtime: LLMRuntime) -> str | None:
+    async def compact_idle_session(
+        self,
+        session_key: str,
+        *,
+        runtime: LLMRuntime,
+        events: EventSink = NO_EVENTS,
+        notify: bool = False,
+        reason: CompactionReason | None = None,
+    ) -> str | None:
         """Replace the session's unarchived messages with a summary checkpoint.
 
         Returns the summary, ``""`` if there was nothing to compact, or ``None``
         if archiving produced nothing. (nanobot uses this for ``/compact`` and
-        idle sessions.)
+        idle sessions.) Publishes :class:`ContextCompactionEvent` started, then
+        succeeded / failed / cancelled, when there is something to compact
+        (nanobot memory.py:1246-1282).
         """
         self.sessions.invalidate(session_key)
         session = self.sessions.get_or_create(session_key)
@@ -847,13 +859,26 @@ class Consolidator:
         to_archive = list(session.messages[start:])
         if not any(not m.get("_command") and not is_summary_checkpoint(m) for m in to_archive):
             return ""
+        compaction_id = uuid.uuid4().hex
+
+        async def emit(phase: Literal["started", "succeeded", "failed", "cancelled"]) -> None:
+            await events.emit(ContextCompactionEvent(compaction_id, phase, notify=notify, reason=reason))
+
+        await emit("started")
         last_active = session.updated_at
         end = start + len(to_archive)
-        summary = await self.archive_session(session, archive_end=end, runtime=runtime)
+        try:
+            summary = await self.archive_session(session, archive_end=end, runtime=runtime)
+            if summary:
+                session.commit_summary_checkpoint(summary, insert_at=end, last_active=last_active)
+                self.sessions.save(session)
+        except (Exception, asyncio.CancelledError) as exc:
+            await emit("cancelled" if isinstance(exc, asyncio.CancelledError) else "failed")
+            raise
         if not summary:
+            await emit("failed")
             return None
-        session.commit_summary_checkpoint(summary, insert_at=end, last_active=last_active)
-        self.sessions.save(session)
+        await emit("succeeded")
         logger.info(
             "Idle-session compact for {}: archived={}, visible={}, retained={}, summary={}",
             session_key,
