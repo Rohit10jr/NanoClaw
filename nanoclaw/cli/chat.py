@@ -10,11 +10,11 @@ the loop directly and watches the subagent result queue (layer 8).
 from __future__ import annotations
 
 import asyncio
+import re
 import sys
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from difflib import get_close_matches
 from typing import Any
 
 from rich.console import Console
@@ -74,19 +74,48 @@ def build_help_text() -> str:
     return "\n".join(lines)
 
 
-def invalid_command_text(raw: str) -> str:
-    """What an unknown or malformed slash command gets (nanobot router.py:130)."""
-    entered = raw.split(maxsplit=1)[0]
+_BOT_SUFFIX_RE = re.compile(r"^[A-Za-z0-9_]+$")
+
+
+def normalize_command_text(text: str) -> str:
+    """Strip a transport ``@bot`` suffix from the command word (nanobot router.py:26-42).
+
+    ``/cmd@bot args`` becomes ``/cmd args``; arguments stay verbatim.
+    """
+    stripped = text.strip()
+    if not stripped.startswith("/"):
+        return stripped
+    first, sep, rest = stripped.partition(" ")
+    if "@" not in first:
+        return stripped
+    command, suffix = first.rsplit("@", 1)
+    if command and suffix and _BOT_SUFFIX_RE.fullmatch(suffix):
+        return f"{command}{sep}{rest}" if sep else command
+    return stripped
+
+
+def command_name(text: str) -> str | None:
+    """The registered command *text* starts with, or None for ordinary chat
+    text (nanobot ``CommandRouter.command_name``, router.py:98-105).
+
+    A leading slash alone is not a command: absolute paths such as
+    ``/tmp/foo.py explain`` and unknown names go to the model.
+    """
+    parts = normalize_command_text(text).split(maxsplit=1)
     commands = {spec.command.lower(): spec.command for spec in COMMANDS}
-    canonical = commands.get(entered.lower())
-    if canonical is not None:
-        if any(spec.accepts_args and spec.command == canonical for spec in COMMANDS):
-            return f'Invalid command "{entered}". Use "/help" to list available commands.'
-        return f'Command "{canonical}" does not accept arguments. Did you mean "{canonical}"?'
-    matches = get_close_matches(entered.lower(), commands, n=1, cutoff=0.6)
-    if matches:
-        return f'Unknown command "{entered}". Did you mean "{commands[matches[0]]}"?'
-    return f'Unknown command "{entered}". Use "/help" to list available commands.'
+    return commands.get(parts[0].lower()) if parts else None
+
+
+def invalid_command_text(raw: str) -> str | None:
+    """What a registered command used with wrong arguments gets, or None when
+    *raw* isn't a registered command (nanobot router.py:149-168)."""
+    canonical = command_name(raw)
+    if canonical is None:
+        return None
+    entered = normalize_command_text(raw).split(maxsplit=1)[0]
+    if any(spec.accepts_args and spec.command == canonical for spec in COMMANDS):
+        return f'Invalid command "{entered}". Use "/help" to list available commands.'
+    return f'Command "{canonical}" does not accept arguments. Did you mean "{canonical}"?'
 
 
 def _format_history_message(msg: dict[str, Any]) -> str | None:
@@ -210,7 +239,9 @@ class Chat:
                     restore_terminal()
                     self.console.print("\nGoodbye!")
                     break
-                if command.startswith("/"):
+                # Only registered command names are commands; other slash text
+                # (paths, unknown names) is chat (nanobot router.py:107-122).
+                if command_name(command) is not None:
                     await self.handle_command(command)
                     continue
                 await self.turn(user_input)
@@ -261,8 +292,9 @@ class Chat:
     # -- slash commands ---------------------------------------------------
 
     async def handle_command(self, raw: str) -> None:
-        """Route a slash command (nanobot ``CommandRouter.dispatch``)."""
-        cmd = raw.strip()
+        """Route a registered slash command (nanobot ``CommandRouter.dispatch``,
+        router.py:132-147)."""
+        cmd = normalize_command_text(raw)
         lower = cmd.lower()
         exact: dict[str, Callable[[], Awaitable[None]]] = {
             "/new": self.cmd_new,
@@ -278,8 +310,8 @@ class Chat:
             await handler()
         elif lower.startswith("/history "):
             await self.cmd_history(cmd[len("/history "):])
-        else:
-            self._reply(invalid_command_text(cmd), as_text=True)
+        elif (text := invalid_command_text(cmd)) is not None:
+            self._reply(text, as_text=True)
 
     async def cmd_new(self) -> None:
         """Stop this chat's work, archive and clear the conversation (nanobot ``cmd_new``)."""
