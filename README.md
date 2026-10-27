@@ -27,6 +27,7 @@ recovery, governance) for later.
 | 9 | Safety (workspace limits, shell guards) | done |
 | 10 | Terminal chat (CLI) | done |
 | 11 | Catch up with upstream nanobot (`c4dac64`) | done |
+| 12 | Foundations: config file, logging, retries, token usage | done |
 
 Phase 1 (the core agent) is complete. Phase 2 builds the production backend
 (layers 11–25; progress in [`docs/PHASE2_PROGRESS.md`](docs/PHASE2_PROGRESS.md)).
@@ -63,6 +64,29 @@ uv run nanoclaw ask "What's my name?"     # the conversation continues
 uv run nanoclaw ask --new "hello"         # forget it and start over
 uv run nanoclaw prompt        # show the system prompt (no key needed)
 ```
+
+Or put the settings in a config file, `~/.nanoclaw/config.json`, with
+nanobot's field names (a nanobot `config.json` loads too; sections NanoClaw
+doesn't use are ignored). Environment variables override the file, and flags
+override both:
+
+```bash
+uv run nanoclaw config init      # write a default config.json (or add missing settings)
+uv run nanoclaw config show      # the settings a run would use, API keys masked
+uv run nanoclaw config path      # where the file is (-c FILE or NANOCLAW_CONFIG to use another)
+```
+
+```json
+{
+  "agents": { "defaults": { "model": "openai/gpt-4o-mini", "maxToolIterations": 200 } },
+  "providers": { "openrouter": { "apiKey": "${OPENROUTER_API_KEY}" } }
+}
+```
+
+Failed model requests are retried (rate limits, timeouts, server errors; 1, 2,
+4 seconds or the server's Retry-After); quota and authentication errors stop
+at once. `"providerRetryMode": "persistent"` keeps retrying. Add `--logs` to
+`chat`, `ask`, `compact` or `dream` to see what the agent does internally.
 
 Conversations are saved in `~/.nanoclaw/sessions/`, outside the workspace, so
 the agent's file tools can't edit them. Use `--session NAME` to keep several

@@ -265,4 +265,4 @@ replaces it.
 | Logging | `loguru` throughout | Warnings for degraded archives, corrupt files, ... (NanoClaw has no logging yet) |
 | Separate project folder | `agent/context.py` (`workspace` vs project), `security/workspace_access.py` | Keep `SOUL.md`/`USER.md`/memory/skills in the agent's home while tools and `AGENTS.md` use a chosen project folder; would add a `--project` CLI option; subagents would then run in the project folder (`workspace_scope`; deferred from layer 8) |
 | Long-running shell sessions | `agent/tools/exec_session.py`, `ExecSessionManager` | Background shell commands the agent checks on later, shared with subagents (deferred from layers 3 and 8) |
-| Iteration limit | `config/schema.py` `max_tool_iterations` (200) | NanoClaw uses 20 for the main agent and subagents; to be revisited (layer 8 decision) |
+| Iteration limit | `config/schema.py` `max_tool_iterations` (200) | NanoClaw used 20 for the main agent and subagents (layer 8 decision); 200 by default since layer 12, settable with `maxToolIterations` |
