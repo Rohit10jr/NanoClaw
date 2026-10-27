@@ -13,6 +13,7 @@ from nanoclaw.cli.log_control import configure_console_logging, set_nanoclaw_log
 from nanoclaw.agent.context import ContextBuilder
 from nanoclaw.agent.loop import AgentLoop, ContextWindowExceededError
 from nanoclaw.agent.runner import AgentRunResult
+from nanoclaw.agent.tools.mcp import MCPProvider
 from nanoclaw.bus.outbound_events import ProgressEvent, StreamDeltaEvent, StreamEndEvent
 from nanoclaw.config import (
     ChannelsConfig,
@@ -84,6 +85,15 @@ def _make_loop(
         provider_retry_mode=defaults.provider_retry_mode,
         exec_config=config.tools.exec,
     )
+
+
+def _mcp_provider(loop: AgentLoop, config: Config | None = None) -> MCPProvider:
+    """The configured MCP servers (``tools.mcpServers``), registering their
+    tools into the loop's registry. As in nanobot (cli/agent.py), the caller
+    connects before the first turn and closes it after the loop. Subagents
+    build their own registries and get no MCP tools, as in nanobot."""
+    config = config or _runtime_config()
+    return MCPProvider(config.tools.mcp_servers, loop.tools)
 
 
 class _AskOutput:
@@ -184,9 +194,11 @@ async def _ask(
     config: Config | None = None,
 ) -> int:
     loop = _make_loop(provider, workspace, restrict=restrict, config=config)
+    mcp = _mcp_provider(loop, config)
     if new:
         await loop.new_session(session_key)
     try:
+        await mcp.connect()
         output = _ask_output(config)
         try:
             result = await loop.process_direct(
@@ -199,7 +211,10 @@ async def _ask(
         # Subagents started before an error still report.
         return max(status, await _deliver_subagent_results(loop, config))
     finally:
-        await loop.close()
+        try:
+            await loop.close()
+        finally:
+            await mcp.aclose()
 
 
 async def _deliver_subagent_results(loop: AgentLoop, config: Config | None = None) -> int:
@@ -270,7 +285,12 @@ async def _chat(
     )
     if prompt is not None:
         prompt.bottom_toolbar = chat.status_toolbar
-    await chat.run()
+    mcp = _mcp_provider(loop, config)
+    try:
+        await mcp.connect()
+        await chat.run()  # closes the loop when it ends
+    finally:
+        await mcp.aclose()
     return 0
 
 

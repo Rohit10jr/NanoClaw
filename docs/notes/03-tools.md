@@ -262,6 +262,7 @@ blocked and the slip-through cases are tested in `tests/test_shell_tool.py`.
 | Jina Reader, image fetching, proxies | `web.py` | Better extraction for JS-heavy pages |
 | Other search providers (Brave, Tavily, ...) | `web.py` | ~10 providers with API keys |
 | Tool auto-discovery and plugins | `tools/loader.py`, entry points | Third-party tools without code changes |
+| MCP servers | `agent/tools/mcp.py`, `mcp_oauth.py` | Tools from external MCP servers (**done in task 17.4**: stdio, streamable HTTP and SSE, tools only, `enabledTools`, `toolTimeout`, SSRF checks with DNS pinning, reconnect on "session terminated"; left out: resource and prompt wrappers, OAuth, the shared proxy (`useProxy` ignored), hot reload, runtime status, image artifacts (an image becomes a short note), plugin servers. Subagents get no MCP tools, as in nanobot) |
 
 ## Tests
 

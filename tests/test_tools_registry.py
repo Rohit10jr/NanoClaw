@@ -36,6 +36,38 @@ def test_definitions_are_sorted_by_name(registry):
     assert names == ["add", "boom", "echo", "fail"]
 
 
+def test_get_definitions_orders_builtins_then_mcp_tools(registry):
+    """Built-ins first, then mcp_* tools, each sorted (nanobot registry.py:97,
+    test_tool_registry.py), so connecting an MCP server leaves the built-in
+    prefix of the tool list unchanged for prompt caching."""
+    builtin_prefix = registry.get_definitions()
+    for name in ("mcp_git_status", "mcp_fs_list"):
+        registry.register(_Named(name))
+    registry.register(_Named("zz_builtin"))
+    names = [d["function"]["name"] for d in registry.get_definitions()]
+    assert names == ["add", "boom", "echo", "fail", "zz_builtin", "mcp_fs_list", "mcp_git_status"]
+    assert registry.get_definitions()[: len(builtin_prefix)] == builtin_prefix
+
+
+def test_get_definitions_is_cached_until_the_tool_set_changes(registry):
+    first = registry.get_definitions()
+    assert registry.get_definitions() is first
+    registry.register(_Named("mcp_x_y"))
+    second = registry.get_definitions()
+    assert second is not first and second[-1]["function"]["name"] == "mcp_x_y"
+    registry.unregister("mcp_x_y")
+    assert [d["function"]["name"] for d in registry.get_definitions()] == ["add", "boom", "echo", "fail"]
+
+
+class _Named(EchoTool):
+    def __init__(self, name: str) -> None:
+        self._n = name
+
+    @property
+    def name(self) -> str:
+        return self._n
+
+
 def test_register_unregister_and_lookup(registry):
     assert "echo" in registry and registry.has("echo") and len(registry) == 4
     registry.unregister("echo")

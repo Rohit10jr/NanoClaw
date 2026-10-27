@@ -30,12 +30,15 @@ class ToolRegistry:
 
     def __init__(self) -> None:
         self._tools: dict[str, Tool] = {}
+        self._cached_definitions: list[dict[str, Any]] | None = None
 
     def register(self, tool: Tool) -> None:
         self._tools[tool.name] = tool
+        self._cached_definitions = None
 
     def unregister(self, name: str) -> None:
         self._tools.pop(name, None)
+        self._cached_definitions = None
 
     def get(self, name: str) -> Tool | None:
         return self._tools.get(name)
@@ -54,8 +57,21 @@ class ToolRegistry:
         return name in self._tools
 
     def get_definitions(self) -> list[dict[str, Any]]:
-        """Tool definitions sorted by name, so the request is stable across turns."""
-        return [self._tools[name].to_schema() for name in sorted(self._tools)]
+        """Tool definitions in a stable order (nanobot registry.py:97).
+
+        Built-in tools come first, sorted by name, then MCP tools
+        (``mcp_*``), sorted by name. The built-ins stay a fixed prefix when
+        an MCP server connects or drops, so a provider's prompt cache over
+        the tool list keeps its hit up to that point. Cached until the next
+        ``register``/``unregister``.
+        """
+        if self._cached_definitions is None:
+            builtins: list[dict[str, Any]] = []
+            mcp_tools: list[dict[str, Any]] = []
+            for name in sorted(self._tools):
+                (mcp_tools if name.startswith("mcp_") else builtins).append(self._tools[name].to_schema())
+            self._cached_definitions = builtins + mcp_tools
+        return self._cached_definitions
 
     @staticmethod
     def _lookup_key(name: str) -> str:

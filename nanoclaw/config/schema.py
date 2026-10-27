@@ -211,11 +211,35 @@ class ExecToolConfig(Base):
         self.max_runtime = value
 
 
+class MCPServerConfig(Base):
+    """MCP server connection configuration (stdio or HTTP). nanobot schema.py:414.
+
+    ``auth: "oauth"`` and ``useProxy`` are accepted so nanobot configs load,
+    but NanoClaw skips OAuth servers and ignores ``useProxy`` (environment
+    proxies still apply); see agent/tools/mcp.py.
+    """
+
+    type: Literal["stdio", "sse", "streamableHttp"] | None = None  # auto-detected if omitted
+    auth: Literal["oauth"] | None = None  # Remote MCP OAuth (not supported by NanoClaw)
+    command: str = ""  # Stdio: command to run (e.g. "npx")
+    args: list[str] = Field(default_factory=list)  # Stdio: command arguments
+    env: dict[str, str] = Field(default_factory=dict)  # Stdio: extra env vars
+    cwd: str = ""  # Stdio: working directory for MCP server runtime artifacts
+    url: str = ""  # HTTP/SSE: endpoint URL
+    headers: dict[str, str] = Field(default_factory=dict)  # HTTP/SSE: custom headers
+    use_proxy: bool = False  # nanobot's shared proxy; ignored by NanoClaw
+    tool_timeout: int = 30  # seconds before a tool call is cancelled
+    # Only register these tools; accepts raw MCP names or wrapped
+    # mcp_<server>_<tool> names; ["*"] = all, [] = none.
+    enabled_tools: list[str] = Field(default_factory=lambda: ["*"])
+
+
 class ToolsConfig(Base):
     """Tool settings (nanobot schema.py:430 ``ToolsConfig``, a subset)."""
 
     exec: ExecToolConfig = Field(default_factory=ExecToolConfig)  # schema.py:434
     restrict_to_workspace: bool = False  # schema.py:442
+    mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)  # schema.py:459
     ssrf_whitelist: list[str] = Field(default_factory=list)  # schema.py:460, CIDR ranges
 
 

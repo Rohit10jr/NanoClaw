@@ -309,15 +309,38 @@ def mask_secrets(data: object) -> object:
     """Hide API keys in JSON data for display (``nanoclaw config show``).
 
     Keeps the last four characters of long keys, so two keys can be told apart.
+    MCP servers' ``headers`` and ``env`` values (bearer tokens, API keys) are
+    masked too. (nanobot has no ``config show``; its Web UI hides provider
+    secrets the same way.)
     """
     if isinstance(data, dict):
         return {
-            key: _mask(value) if key.replace("_", "").lower() in _SECRET_KEYS else mask_secrets(value)
+            key: _mask(value)
+            if key.replace("_", "").lower() in _SECRET_KEYS
+            else _mask_mcp_servers(value)
+            if key.replace("_", "").lower() == "mcpservers"
+            else mask_secrets(value)
             for key, value in cast(dict[str, object], data).items()
         }
     if isinstance(data, list):
         return [mask_secrets(value) for value in cast(list[object], data)]
     return data
+
+
+def _mask_mcp_servers(servers: object) -> object:
+    if not isinstance(servers, dict):
+        return mask_secrets(servers)
+    masked: dict[str, object] = {}
+    for name, server in cast(dict[str, object], servers).items():
+        if isinstance(server, dict):
+            server = {
+                key: {k: _mask(v) for k, v in cast(dict[str, object], value).items()}
+                if key in ("headers", "env") and isinstance(value, dict)
+                else value
+                for key, value in cast(dict[str, object], server).items()
+            }
+        masked[name] = mask_secrets(server)
+    return masked
 
 
 def _mask(value: object) -> object:
