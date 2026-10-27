@@ -168,12 +168,75 @@ command aborts the turn (`UPSTREAM_BUGS.md`, bug 6; fixed in NanoClaw).
 *Deferred (see phase 2):* native full-screen app, streaming, reasoning display,
 the other 9 commands, cancelling a running turn.
 
-**Phase 1 is complete.** Next: the phase 2 review below.
+**Phase 1 is complete.**
 
-## Phase 2 — review production features
+## Phase 2 — the production backend (final plan)
 
-After phase 1 works end to end, we look at each of these, decide whether
-NanoClaw needs it, and build only the ones we pick.
+Planned on 2026-10-27 after researching nanobot's latest `main`
+(`c4dac64`, 482 commits after the phase 1 reference). The frontend (nanobot's
+web UI and TUI) is left for later; the backend is built so nanobot's web UI can
+be used unchanged on top of it. Progress: [`PHASE2_PROGRESS.md`](PHASE2_PROGRESS.md).
+
+- **nanobot reference for phase 2: `c4dac64` (2026-10-27).** Phase 1 notes
+  keep their `d3d70f2` links; layer 11 brings phase 1 code up to `c4dac64`.
+- Each layer: plan with nanobot references → build (independent tasks by
+  sub-agents in parallel, each one reviewed against nanobot) → tests →
+  side-by-side comparison → mutation checks → docs → **one PR per layer**.
+
+| # | Layer | What it adds | Main nanobot references (`c4dac64`) | Est. lines | Status |
+|---|---|---|---|---|---|
+| 11 | Catch up with upstream | Phase 1 code updated to `c4dac64`: system prompt, iteration-limit notice, subagent report, edit/write fixes, shell guard, DNS pinning, argument checks, error hint, slash text, OpenAI reasoning models; Windows test fixes | `agent/context.py`, `agent/tools/filesystem.py`, `shell.py`, `schema.py`, `security/network.py`, `command/`, `providers/openai_compat_provider.py` | ~400 | ⏳ |
+| 12 | Foundations | Config file, logging, provider retries, richer usage, iteration limit setting | `config/`, `providers/base.py` (`chat_with_retry`), `llm_usage/` | ~600 | |
+| 13 | Hooks, events, streaming | Hook system, typed events, streamed replies and reasoning | `agent/hook.py`, `turn_hooks.py`, `progress_hook.py`, `bus/outbound_events.py`, `chat_stream` | ~900 | |
+| 14 | Bus and session workers | Message bus, `AgentLoop.run()`, `TurnDelivery`, command router, `/stop`, mid-turn injections | `bus/`, `agent/loop.py`, `agent/turn_delivery.py`, `command/` | ~1,000 | |
+| 15 | Robustness | Checkpoints and crash recovery; compaction between tool calls (also subagents) | `session/recovery.py`, `agent/context_governance.py` | ~600 | |
+| 16 | Shell | Exec sessions; Windows PowerShell | `agent/tools/exec_session.py`, `shell.py`, `_windows_job.py` | ~600 | |
+| 17 | More tools | `apply_patch`, `rg`, file-state dedupe, MCP | `apply_patch.py`, `rg.py`, `file_state.py`, `mcp.py` | ~900 | |
+| 18 | Isolation | bubblewrap sandbox, separate project folder | `sandbox.py`, `security/workspace_access.py` | ~350 | |
+| 19 | Subagents v2 | `spawn` → `subagent` tool, child sessions | `agent/subagent*.py`, `agent/tools/subagent.py` | ~400 | |
+| 20 | Providers | Registry, presets, fallback, Anthropic, `/model` | `providers/registry.py`, `agent/model_presets.py`, `fallback_provider.py`, `anthropic_provider.py` | ~1,100 | |
+| 21 | Gateway and schedules | `nanoclaw gateway`, cron, heartbeat, scheduled Dream, idle compaction, memory git history, prompt overrides | `cli/gateway_runtime.py`, `cron/`, `agent/autocompact.py`, `utils/gitstore.py` | ~1,300 | |
+| 22 | Session storage | JSONL + per-chat event log for the web UI history | `session/` | ~300 | |
+| 23 | Web UI backend | WebSocket channel and minimal web UI backend (`webui.core.v1`) | `channels/websocket/`, `webui/` | ~1,200 | |
+| 24 | Telegram | First chat app | `channels/telegram/` | ~500 | |
+| 25 | Skills and plugins | Disabled skills, skill cache, plugins, `cron` skill | `agent/plugins.py`, `skills/` | ~350 | |
+
+**Skipped:** OpenAI Responses API and provider conversation state; Bedrock,
+Azure and subscription logins; per-provider quirks; transcription and image
+generation; the update/install/release system; optional pip extras; CLI Apps;
+MCP OAuth and the `message`/`long_task`/`sessions` tools; the other chat apps;
+the web UI settings backend; OS service install; the onboarding wizard.
+
+### Phase 2 decisions
+
+Adopted from the plan's recommendations (2026-10-27); any can be revisited.
+
+| # | Decision | Choice |
+|---|---|---|
+| 1 | Reference commit | `c4dac64`; layer 11 updates phase 1 code |
+| 2 | Session storage | JSONL plus a per-chat event log; SQLite only if the web UI needs it |
+| 3 | Subagent tool | Switch `spawn` → `subagent` (layer 19) |
+| 4 | `exec` | Follow upstream: background sessions, 1 s wait, 1-hour limit (layer 16) |
+| 5 | Config file | JSON, nanobot-compatible camelCase names, pydantic |
+| 6 | Logging | loguru |
+| 7 | Iteration limit | 200 by default, settable |
+| 8 | Streaming | On by default |
+| 9 | Providers | Retries, presets, fallback; Anthropic adapter; tokens only (no cost) |
+| 10 | Windows | PowerShell support with `taskkill` |
+| 11 | Sandbox | bubblewrap only |
+| 12 | MCP | stdio + streamable HTTP, tools only |
+| 13 | Web stack | aiohttp; loopback by default, optional secret for remote access |
+| 14 | Memory history | dulwich |
+| 15 | Unavailable skills | Hidden like nanobot; `nanoclaw skills` still lists them |
+| 16 | Chat app | Telegram first (live test needs a bot token) |
+| 17 | Bug 4 `fixed` mode | Kept, moved into the new compaction (layer 15) |
+| 18 | Workflow | Layer by layer, sub-agents in parallel within a layer, one PR per layer |
+| 19 | Real-model tests | Need API keys as environment secrets; until then FakeProvider only |
+
+## Phase 2 — original review list
+
+The list made at the end of phase 1, kept for reference; the plan above
+replaces it.
 
 | Feature | nanobot reference | Why it exists |
 |---|---|---|
