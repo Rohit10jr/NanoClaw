@@ -1,7 +1,9 @@
 """Context governance: the model-facing request, and compaction before every
 model request (nanobot agent/context_governance.py, c4dac64)."""
 
+import asyncio
 import copy
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -13,8 +15,10 @@ from nanoclaw.agent.context_governance import (
     ContextGovernanceConfig,
     ContextGovernor,
     ContextWindowExceededError,
+    ModelRequestState,
 )
 from nanoclaw.agent.context_governance import merge_adjacent_user_messages_for_model as merge
+from nanoclaw.config import Config
 from nanoclaw.agent.loop import AgentLoop
 from nanoclaw.agent.messages import MALFORMED_TOOL_CALL_NOTE
 from nanoclaw.agent.runner import AgentRunner, AgentRunSpec
@@ -570,3 +574,184 @@ async def test_a_retry_after_compaction_resends_the_compacted_request():
     assert result.final_content == "done" and len(summarizer.calls) == 1
     retry = fake.calls[-1].messages
     assert "- S" in retry[0]["content"] and MALFORMED_TOOL_CALL_NOTE in retry[-1]["content"]
+
+
+# --- found by mutation checks (layer 15) ---------------------------------------------------
+
+
+def test_list_tool_results_get_the_empty_marker_and_read_file_is_exempt():
+    marker = "(exec completed with no output)"
+    assert GOV.normalize_tool_result(CONFIG, "c", "exec", []) == marker
+    assert GOV.normalize_tool_result(CONFIG, "c", "exec", [{"type": "text", "text": "  "}]) == marker
+    long_read = [{"type": "text", "text": "r" * 200}]
+    assert GOV.normalize_tool_result(CONFIG, "c", "read_file", long_read) == long_read
+
+
+def test_repair_keeps_a_placeholder_with_calls_and_calls_named_at_the_top_level():
+    placeholder = [
+        {"role": "assistant", "content": "[Previous assistant message omitted.]", "tool_calls": [tool_call("p")]}
+    ]
+    assert GOV.strip_placeholder_assistant_messages(placeholder) is placeholder
+    top_level = [{"role": "assistant", "content": None, "tool_calls": [{"id": "t1", "name": "fetch"}]}]
+    assert GOV.strip_malformed_tool_calls(top_level) is top_level
+
+
+def test_backfill_puts_each_result_after_its_own_call():
+    a1 = {"role": "assistant", "content": None, "tool_calls": [tool_call("a1")]}
+    a2 = {"role": "assistant", "content": None, "tool_calls": [tool_call("b1")]}
+    out = GOV.backfill_missing_tool_results([a1, {"role": "user", "content": "q"}, a2])
+    assert [(m["role"], m.get("tool_call_id")) for m in out] == [
+        ("assistant", None),
+        ("tool", "a1"),
+        ("user", None),
+        ("assistant", None),
+        ("tool", "b1"),
+    ]
+
+
+def test_a_prefix_measurement_never_lowers_the_estimate():
+    big = [{"role": "user", "content": "x" * 1200}]
+    low = LLMUsage.reported(input_tokens=10, output_tokens=1)
+    measured, _ = pressure(big, low, usage_prefixes_messages=True)
+    assert measured > 1000
+
+
+def test_a_request_exactly_at_the_budget_fits():
+    messages = [{"role": "user", "content": "hello there"}]
+    estimate = estimate_prompt_tokens(messages, None)[0]
+    config = ContextGovernanceConfig(
+        session_key="s", max_tool_result_chars=1000, context_window_tokens=estimate + 100 + 1024, max_tokens=100
+    )
+    assert GOV.ensure_request_fits(config, messages, tool_definitions=None) is messages
+
+
+OTHER_TOOLS = [{"type": "function", "function": {"name": "x"}}]
+
+
+def _measured_state(measured, tools):
+    """A run whose last request (``measured``, sent with ``tools``) the provider counted at 1500 > budget."""
+    summarizer = Summarizer("- S")
+    state = ModelRequestState(config=BUDGETED, compaction=ContextCompactionState.from_messages([TASK], summarizer))
+    state.messages, state.tool_definitions = measured, tools
+    state.usage = LLMUsage.reported(input_tokens=1500, output_tokens=1)
+    return state, summarizer
+
+
+@pytest.mark.parametrize(
+    ("measured", "measured_tools", "current", "compacts"),
+    [
+        ([TASK], None, [TASK], True),  # exactly this request: the provider's count
+        ([TASK], None, [TASK, {"role": "assistant", "content": "a"}], True),  # a prefix (D8)
+        ([TASK], OTHER_TOOLS, [TASK], False),  # same messages, other tools
+        ([TASK], OTHER_TOOLS, [TASK, {"role": "assistant", "content": "a"}], False),  # a prefix, other tools
+        ([{"role": "user", "content": "other"}], None, [TASK, {"role": "assistant", "content": "a"}], False),
+    ],
+    ids=["same-request", "prefix", "same-messages-other-tools", "prefix-other-tools", "not-a-prefix"],
+)
+async def test_provider_counts_apply_only_to_the_same_request_or_a_prefix(measured, measured_tools, current, compacts):
+    state, summarizer = _measured_state(measured, measured_tools)
+    await GOV.prepare_request(state, current, tool_definitions=None)
+    assert bool(summarizer.calls) is compacts
+
+
+def test_the_largest_unread_file_is_replaced_first():
+    messages = [
+        SYSTEM,
+        {"role": "assistant", "content": None, "tool_calls": [tool_call("r1", "read_file"), tool_call("r2", "read_file")]},
+        {"role": "tool", "tool_call_id": "r1", "name": "read_file", "content": "a" * 8000},
+        {"role": "tool", "tool_call_id": "r2", "name": "read_file", "content": "b" * 4000},
+    ]
+    without_largest = [*messages[:2], {**messages[2], "content": PENDING_READ_NOTICE}, messages[3]]
+    estimate = estimate_prompt_tokens(without_largest, None)[0]
+    config = ContextGovernanceConfig(
+        session_key="s", max_tool_result_chars=10**6, context_window_tokens=estimate + 100 + 1024, max_tokens=100
+    )
+    prepared, replacements = GOV._fit_pending_file_reads(config, messages, messages[1:], tool_definitions=None)
+    assert replacements == {"r1": PENDING_READ_NOTICE}
+    assert prepared[3]["content"] == "b" * 4000
+
+
+async def test_an_empty_summary_fails_the_run():
+    reg = registry()
+    script = [fetch_call("c1"), fetch_call("c2"), "done"]
+    sizes = await sizes_without_limit(script, reg)
+    with pytest.raises(ContextWindowExceededError):
+        await run_spec(FakeProvider(list(script)), reg, window_between(sizes[1], sizes[2]), Summarizer(""))
+
+
+async def test_a_cancelled_compaction_reports_cancelled():
+    reg = registry()
+    script = [fetch_call("c1"), fetch_call("c2"), "done"]
+    sizes = await sizes_without_limit(script, reg)
+    seen = []
+
+    async def publish(event):
+        seen.append(event.phase)
+
+    async def cancelled(accepted, previous):
+        raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        window = window_between(sizes[1], sizes[2])
+        await run_spec(FakeProvider(list(script)), reg, window, cancelled, events=EventSink(publish))
+    assert seen == ["started", "cancelled"]
+
+
+async def test_the_max_iterations_summary_request_builds_on_the_compacted_request():
+    reg = registry()
+    script = [fetch_call("c1"), fetch_call("c2"), fetch_call("c3"), "wrap-up"]
+    sizes = await sizes_without_limit(script, reg)
+    fake, summarizer = FakeProvider(list(script)), Summarizer("- S1", "- S2")
+    result = await AgentRunner().run(
+        AgentRunSpec(
+            initial_messages=[SYSTEM, TASK],
+            tools=reg,
+            provider=fake,
+            max_tokens=100,
+            max_iterations=3,
+            context_window_tokens=window_between(sizes[1], sizes[2]),
+            consolidate_history=summarizer,
+        )
+    )
+    assert result.stop_reason == "max_iterations" and result.final_content == "wrap-up"
+    final = fake.calls[-1].messages
+    # Compacted again from the third (compacted) request: Δ is only the last step and the prompt.
+    assert len(summarizer.calls) == 2 and "- S2" in final[0]["content"]
+    assert [(m["role"], m.get("tool_call_id")) for m in final] == [
+        ("system", None),
+        ("assistant", None),
+        ("tool", "c3"),
+        ("user", None),
+    ]
+
+
+async def test_the_loop_passes_the_sessions_summary_to_the_runner(ws, tmp_path):
+    loop = make_loop(ws, tmp_path, ["hi"])
+    session = loop.sessions.get_or_create("cli:direct")
+    session.metadata["_last_summary"] = {"text": "- earlier", "last_active": "2026-01-01T00:00:00"}
+    seen = []
+    original = loop.runner.run
+
+    async def spy(spec):
+        seen.append(spec.active_summary)
+        return await original(spec)
+
+    loop.runner.run = spy
+    await loop.process_direct("hello")
+    assert seen == ["- earlier"]
+
+
+async def test_ask_reports_a_subagent_result_that_does_not_fit(capsys):
+    from nanoclaw.__main__ import _deliver_subagent_results
+
+    class Loop:
+        reports = [SimpleNamespace(label="child")]
+
+        async def next_subagent_result(self):
+            return self.reports.pop() if self.reports else None
+
+        async def process_subagent_result(self, report, **kwargs):
+            raise ContextWindowExceededError(session_key="s", estimated_tokens=9, input_budget=1, source="estimate")
+
+    assert await _deliver_subagent_results(Loop(), Config()) == 1
+    assert "exceeds the local context budget" in capsys.readouterr().err
