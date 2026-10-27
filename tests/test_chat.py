@@ -44,7 +44,7 @@ class Output(io.StringIO):
         return "\n".join(line.rstrip() for line in super().getvalue().split("\n"))
 
 
-def make_chat(ws, tmp_path, script, inputs, *, markdown=True, tools=None, **loop_kwargs):
+def make_chat(ws, tmp_path, script, inputs, *, markdown=True, tools=None, type_ahead=False, **loop_kwargs):
     provider = FakeProvider(list(script))
     loop = AgentLoop(
         provider, ws, sessions=SessionManager(ws, sessions_root=tmp_path / "sessions"), tools=tools, **loop_kwargs
@@ -63,8 +63,29 @@ def make_chat(ws, tmp_path, script, inputs, *, markdown=True, tools=None, **loop
             return await item()
         return item
 
-    chat = Chat(loop, console=console, read_input=read_input, render_markdown=markdown)
+    chat = Chat(loop, console=console, read_input=read_input, render_markdown=markdown, type_ahead=type_ahead)
     return chat, provider, out
+
+
+async def until(predicate, timeout=5):
+    """Wait (in tiny steps) until *predicate* holds, for chats with type-ahead."""
+    async with asyncio.timeout(timeout):
+        while not predicate():
+            await asyncio.sleep(0.01)
+
+
+def gate_children(provider, gate, started=None):
+    """Hold every subagent model call until *gate* is set."""
+    original = provider.chat
+
+    async def chat_fn(messages, *args, **kwargs):
+        if messages[0]["content"].startswith("# Subagent"):
+            if started is not None:
+                started.set()
+            await gate.wait()
+        return await original(messages, *args, **kwargs)
+
+    provider.chat = chat_fn
 
 
 async def test_turns_continue_the_conversation(ws, tmp_path):
@@ -328,24 +349,73 @@ async def test_compact_skill_and_dream(ws, tmp_path):
     assert "Dreaming..." in text and "Dream completed in" in text
 
 
-async def test_stop_cancels_background_subagents(ws, tmp_path):
-    gate = asyncio.Event()
-    chat, provider, out = make_chat(ws, tmp_path, [call("spawn", {"task": "slow job"}), "Started."], ["go", "/stop", "/stop"])
+async def test_stop_cancels_the_waiting_turn_and_its_subagent(ws, tmp_path):
+    """Layer 14: the turn waits for its running subagent (nanobot
+    ``_wait_for_pending``); with type-ahead, /stop (a priority command)
+    cancels both while the turn waits. Before layer 14 the turn ended at once
+    and /stop only found the subagent ("Stopped 1 task(s).")."""
+    gate, child_started = asyncio.Event(), asyncio.Event()
+    chat, provider, out = make_chat(ws, tmp_path, [call("spawn", {"task": "slow job"}), "Started."], [], type_ahead=True)
+    gate_children(provider, gate, child_started)
+
+    async def stop_while_waiting():
+        await until(lambda: child_started.is_set() and len(provider.calls) == 2)
+        return "/stop"
+
+    async def stop_again():
+        await until(lambda: "Stopped" in out.getvalue())
+        return "/stop"
+
+    async def leave():
+        await until(lambda: "No active task to stop." in out.getvalue())
+        return "exit"
+
+    chat.read_input = make_reader(["go", stop_while_waiting, stop_again, leave])
+    await chat.run()
+    text = out.getvalue()
+    assert "Stopped 2 task(s)." in text  # the session's worker and its subagent
+    assert text.index("Started.") < text.index("Stopped 2 task(s).") < text.index("No active task to stop.")
+    # The cancelled turn kept its finished tool round (the latest checkpoint).
+    saved = chat.loop.sessions.get_or_create("cli:direct").messages
+    assert [m["role"] for m in saved] == ["user", "assistant", "tool"]
+    assert saved[2]["content"].startswith("Subagent [slow job] started")
+    assert "pending_user_turn" not in chat.loop.sessions.get_or_create("cli:direct").metadata
+
+
+async def test_background_result_is_injected_into_the_waiting_turn(ws, tmp_path):
+    """Layer 14: the report arrives on the bus while the turn waits for it and
+    is folded into the same turn (layer 8 difference #3 is gone)."""
+    chat, provider, out = make_chat(
+        ws, tmp_path, [call("spawn", {"task": "check weather", "label": "Weather"}), "On it.", "It is sunny."], ["weather?"]
+    )
     original = provider.chat
 
     async def chat_fn(messages, *args, **kwargs):
         if messages[0]["content"].startswith("# Subagent"):
-            await gate.wait()
+            return LLMResponse(content="Sunny, 20C.")
         return await original(messages, *args, **kwargs)
 
     provider.chat = chat_fn
     await chat.run()
     text = out.getvalue()
-    assert "Stopped 1 task(s)." in text
-    assert "No active task to stop." in text
+    assert text.index("On it.") < text.index("It is sunny.") < text.index("Goodbye!")
+    assert text.count("\nnanoclaw\n") == 1  # one turn
+    last = provider.calls[-1].messages
+    assert last[-2] == {"role": "assistant", "content": "On it."}
+    assert last[-1]["role"] == "user" and last[-1]["content"].startswith("[Subagent 'Weather' completed successfully]")
+    saved = chat.loop.sessions.get_or_create("cli:direct").messages
+    report = next(m for m in saved if m.get("injected_event") == "subagent_result")
+    assert report["role"] == "user" and report["_hidden_history"]["kind"] == "subagent_result"
+    assert saved[-1]["content"] == "It is sunny."
 
 
-async def test_background_result_is_printed_while_waiting_for_input(ws, tmp_path):
+async def test_background_result_after_the_turn_is_printed_while_waiting_for_input(ws, tmp_path, monkeypatch):
+    """A report that arrives after its turn ended runs as a follow-up turn,
+    printed above the waiting prompt (nanobot: a system turn, not streamed)."""
+    import nanoclaw.agent.loop as loop_module
+
+    monkeypatch.setattr(loop_module, "_SUBAGENT_TERMINAL_WAIT_SECONDS", 0)
+    gate = asyncio.Event()
     printed = asyncio.Event()
     chat, provider, out = make_chat(
         ws, tmp_path, [call("spawn", {"task": "check weather", "label": "Weather"}), "On it.", "It is sunny."], []
@@ -360,23 +430,60 @@ async def test_background_result_is_printed_while_waiting_for_input(ws, tmp_path
 
     chat.output_above_prompt = output_above_prompt
 
-    async def wait_then_exit():
+    async def release_then_exit():
+        gate.set()
         await asyncio.wait_for(printed.wait(), 5)
         return "exit"
 
-    child_answers = iter(["Sunny, 20C."])
     original = provider.chat
 
     async def chat_fn(messages, *args, **kwargs):
         if messages[0]["content"].startswith("# Subagent"):
-            return LLMResponse(content=next(child_answers))
+            await gate.wait()
+            return LLMResponse(content="Sunny, 20C.")
         return await original(messages, *args, **kwargs)
 
     provider.chat = chat_fn
-    chat.read_input = make_reader(["weather?", wait_then_exit])
+    chat.read_input = make_reader(["weather?", release_then_exit])
     await chat.run()
     text = out.getvalue()
     assert text.index("On it.") < text.index("It is sunny.") < text.index("Goodbye!")
+    assert not provider.calls[-1].streamed
+
+
+async def test_typing_during_a_turn_is_injected(ws, tmp_path):
+    """With type-ahead, a message typed while the turn runs joins that turn
+    (nanobot ``_drain_pending``) instead of starting another."""
+    tool_running, release = asyncio.Event(), asyncio.Event()
+
+    class SlowTool(EchoTool):
+        async def execute(self, **kwargs):
+            tool_running.set()
+            await release.wait()
+            return await super().execute(**kwargs)
+
+    tools = ToolRegistry()
+    tools.register(SlowTool())
+    chat, provider, out = make_chat(
+        ws, tmp_path, [call("echo", {"text": "hi"}), "Both done."], [], tools=tools, type_ahead=True
+    )
+
+    async def type_while_running():
+        await tool_running.wait()
+        return "also say bye"
+
+    async def leave():
+        release.set()
+        await until(lambda: "Both done." in out.getvalue())
+        return "exit"
+
+    chat.read_input = make_reader(["say hi", type_while_running, leave])
+    await chat.run()
+    second = provider.calls[1].messages
+    assert second[-1]["role"] == "user" and second[-1]["content"].startswith("also say bye")
+    assert len(provider.calls) == 2
+    saved = chat.loop.sessions.get_or_create("cli:direct").messages
+    assert [m["role"] for m in saved] == ["user", "assistant", "tool", "user", "assistant"]
 
 
 def make_reader(items):
@@ -415,7 +522,11 @@ def test_cli_chat_with_piped_input(ws, monkeypatch, capsys):
     assert "Interactive mode" in out and "Hi!" in out and "nanoclaw commands:" in out and "Goodbye!" in out
     assert seen["restrict_to_workspace"] is True
     sessions = SessionManager(ws.resolve())
-    assert sessions.get_or_create("cli:other").messages[-1]["content"] == "Hi!"
+    # /help ran on the session's worker, so its reply is saved as hidden
+    # ``_command`` messages (nanobot loop.py:2185, since layer 14).
+    session = sessions.get_or_create("cli:other")
+    assert session.get_history()[-1]["content"] == "Hi!"
+    assert [m.get("_command") for m in session.messages[-2:]] == [True, True]
 
 
 def test_cli_ask_prints_progress_on_stderr(ws, capsys):
@@ -468,19 +579,33 @@ async def test_history_limits_truncation_and_roles(ws, tmp_path):
 
 
 async def test_new_and_status_with_a_running_subagent(ws, tmp_path):
-    gate = asyncio.Event()
-    chat, provider, out = make_chat(ws, tmp_path, [call("spawn", {"task": "slow job"}), "Started."], ["go", "/status", "/new", "/status"])
-    original = provider.chat
+    """Layer 14: the turn waits for its subagent, so the chat uses type-ahead
+    and /status counts the waiting turn too (nanobot builtin.py:295-298)."""
+    gate, child_started = asyncio.Event(), asyncio.Event()
+    chat, provider, out = make_chat(ws, tmp_path, [call("spawn", {"task": "slow job"}), "Started."], [], type_ahead=True)
+    gate_children(provider, gate, child_started)
 
-    async def chat_fn(messages, *args, **kwargs):
-        if messages[0]["content"].startswith("# Subagent"):
-            await gate.wait()
-        return await original(messages, *args, **kwargs)
+    async def status_while_waiting():
+        await until(lambda: child_started.is_set() and len(provider.calls) == 2)
+        return "/status"
 
-    provider.chat = chat_fn
+    async def new_session():
+        await until(lambda: "Tasks: 2 active" in out.getvalue())
+        return "/new"
+
+    async def status_again():
+        await until(lambda: "New session started." in out.getvalue())
+        return "/status"
+
+    async def leave():
+        await until(lambda: "Tasks: 0 active" in out.getvalue())
+        return "exit"
+
+    chat.read_input = make_reader(["go", status_while_waiting, new_session, status_again, leave])
     await chat.run()
     text = out.getvalue()
-    assert text.index("⚡ Tasks: 1 active") < text.index("New session started.") < text.index("⚡ Tasks: 0 active")
+    assert text.index("⚡ Tasks: 2 active") < text.index("New session started.") < text.index("⚡ Tasks: 0 active")
+    assert chat.loop.sessions.get_or_create("cli:direct").messages == []
 
 
 async def test_compact_failure_is_reported(ws, tmp_path, monkeypatch):

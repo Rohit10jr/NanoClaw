@@ -10,7 +10,6 @@ c4dac64's AgentRunner + AgentProgressHook for the same scripts (see the task
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import io
 import sys
 
@@ -541,8 +540,10 @@ async def test_chat_compact_prints_compaction_events(ws, tmp_path):
     assert "  ↳ Compressing context…\n  ↳ Context compacted.\n" in text_of(out)
 
 
-async def test_subagent_follow_up_streams_in_chat(ws, tmp_path):
-    done = asyncio.Event()
+async def test_subagent_report_streams_in_the_same_turn(ws, tmp_path):
+    """Layer 14: the turn waits for its subagent and the report is injected,
+    so the answer to it streams as part of the same turn (before, it was a
+    follow-up turn of its own)."""
     chat, provider, out = make_chat(ws, tmp_path, [], [])
     chat.loop.tools.register(SpawnTool(chat.loop.subagents))
     provider.queue(
@@ -562,25 +563,12 @@ async def test_subagent_follow_up_streams_in_chat(ws, tmp_path):
 
     provider.chat_stream = chat_stream
     provider.queue("It is sunny.")
-    original_output = chat.output_above_prompt
-
-    @contextlib.asynccontextmanager
-    async def output_above_prompt():
-        async with original_output():
-            yield
-        done.set()
-
-    chat.output_above_prompt = output_above_prompt
-
-    async def wait_then_exit():
-        await asyncio.wait_for(done.wait(), 5)
-        return "exit"
-
-    chat.read_input = _reader(["weather?", wait_then_exit])
+    chat.read_input = _reader(["weather?", "exit"])
     await chat.run()
     text = text_of(out)
     assert text.index("On it.") < text.index("It is sunny.") < text.index("Goodbye!")
-    # The follow-up streamed: its request had delta callbacks.
+    assert text.count("\nnanoclaw\n") == 1
+    # The answer to the report streamed: its request had delta callbacks.
     assert provider.calls[-1].streamed
 
 

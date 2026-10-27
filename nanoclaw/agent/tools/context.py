@@ -4,8 +4,10 @@ Mirrors the request part of nanobot/agent/tools/context.py (``RequestContext``,
 ``bind_request_context``, ``current_request_context``). The loop binds it
 around a run, so a tool such as ``spawn`` can start work for the same
 conversation with the same model, without that being passed through every
-call. nanobot's context also carries the chat channel's IDs, message IDs,
-workspace scope and other routing data, which NanoClaw doesn't have.
+call. Since layer 14 it also carries the chat id, so a background subagent's
+report can be addressed to the chat on the message bus. nanobot's context
+also carries message IDs, the workspace scope and other routing data, which
+NanoClaw doesn't have.
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ class RequestContext:
     channel: str
     session_key: str | None
     runtime: LLMRuntime | None
+    chat_id: str = "direct"
 
 
 _current: ContextVar[RequestContext | None] = ContextVar("nanoclaw_request_context", default=None)

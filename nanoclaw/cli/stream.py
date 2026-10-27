@@ -10,6 +10,12 @@ so it stays on screen. A "thinking" spinner runs until the first visible
 delta, and again after a round that ends with ``resuming=True`` (tools run,
 then the model answers again).
 
+With ``live=False`` (NanoClaw's own; the chat uses it while the prompt stays
+open during a turn, since a live area and the prompt can't share the screen)
+nothing is redrawn and there is no spinner: the text so far is printed once
+it pauses for a moment (outside a code block) and the rest when the round
+ends, below the header.
+
 Everything printed as rich markup is escaped: nanobot prints progress and
 reasoning text as markup, so ``[/x]`` crashes the turn and ``[red]`` vanishes
 (UPSTREAM_BUGS.md, bug 6). Reply deltas are safe in both: they go through
@@ -35,6 +41,8 @@ BOT_NAME = "nanoclaw"
 
 # nanobot stream.py:23: at most one live redraw per 50 ms; deltas in between are coalesced.
 _STREAM_REFRESH_INTERVAL = 0.05
+# live=False: print the buffered text after this long without a delta.
+_QUIET_FLUSH_SECONDS = 0.3
 # nanobot terminal.py:52-53: reasoning is printed a sentence (or 60 chars) at a time.
 _REASONING_SENTENCE_ENDINGS = (".", "!", "?", "。", "！", "？")
 _REASONING_FLUSH_CHARS = 60
@@ -164,9 +172,11 @@ class StreamRenderer:
         bot_icon: str = "",
         *,
         console: Console | None = None,
+        live: bool = True,
     ) -> None:
         self._md = render_markdown
-        self._show_spinner = show_spinner
+        self._live_updates = live
+        self._show_spinner = show_spinner and live
         self._bot_name = bot_name
         self._bot_icon = bot_icon
         self._buf = ""
@@ -229,6 +239,8 @@ class StreamRenderer:
         @contextmanager
         def _pause() -> Iterator[None]:
             self._cancel_refresh()
+            if not self._live_updates:
+                self._quiet_flush()  # the text so far stays above the line
             if self._live:
                 # Stop the transient live view first so it doesn't leave a partial
                 # frame above the line. The next delta starts a new one from the
@@ -245,6 +257,10 @@ class StreamRenderer:
         (nanobot ``stream.py:187``)"""
         self.streamed = True
         self._buf += delta
+        if not self._live_updates:
+            self._cancel_refresh()
+            self._refresh_handle = asyncio.get_running_loop().call_later(_QUIET_FLUSH_SECONDS, self._quiet_flush)
+            return
         if self._live is None:
             if not self._buf.strip():
                 return
@@ -259,6 +275,17 @@ class StreamRenderer:
                 self._refresh_stream()
             else:
                 self._refresh_handle = asyncio.get_running_loop().call_later(delay, self._refresh_stream)
+
+    def _quiet_flush(self) -> None:
+        """live=False: print what streamed so far, unless a code block is open."""
+        self._refresh_handle = None
+        if not self._buf.strip() or self._buf.count("```") % 2:
+            return
+        self.ensure_header()
+        out = self._console.file
+        out.write(self._render_str())
+        out.flush()
+        self._buf = ""
 
     def _refresh_stream(self) -> None:
         self._refresh_handle = None
@@ -288,6 +315,7 @@ class StreamRenderer:
             self._live = None
         self._stop_spinner()
         if self._buf.strip():
+            self.ensure_header()  # already printed by the first delta unless live=False
             # nanobot stream.py:238 writes to sys.stdout; we write to our console's
             # file (the same thing unless a console was passed in).
             out = self._console.file

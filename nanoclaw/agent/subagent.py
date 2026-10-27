@@ -9,9 +9,11 @@ Two ways to run one (the ``spawn`` tool's ``wait`` argument):
 
 - ``run_inline``: the caller waits and gets the child's final answer.
 - ``spawn``: the child runs in the background. When it finishes, a report
-  (``subagent_announce.md``) is put on ``results``. nanobot publishes it on
-  its message bus; NanoClaw has no bus, so the loop reads this queue and runs
-  the report as a follow-up turn (``AgentLoop.process_subagent_result``).
+  (``subagent_announce.md``) is published on the message bus as a system
+  :class:`InboundMessage` from sender ``subagent``, as nanobot does
+  (subagent.py:885). The agent loop injects it into the session's running
+  turn, or runs it as a follow-up turn when the session is idle (since layer
+  14; before, the report always waited for a follow-up turn).
 
 Left out (see docs/notes/08-subagents.md): hooks that log each child tool
 call and update live status, compaction during a child's run, project-folder
@@ -34,6 +36,8 @@ from nanoclaw.agent.runner import AgentRunner, AgentRunSpec
 from nanoclaw.agent.skills import SkillsLoader
 from nanoclaw.agent.tools import ToolRegistry, ToolResult, build_default_tools
 from nanoclaw.agent.tools.context import RequestContext, bind_request_context, reset_request_context
+from nanoclaw.bus.events import InboundMessage
+from nanoclaw.bus.queue import MessageBus
 from nanoclaw.utils.llm_runtime import LLMRuntime
 from nanoclaw.utils.templates import render_template
 
@@ -46,6 +50,10 @@ EXECUTION_FAILED_MESSAGE = "Error: subagent execution failed."
 ITERATION_LIMIT_MESSAGE = "Task stopped at its iteration limit before producing a final response."
 ITERATION_LIMIT_RESULT = "Iteration limit reached."
 SUBAGENT_RESULT_EVENT = "subagent_result"
+SUBAGENT_SENDER_ID = "subagent"
+# Report metadata (nanobot subagent.py:927); the label is NanoClaw's own, for
+# ``nanoclaw ask``'s "[subagent 'X' finished]" line.
+META_SUBAGENT_LABEL = "subagent_label"
 
 
 @dataclass(slots=True)
@@ -70,8 +78,10 @@ class SubagentStatus:
 class SubagentResult:
     """A finished background subagent's report for the main agent.
 
-    nanobot sends the same as an ``InboundMessage`` on channel ``system`` from
-    sender ``subagent``, with ``injected_event`` and ``subagent_task_id`` metadata.
+    On the bus it travels as an ``InboundMessage`` on channel ``system`` from
+    sender ``subagent``, with ``injected_event`` and ``subagent_task_id``
+    metadata (nanobot subagent.py:927-947); ``to_inbound`` / ``from_inbound``
+    convert.
     """
 
     task_id: str
@@ -80,10 +90,53 @@ class SubagentResult:
     status: str  # "ok" | "incomplete" | "error"
     session_key: str | None
     channel: str
+    chat_id: str = "direct"
+    stop_reason: str | None = None
+    partial: bool = False
+
+    def to_inbound(self) -> InboundMessage:
+        """The report as nanobot publishes it (subagent.py:922-947)."""
+        return InboundMessage(
+            channel="system",
+            sender_id=SUBAGENT_SENDER_ID,
+            chat_id=f"{self.channel}:{self.chat_id}",
+            content=self.content,
+            session_key_override=self.session_key or f"{self.channel}:{self.chat_id}",
+            metadata={
+                "injected_event": SUBAGENT_RESULT_EVENT,
+                "subagent_task_id": self.task_id,
+                "subagent_state": "done" if self.status == "ok" else self.status,
+                "subagent_stop_reason": self.stop_reason,
+                "subagent_partial": self.partial,
+                META_SUBAGENT_LABEL: self.label,
+            },
+        )
+
+    @classmethod
+    def from_inbound(cls, msg: InboundMessage) -> SubagentResult:
+        meta = msg.metadata
+        channel, _, chat_id = msg.chat_id.partition(":")
+        state = meta.get("subagent_state")
+        return cls(
+            task_id=str(meta.get("subagent_task_id") or ""),
+            label=str(meta.get(META_SUBAGENT_LABEL) or ""),
+            content=msg.content,
+            status="ok" if state == "done" else str(state or "ok"),
+            session_key=msg.session_key_override,
+            channel=channel or "cli",
+            chat_id=chat_id or "direct",
+            stop_reason=meta.get("subagent_stop_reason"),
+            partial=bool(meta.get("subagent_partial")),
+        )
+
+
+def is_subagent_report(msg: InboundMessage) -> bool:
+    """A background subagent's report (nanobot loop.py:1180, :2235)."""
+    return msg.sender_id == SUBAGENT_SENDER_ID and msg.metadata.get("injected_event") == SUBAGENT_RESULT_EVENT
 
 
 class SubagentManager:
-    """Starts subagents, limits how many run at once, and collects their results."""
+    """Starts subagents, limits how many run at once, and publishes their reports."""
 
     def __init__(
         self,
@@ -93,15 +146,18 @@ class SubagentManager:
         max_iterations: int = 200,  # nanobot max_tool_iterations (config/schema.py:180)
         max_concurrent_subagents: int = DEFAULT_MAX_CONCURRENT_SUBAGENTS,
         restrict_to_workspace: bool = False,
+        bus: MessageBus | None = None,
     ) -> None:
         self.workspace = workspace
+        # Where reports go (nanobot ``SubagentManager.bus``); the agent loop
+        # passes its own bus.
+        self.bus = bus if bus is not None else MessageBus()
         self.restrict_to_workspace = restrict_to_workspace
         self.max_tool_result_chars = max_tool_result_chars
         self.max_iterations = max_iterations
         self.max_concurrent_subagents = max_concurrent_subagents
         self._run_slots = asyncio.Semaphore(max_concurrent_subagents)
         self.runner = AgentRunner()
-        self.results: asyncio.Queue[SubagentResult] = asyncio.Queue()
         self._running_tasks: dict[str, asyncio.Task[str]] = {}
         self._task_statuses: dict[str, SubagentStatus] = {}
         self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
@@ -137,8 +193,9 @@ class SubagentManager:
         temperature: float | None = None,
         *,
         runtime: LLMRuntime,
+        origin_chat_id: str = "direct",
     ) -> str:
-        """Start a subagent in the background; its report goes to ``results``."""
+        """Start a subagent in the background; its report goes on the bus."""
         if temperature is not None:
             runtime = dataclasses.replace(runtime, temperature=temperature)
         task_id = str(uuid.uuid4())[:8]
@@ -146,7 +203,9 @@ class SubagentManager:
         status = SubagentStatus(task_id, display_label, task, time.monotonic())
         self._task_statuses[task_id] = status
         bg_task = asyncio.create_task(
-            self._run_subagent(task_id, task, display_label, origin_channel, session_key, status, runtime)
+            self._run_subagent(
+                task_id, task, display_label, origin_channel, session_key, status, runtime, chat_id=origin_chat_id
+            )
         )
         self._register(task_id, session_key, bg_task)
         bg_task.add_done_callback(lambda _: self._forget(task_id, session_key))
@@ -162,6 +221,7 @@ class SubagentManager:
         temperature: float | None = None,
         *,
         runtime: LLMRuntime,
+        origin_chat_id: str = "direct",
     ) -> str:
         """Run a subagent and return its final answer (an error result if it failed)."""
         if temperature is not None:
@@ -172,7 +232,15 @@ class SubagentManager:
         self._task_statuses[task_id] = status
         inline_task = asyncio.create_task(
             self._run_subagent(
-                task_id, task, display_label, origin_channel, session_key, status, runtime, announce=False
+                task_id,
+                task,
+                display_label,
+                origin_channel,
+                session_key,
+                status,
+                runtime,
+                announce=False,
+                chat_id=origin_chat_id,
             )
         )
         self._register(task_id, session_key, inline_task)
@@ -200,13 +268,14 @@ class SubagentManager:
         runtime: LLMRuntime,
         *,
         announce: bool = True,
+        chat_id: str = "direct",
     ) -> str:
         """Wait for a free slot, then run the task."""
         status.phase = "queued"
         async with self._run_slots:
             status.phase = "initializing"
             return await self._run_admitted_subagent(
-                task_id, task, label, channel, session_key, status, runtime, announce=announce
+                task_id, task, label, channel, session_key, status, runtime, announce=announce, chat_id=chat_id
             )
 
     async def _run_admitted_subagent(
@@ -220,6 +289,7 @@ class SubagentManager:
         runtime: LLMRuntime,
         *,
         announce: bool = True,
+        chat_id: str = "direct",
     ) -> str:
         """Run the child agent and report the result."""
         logger.info("Subagent [{}] starting task: {}", task_id, label)
@@ -229,7 +299,9 @@ class SubagentManager:
                 {"role": "system", "content": self._build_subagent_prompt()},
                 {"role": "user", "content": task},
             ]
-            token = bind_request_context(RequestContext(channel=channel, session_key=session_key, runtime=runtime))
+            token = bind_request_context(
+                RequestContext(channel=channel, session_key=session_key, runtime=runtime, chat_id=chat_id)
+            )
             try:
                 result = await self.runner.run(
                     AgentRunSpec(
@@ -277,7 +349,7 @@ class SubagentManager:
             status.error = str(e)[: self.max_tool_result_chars]
             final_result = f"Error: {e}"
         if announce:
-            await self._announce_result(task_id, label, task, final_result, channel, session_key, status)
+            await self._announce_result(task_id, label, task, final_result, channel, session_key, status, chat_id)
         return final_result
 
     def _last_progress_text(self, run_messages: list[dict[str, Any]]) -> str | None:
@@ -305,10 +377,13 @@ class SubagentManager:
         channel: str,
         session_key: str | None,
         status: SubagentStatus,
+        chat_id: str = "direct",
     ) -> None:
-        """Hand the report to the main agent (nanobot: publish on the message bus).
+        """Publish the report on the bus as a system message for the main agent.
 
-        Mirrors nanobot subagent.py:885 ``_announce_result``.
+        Mirrors nanobot subagent.py:885 ``_announce_result``: ``session_key_override``
+        points at the parent's session, so the loop injects the report into a
+        running turn of that session instead of starting a competing one.
         """
         report_status = "ok" if status.phase == "done" else status.phase
         status_text = {
@@ -325,17 +400,19 @@ class SubagentManager:
             error=status.error,
             partial_result=status.partial,
         )
-        await self.results.put(
-            SubagentResult(
-                task_id=task_id,
-                label=label,
-                content=content,
-                status=report_status,
-                session_key=session_key,
-                channel=channel,
-            )
+        report = SubagentResult(
+            task_id=task_id,
+            label=label,
+            content=content,
+            status=report_status,
+            session_key=session_key,
+            channel=channel,
+            chat_id=chat_id,
+            stop_reason=status.stop_reason,
+            partial=status.partial,
         )
-        logger.debug("Subagent [{}] announced result to {}", task_id, session_key or channel)
+        await self.bus.publish_inbound(report.to_inbound())
+        logger.debug("Subagent [{}] announced result to {}:{}", task_id, channel, chat_id)
 
     def _build_subagent_prompt(self) -> str:
         """The child's short system prompt."""
