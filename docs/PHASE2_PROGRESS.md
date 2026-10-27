@@ -38,6 +38,18 @@ Legend: ⏳ in progress · ✅ done and verified · ⛔ blocked
 | Docs | note 12, CODE_MAP, README, ROADMAP | main session | — | ✅ |
 | PR | `p2/layer-12` → `main` | main session | PR #4 | ✅ |
 
+## Layer 13 — hooks, events, streaming (`p2/layer-13`) ⏳
+
+Phase A (parallel, standalone pieces using nanobot's names), then phase B (wiring).
+
+| Task | Scope (files) | Sub-agent | Verification | Status |
+|---|---|---|---|---|
+| 13.1 Provider streaming | `providers/base.py` (`chat_stream`, `chat_stream_with_retry`), `openai_compat.py` (SSE, `_parse_chunks`), `fake.py` | sub-agent (worktree) | | ⏳ |
+| 13.2 Hooks and events | new `agent/hook.py`, `events.py`, `bus/outbound_events.py`, `agent/progress_hook.py`, `agent/turn_hooks.py`, think extractor | sub-agent (worktree) | | ⏳ |
+| 13.3 Terminal stream renderer | new `cli/stream.py` | sub-agent (worktree) | | ⏳ |
+| 13.4 Wiring | runner (hooks, streaming), loop (turn hook, events), chat/ask (renderer), retry and compaction events | after A | | |
+| Comparison, mutation checks, docs, PR | | main session | | |
+
 ## Blockers and open items
 
 | Item | Status |
