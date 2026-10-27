@@ -192,7 +192,7 @@ be used unchanged on top of it. Progress: [`PHASE2_PROGRESS.md`](PHASE2_PROGRESS
 | 15 | Robustness | Checkpoints and crash recovery; compaction between tool calls (also subagents) | `session/recovery.py`, `agent/context_governance.py` | ~600 | ✅ done |
 | 16 | Shell | Exec sessions; Windows PowerShell | `agent/tools/exec_session.py`, `shell.py`, `_windows_job.py` | ~600 | ✅ done |
 | 17 | More tools | `apply_patch`, `rg`, file-state dedupe, MCP | `apply_patch.py`, `rg.py`, `file_state.py`, `mcp.py` | ~900 | ✅ done |
-| 18 | Isolation | bubblewrap sandbox, separate project folder | `sandbox.py`, `security/workspace_access.py` | ~350 | |
+| 18 | Isolation | bubblewrap sandbox, separate project folder | `sandbox.py`, `security/workspace_access.py` | ~350 | ✅ done |
 | 19 | Subagents v2 | `spawn` → `subagent` tool, child sessions | `agent/subagent*.py`, `agent/tools/subagent.py` | ~400 | |
 | 20 | Providers | Registry, presets, fallback, Anthropic, `/model` | `providers/registry.py`, `agent/model_presets.py`, `fallback_provider.py`, `anthropic_provider.py` | ~1,100 | |
 | 21 | Gateway and schedules | `nanoclaw gateway`, cron, heartbeat, scheduled Dream, idle compaction, memory git history, prompt overrides | `cli/gateway_runtime.py`, `cron/`, `agent/autocompact.py`, `utils/gitstore.py` | ~1,300 | |

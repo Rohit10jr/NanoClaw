@@ -709,6 +709,21 @@ Note: [`notes/17-more-tools.md`](notes/17-more-tools.md). Links point at nanobot
 | `ToolRegistry.get_definitions` order and cache (`agent/tools/registry.py`) | [`agent/tools/registry.py:97`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/tools/registry.py#L97) | Same |
 | `env_proxy_applies_to_url` (`security/network.py`) | [`security/network.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/security/network.py) | Same |
 
+## Layer 18 — Isolation: sandbox, project folder
+
+Note: [`notes/18-isolation.md`](notes/18-isolation.md). Links point at nanobot `c4dac64`.
+
+| NanoClaw | nanobot (`c4dac64`) | How it compares |
+|---|---|---|
+| `nanoclaw/agent/tools/sandbox.py` `wrap_command`, `_bwrap`, `_normalize_bind_paths` | [`agent/tools/sandbox.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/tools/sandbox.py) | 60 of 62 cases identical; no seatbelt, no media bind |
+| `ExecTool` sandbox wrapping, `_active_sandbox_bind_roots`, `_normalize_bind_roots` (`agent/tools/shell.py`) | [`agent/tools/shell.py:437, 1156, 1175`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/tools/shell.py#L437) | Same |
+| `nanoclaw/security/workspace_access.py` `WorkspaceScope`, `build_workspace_scope`, `bind_workspace_scope`, `current_tool_workspace`, `workspace_sandbox_status` | [`security/workspace_access.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/security/workspace_access.py) | Same; no web UI resolver or session metadata |
+| `project_workspace_scope` (`--project`) | — | NanoClaw only |
+| `workspace_access_block` | [`agent/runtime_control.py:186`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/runtime_control.py#L186) | Same lines |
+| `_FsTool._access`, extra read-allowed dirs (`agent/tools/filesystem.py`) | [`agent/tools/filesystem.py:71-105`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/tools/filesystem.py#L71) | 496 decisions identical |
+| `ContextBuilder` `workspace=`, `# Current Project` (`agent/context.py`), skills root (`agent/skills.py`) | [`agent/context.py:105`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/context.py#L105) | Same |
+| Scope binding in `AgentLoop._run_agent_loop`; subagent inheritance (`agent/subagent.py`, `tools/spawn.py`) | [`agent/loop.py:1293`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/loop.py#L1293), [`agent/subagent.py:824`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/subagent.py#L824) | Same |
+
 [nb-pta]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/providers/base.py#L118
 [nb-tcr]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/providers/base.py#L72
 [nb-tcr-hvn]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/providers/base.py#L81
