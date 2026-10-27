@@ -33,11 +33,15 @@ def build_default_tools(
     shell.py:169, exec_session.py:788, :947). Its sandbox fields are not
     read yet (layer 18).
 
+    ``rg`` (ripgrep through exec sessions) is added when exec is enabled and
+    ``rg`` is on the exec PATH (nanobot ``RgTool.enabled``, rg.py).
+
     nanobot discovers tools by scanning its tools package (agent/tools/loader.py);
     NanoClaw lists them explicitly.
     """
     from nanoclaw.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
     from nanoclaw.agent.tools.exec_session import ExecSessionTool, ListExecSessionsTool
+    from nanoclaw.agent.tools.rg import RgTool
     from nanoclaw.agent.tools.shell import ExecTool
     from nanoclaw.agent.tools.web import WebFetchTool, WebSearchTool
     from nanoclaw.config.schema import ExecToolConfig
@@ -51,8 +55,8 @@ def build_default_tools(
     ]
     if cfg.enable:
         # nanobot ExecTool.create (shell.py:173).
-        tools += [
-            ExecTool(
+        def exec_tool(cls: type[ExecTool]) -> ExecTool:
+            return cls(
                 working_dir=workspace,
                 max_runtime=cfg.max_runtime,
                 max_runtime_limit=cfg.max_runtime_limit,
@@ -65,10 +69,16 @@ def build_default_tools(
                 allow_patterns=list(cfg.allow_patterns),
                 deny_patterns=list(cfg.deny_patterns),
                 exec_session_manager=exec_session_manager,
-            ),
+            )
+
+        tools += [
+            exec_tool(ExecTool),
             ExecSessionTool(manager=exec_session_manager),
             ListExecSessionsTool(manager=exec_session_manager),
         ]
+        if RgTool.enabled(cfg):
+            # nanobot RgTool inherits ExecTool.create, so it gets the same settings.
+            tools.append(exec_tool(RgTool))
     tools += [WebFetchTool(), WebSearchTool()]
     registry = ToolRegistry()
     for tool in tools:

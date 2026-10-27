@@ -1,3 +1,5 @@
+import shutil
+
 from nanoclaw.__main__ import main
 from nanoclaw.providers import FakeProvider, LLMResponse
 
@@ -53,10 +55,13 @@ def test_cli_ask_gives_the_model_the_default_tools_in_the_workspace(capsys, tmp_
     assert main(["ask", "save a note", "-w", str(workspace)], provider=fake) == 0
 
     names = sorted(d["function"]["name"] for d in fake.calls[0].tools)
-    assert names == [
+    expected = [
         "edit_file", "exec", "exec_session", "list_dir", "list_exec_sessions",
         "read_file", "spawn", "web_fetch", "web_search", "write_file",
     ]
+    if shutil.which("rg"):  # rg is registered only when ripgrep is installed
+        expected = sorted([*expected, "rg"])
+    assert names == expected
     assert (workspace / "note.txt").read_text(encoding="utf-8") == "hi"  # relative path landed in the workspace
     captured = capsys.readouterr()
     assert captured.out.strip() == "Saved."
