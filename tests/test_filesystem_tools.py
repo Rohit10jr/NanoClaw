@@ -297,3 +297,131 @@ async def test_list_dir_truncation_and_errors(ws):
     assert await ListDirTool(ws).execute(path="empty") == "Directory empty is empty"
     assert await ListDirTool(ws).execute(path="nope") == "Error: Directory not found: nope"
     assert await ListDirTool(ws).execute(path="f0.txt") == "Error: Not a directory: f0.txt"
+
+
+# --- upstream fixes (nanobot d3d70f2 -> c4dac64) ------------------------------------
+
+
+# nanobot ae6801d (tests/tools/test_filesystem_tools.py:14): file creation
+# writes the newlines it was given; no "\n" -> "\r\n" translation on Windows.
+@pytest.mark.parametrize("newline", ["\n", "\r\n", "\r"])
+@pytest.mark.parametrize("operation", ["write", "edit_new", "edit_empty"])
+async def test_file_creation_preserves_provided_newlines(ws, newline, operation):
+    target = ws / "nested" / "script.py"
+    content = f"first = 1{newline}second = 2{newline}"
+    if operation == "write":
+        out = await WriteFileTool(ws).execute(path=str(target), content=content)
+    else:
+        if operation == "edit_empty":
+            target.parent.mkdir()
+            target.touch()
+        out = await EditFileTool(ws).execute(path=str(target), old_text="", new_text=content)
+    assert "Error" not in out
+    assert target.read_bytes() == content.encode("utf-8")
+
+
+async def test_file_creation_does_not_translate_newlines(ws, monkeypatch):
+    # Linux never translates "\n", so simulate Windows: text mode writes
+    # os.linesep only when newline=None (the default).
+    import pathlib
+
+    original = pathlib.Path.write_text
+
+    def windows_write_text(self, data, encoding=None, errors=None, newline=None):
+        if newline is None:
+            data = data.replace("\n", "\r\n")
+        return original(self, data, encoding=encoding, errors=errors, newline=newline)
+
+    monkeypatch.setattr(pathlib.Path, "write_text", windows_write_text)
+    await WriteFileTool(ws).execute(path="w.py", content="a\nb\n")
+    await EditFileTool(ws).execute(path="e.py", old_text="", new_text="a\nb\n")
+    (ws / "empty.py").touch()
+    await EditFileTool(ws).execute(path="empty.py", old_text="", new_text="a\nb\n")
+    for name in ("w.py", "e.py", "empty.py"):
+        assert (ws / name).read_bytes() == b"a\nb\n", name
+
+
+# nanobot 042bcbb (tests/tools/test_edit_advanced.py:162): the indentation-blind
+# fallback keeps indentation and line endings whether or not old_text ends
+# with a newline.
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+@pytest.mark.parametrize("ending", ["", "\n"], ids=["no-request-newline", "request-newline"])
+@pytest.mark.parametrize(
+    "tail", ["\nnext_step()\n", "\n", ""], ids=["followed-by-code", "terminated-eof", "unterminated-eof"]
+)
+async def test_trim_fallback_preserves_indentation_and_line_endings(ws, newline, ending, tail):
+    p = ws / "indent.py"
+    content = "if ready:\n    x = 1\n    y = 2" + tail
+    p.write_bytes(content.replace("\n", newline).encode("utf-8"))
+    out = await EditFileTool(ws).execute(
+        path="indent.py",
+        old_text=("x = 1\ny = 2" + ending).replace("\n", newline),
+        new_text=("x = 3\ny = 4" + ending).replace("\n", newline),
+    )
+    assert out.startswith("Patch applied:")
+    expected = "if ready:\n    x = 3\n    y = 4" + (tail or ending)
+    assert p.read_bytes() == expected.replace("\n", newline).encode("utf-8")
+    compile(p.read_text(encoding="utf-8"), str(p), "exec")
+
+
+# nanobot 042bcbb (tests/tools/test_edit_advanced.py:238)
+@pytest.mark.parametrize("ending", ["", "\n"], ids=["no-request-newline", "request-newline"])
+async def test_replace_all_reindents_each_match(ws, ending):
+    p = write(ws, "multi.py", "if a:\n    def foo():\n        pass\nif b:\n        def foo():\n            pass\n")
+    out = await EditFileTool(ws).execute(
+        path="multi.py",
+        old_text="def foo():\n    pass" + ending,
+        new_text="def bar():\n    return 1" + ending,
+        replace_all=True,
+    )
+    assert out.startswith("Patch applied:")
+    assert p.read_text() == (
+        "if a:\n    def bar():\n        return 1\nif b:\n        def bar():\n            return 1\n"
+    )
+
+
+# nanobot 042bcbb (tests/tools/test_edit_advanced.py:267)
+@pytest.mark.parametrize("ending", ["", "\n"], ids=["no-request-newline", "request-newline"])
+async def test_trim_and_quote_fallback_with_trailing_newline(ws, ending):
+    p = write(ws, "q.py", "    message = \u201chello\u201d\n")
+    out = await EditFileTool(ws).execute(
+        path="q.py", old_text='message = "hello"' + ending, new_text='message = "goodbye"' + ending
+    )
+    assert out.startswith("Patch applied:")
+    assert p.read_text() == "    message = \u201cgoodbye\u201d\n"
+
+
+# nanobot e36a016 (tests/tools/test_edit_advanced.py:304): trailing whitespace
+# is stripped from the replacement's line ends only, not from a separator
+# before text that stays on the same line.
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+@pytest.mark.parametrize(
+    "before, old_text, new_text, expected",
+    [
+        ("return value\n", "return ", "yield ", "yield value\n"),
+        ("return value\n", "return ", "yield\t", "yield\tvalue\n"),
+        ("hello-world\n", "-", " ", "hello world\n"),
+        ("return value\n", "return ", "ready = True  \nyield ", "ready = True\nyield value\n"),
+    ],
+    ids=["space", "tab", "whitespace-only", "multiline"],
+)
+async def test_inline_replacement_preserves_separator(ws, newline, before, old_text, new_text, expected):
+    p = ws / "inline.py"
+    p.write_bytes(before.replace("\n", newline).encode("utf-8"))
+    out = await EditFileTool(ws).execute(
+        path="inline.py", old_text=old_text.replace("\n", newline), new_text=new_text.replace("\n", newline)
+    )
+    assert out.startswith("Patch applied:")
+    assert p.read_bytes() == expected.replace("\n", newline).encode("utf-8")
+
+
+# nanobot e36a016 (tests/tools/test_edit_advanced.py:332)
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+async def test_replace_all_cleans_only_actual_line_endings(ws, newline):
+    p = ws / "mixed.txt"
+    p.write_bytes("old value\nold \nold    \nold ".replace("\n", newline).encode("utf-8"))
+    out = await EditFileTool(ws).execute(path="mixed.txt", old_text="old ", new_text="new ", replace_all=True)
+    assert out.startswith("Patch applied:")
+    # Existing suffix whitespace stays; only the replacement's line ends are cleaned.
+    expected = "new value\nnew\nnew   \nnew"
+    assert p.read_bytes() == expected.replace("\n", newline).encode("utf-8")
