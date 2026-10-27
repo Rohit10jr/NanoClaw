@@ -9,6 +9,12 @@ import pytest
 
 from nanoclaw.utils import tokens
 
+# The MCP SDK's stdio_client binds ``errlog=sys.stderr`` when its module is
+# first imported. Import it now, under pytest's session-wide capture, so a
+# test using capsys/capfd cannot make it keep a per-test stream that is
+# closed afterwards ("I/O operation on closed file" in later MCP tests).
+import mcp.client.stdio  # noqa: E402,F401
+
 REAL_GET_TOKEN_ENCODING = tokens.get_token_encoding
 
 WINDOWS = sys.platform == "win32"

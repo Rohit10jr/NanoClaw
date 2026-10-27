@@ -157,6 +157,19 @@ commands it started. On Windows commands run in PowerShell (or `cmd`). Limits
 and allowed commands go in the config file under `tools.exec` (`maxRuntime`,
 `idleTimeout`, `allowPatterns`, `denyPatterns`, `enable`, ...).
 
+MCP servers, as in nanobot, go under `tools.mcpServers`: a `command` (stdio)
+or a `url` (streamable HTTP; SSE for URLs ending in `/sse`). Their tools appear
+as `mcp_<server>_<tool>`; `enabledTools` limits which, `toolTimeout` (30 s)
+bounds each call. Private-network URLs are blocked unless listed in
+`tools.ssrfWhitelist`. OAuth servers and `useProxy` are not supported.
+
+```json
+{ "tools": { "mcpServers": {
+  "fs": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"] },
+  "remote": { "url": "https://mcp.example.com/mcp", "headers": { "Authorization": "Bearer ${MCP_TOKEN}" } }
+} } }
+```
+
 The agent's personality and instructions live in editable Markdown files in
 the workspace (`~/.nanoclaw/workspace` by default, change with `-w`):
 `SOUL.md` (personality), `USER.md` (about you), `AGENTS.md` (workspace rules).
