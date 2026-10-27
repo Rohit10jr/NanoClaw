@@ -26,6 +26,7 @@ the original project NanoClaw is based on.
 | 4 | Compaction usually falls back to a raw dump: the model is only asked for a summary when the request overflows by less than ~600 tokens | Confirmed | Medium | Same as nanobot by default; an opt-in fix (`NANOCLAW_COMPACTION=fixed`) is being A/B tested |
 | 5 | When a **repeated** subagent report triggers compaction, the summary marker is placed one message too early, so an already-summarized message is replayed again | Confirmed (only for a report delivered twice) | Low | Correct in NanoClaw (layer 8, difference #8) |
 | 6 | Terminal progress lines are printed as rich markup: a shell command containing `[/x]` **aborts the turn** in `nanobot agent -m`; `[red]`, `[a-z]` etc. silently disappear from the displayed line | Confirmed | Medium | Fixed in NanoClaw (text escaped; layer 10); the reasoning lines have the same problem (layer 13, also escaped) |
+| 7 | A turn cancelled with `/stop` keeps only its **latest** tool round; earlier finished rounds of the same turn are lost from history | Confirmed | Medium | Same as nanobot (kept faithful; fix open) |
 
 ---
 
@@ -538,3 +539,41 @@ same calls (layer 13 task 13.3). NanoClaw escapes these lines too.
 | `exec` deny list (`rm -rf`, `mkfs`, ...) is not applied by default | Intentional: it only applies in restricted mode (`shell.py` line 446, with a comment explaining "full access is an explicit trust decision"). NanoClaw applies it always, by choice (`docs/notes/03-tools.md`) |
 | `edit_file` reports "No similar text found" for a one-line `old_text` with a typo | Near-match search compares whole lines by design, so a single changed line scores 0%. Could be an enhancement (character-level similarity for short `old_text`), not a bug |
 | `list_dir` and `read_file` resolve paths outside the workspace by default | Intentional: workspace restriction is opt-in (`restrict_to_workspace`, default `false`) |
+
+---
+
+## 7. A cancelled turn keeps only its latest tool round
+
+**Where:** `nanobot/agent/loop.py`: the runner's checkpoint callback stores
+each checkpoint with `_set_runtime_checkpoint` (`:1096`, `:2648`), which
+**replaces** `session.metadata["runtime_checkpoint"]` every time. On
+cancellation, `restore_runtime_checkpoint(session)` (`:1740`,
+`session/recovery.py`) rebuilds the turn from that one payload: its assistant
+message, its completed tool results, and "interrupted" results for pending
+calls.
+
+**Problem:** the payload holds only the current tool round. Rounds that
+finished earlier in the same turn were never written to the session (they are
+saved only when the turn completes), so after `/stop` they are gone. The model
+then sees the user message, the last assistant tool call and "Error: Task
+interrupted before this tool finished.", but not the work it did before.
+
+**Reproduction** (found in layer 14; nanobot `c4dac64`'s real `AgentLoop.run()`
+with a scripted provider): round 1 calls `echo("e")` and finishes; round 2
+calls a slow tool; `/stop` arrives during round 2. Saved session:
+
+```
+user: go
+assistant: (tool call: slow)
+tool: Error: Task interrupted before this tool finished.
+```
+
+The `echo` call and its result from round 1 are missing. Script:
+`drive.py` scenario "/stop during tool call (2 rounds)" in the layer 14
+comparison (it runs the same scenarios through nanobot and NanoClaw).
+
+**Suggested fix:** keep the completed rounds in the checkpoint (append, or
+store the turn's messages so far), or save each completed round to the
+session as it finishes.
+
+**NanoClaw:** behaves exactly like nanobot (checked side by side).
