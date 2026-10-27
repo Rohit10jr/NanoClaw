@@ -29,6 +29,7 @@ model: Changed the port to 9090.
 | `agent/tools/schema.py` | `object_schema`, `validate_json_schema_value`, `validate_params`, `cast_params` | `agent/tools/base.py` (Schema, `cast_params`), `agent/tools/schema.py` |
 | `agent/tools/filesystem.py` | `read_file`, `write_file`, `edit_file`, `list_dir` | `agent/tools/filesystem.py` |
 | `agent/tools/shell.py` | `exec` | `agent/tools/shell.py` |
+| `agent/tools/rg.py` | `rg` *(layer 17)* | `agent/tools/rg.py` |
 | `agent/tools/web.py` | `web_fetch`, `web_search` | `agent/tools/web.py` |
 | `agent/tools/__init__.py` | `build_default_tools(workspace)` | `agent/tools/loader.py` (auto-discovery) |
 
@@ -125,6 +126,24 @@ sessions; the layer-3 version is described in git history.)*
   is invisible to anything the model runs. This is nanobot's `_build_env`.
 - **Deny list** (see the differences below).
 
+### `rg(args, working_dir, max_runtime, yield_time_ms, ...)`
+*(Layer 17, nanobot `agent/tools/rg.py`.)* `ExecTool` with an argument array
+instead of a shell command: `args=["-n", "-g", "*.py", "needle", "."]` runs
+`rg -n -g '*.py' needle .` directly, without a shell, so quotes, `|` or
+`$(...)` in an argument reach rg as text. Everything else is `exec`'s: exec
+sessions, budgets, output limits, PATH settings, the workspace checks and the
+guard (which sees `shlex.join(["rg", *args])`). rg's exit code 1 (no match) and
+2 (bad regex, missing path) are plain results, not tool errors.
+- Registered for the main agent and subagents (not Dream) only when
+  `tools.exec.enable` is on and `rg` is found on PATH with `pathPrepend`/
+  `pathAppend`. nanobot then unregisters its `grep`/`find_files`
+  (loader.py:130); NanoClaw never had them.
+- `--pre CMD` (rg runs CMD per file) is not blocked, as in nanobot; in
+  restricted mode an absolute `CMD` outside the workspace trips the path check.
+- Difference: NanoClaw's guard runs on every call, so unrestricted searches for
+  text such as `rm -rf`, `shutdown` or `http://169.254.169.254` are blocked,
+  which nanobot allows outside restricted mode.
+
 ### `web_fetch(url, extractMode="markdown", maxChars=50000)`
 - Only `http`/`https`; redirects followed one at a time (max 5), and each
   target is checked again, so a page can't redirect to `file:///etc/passwd`.
@@ -208,7 +227,7 @@ blocked and the slip-through cases are tested in `tests/test_shell_tool.py`.
 | Sandbox (bubblewrap / macOS seatbelt) | `tools/sandbox.py` | OS-level isolation for `exec` (**phase 2**, decided in layer 9) |
 | "File unchanged since last read" | `file_state.py` | Saves tokens when the model rereads a file |
 | `edit_file` `line_hint`, `expected_replacements` | `filesystem.py` | Pick a match by line number; guard the number of replacements |
-| `apply_patch`, ripgrep `search` | `tools/apply_patch.py`, `tools/search.py` | Multi-file patches, fast code search |
+| `apply_patch`, `grep`/`find_files` | `tools/apply_patch.py`, `tools/search.py` | Multi-file patches, code search without ripgrep (ripgrep `rg`, `tools/rg.py`: **done in layer 17**) |
 | Background shell sessions | `exec_session.py`, `yield_time_ms` | Long-running commands the model polls (**done in layer 16**) |
 | Shell choice, login shells, PATH config, Windows | `shell.py`, `_windows_job.py` | Platform support (**done in layer 16**: shell/login/PATH; Windows in task 16.4: PowerShell or cmd, a Job object or `taskkill /T /F` for the process tree, the Windows environment; not yet run on Windows, see `docs/WINDOWS.md`) |
 | Jina Reader, image fetching, proxies | `web.py` | Better extraction for JS-heavy pages |
