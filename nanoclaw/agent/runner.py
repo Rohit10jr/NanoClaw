@@ -16,6 +16,12 @@ Since layer 14 a caller can fold messages that arrive mid-turn into the run
 ``terminal_injection_callback``, consulted only when the turn is about to end,
 e.g. to wait for running subagents), and can keep the latest finished step of
 the turn (``checkpoint_callback``) so a cancelled turn can still be saved.
+
+Since layer 15 every model request goes through
+``ContextGovernor.prepare_request`` (context_governance.py): the transcript is
+repaired and merged for the model, measured, and compacted when it no longer
+fits ``context_window_tokens``, also between tool calls (nanobot runner.py:877).
+A compaction's summary comes back as ``AgentRunResult.summary_checkpoint``.
 """
 
 from __future__ import annotations
@@ -29,7 +35,14 @@ from typing import Any
 
 from loguru import logger
 
-from nanoclaw.agent.context_governance import merge_adjacent_user_messages_for_model
+from nanoclaw.agent.context_governance import (
+    ContextCompactionState,
+    ContextGovernanceConfig,
+    ContextGovernor,
+    HistoryConsolidator,
+    ModelRequestState,
+    SummaryTranscriptBuilder,
+)
 from nanoclaw.agent.hook import AgentHook, AgentHookContext, AgentRunHookContext
 from nanoclaw.agent.messages import (
     BUDGET_EXHAUSTED_FINALIZATION_PROMPT,
@@ -46,12 +59,12 @@ from nanoclaw.agent.messages import (
     strip_reasoning_tags,
 )
 from nanoclaw.agent.progress_hook import AgentProgressHook
-from nanoclaw.agent.tool_results import normalize_tool_result
 from nanoclaw.agent.tools import ToolRegistry, is_tool_error
 from nanoclaw.agent.tools.registry import with_retry_hint
 from nanoclaw.agent.tools.violations import classify_violation, is_ssrf_violation
 from nanoclaw.events import NO_EVENTS, EventSink, RetryWaitEvent
 from nanoclaw.providers import LLMProvider, LLMResponse, LLMUsage, ToolCallRequest
+from nanoclaw.session.summary import SessionSummaryCheckpoint
 from nanoclaw.utils.progress_events import output_events
 
 # Called as on_progress(text) for the model's text before tool calls, and
@@ -136,6 +149,20 @@ class AgentRunSpec:
     # for running subagents (nanobot runner.py:120; the loop's
     # ``_wait_for_pending``, loop.py:1217).
     terminal_injection_callback: InjectionCallback | None = None
+    # Context governance (nanobot runner.py:107-118, context_governance.py).
+    # 0: no budget, so never compacts (the transcript is still repaired and
+    # tool results budgeted). Otherwise ``consolidate_history`` is required:
+    # it summarizes the accepted history (``Consolidator.summarize_transcript``).
+    context_window_tokens: int = 0
+    consolidate_history: HistoryConsolidator | None = None
+    # A turn built from a session (nanobot ``transcript_input``): the number of
+    # leading messages taken as already accepted (system prompt + history),
+    # the summary in effect, and how to rebuild the system prompt around a new
+    # summary. Without a builder the whole initial transcript counts as
+    # accepted (nanobot ``ContextCompactionState.from_messages``).
+    accepted_boundary: int | None = None
+    active_summary: str | None = None
+    summary_transcript_builder: SummaryTranscriptBuilder | None = None
 
 
 @dataclass
@@ -146,7 +173,8 @@ class AgentRunResult:
     ``empty_final_response`` or ``max_iterations``. ``tool_events`` has one
     ``{"name", "status", "detail"}`` dict per tool call of the run
     (nanobot runner.py:142). ``had_injections``: at least one injected
-    message was folded into the run.
+    message was folded into the run. ``summary_checkpoint``: the run
+    compacted; its summary replaces ``messages[:transcript_boundary]``.
     """
 
     final_content: str | None
@@ -157,6 +185,7 @@ class AgentRunResult:
     error: str | None = None
     tool_events: list[dict[str, str]] = field(default_factory=list)
     had_injections: bool = False
+    summary_checkpoint: SessionSummaryCheckpoint | None = field(default=None, repr=False)
 
 
 def _add_usage(total: LLMUsage | None, new: LLMUsage | None) -> LLMUsage | None:
@@ -188,6 +217,9 @@ def _ok_detail(result: Any) -> str:
 
 class AgentRunner:
     """Runs one agent turn against a provider and a tool registry."""
+
+    def __init__(self) -> None:
+        self.context_governor = ContextGovernor()
 
     async def run(self, spec: AgentRunSpec) -> AgentRunResult:
         """Run hooks around the core loop, in nanobot's order (runner.py:308-372)."""
@@ -358,6 +390,34 @@ class AgentRunner:
         return True, injection_cycles
 
     @staticmethod
+    def _request_state(spec: AgentRunSpec, messages: list[dict[str, Any]]) -> ModelRequestState:
+        """The run's governance config and H/Δ state (nanobot runner.py:379-457).
+
+        ``messages`` is the run's own transcript, so a pending-read notice
+        written during compaction is part of the result.
+        """
+        if spec.context_window_tokens and spec.consolidate_history is None:
+            raise ValueError("consolidate_history is required with context_window_tokens")
+        if spec.summary_transcript_builder is not None:
+            compaction = ContextCompactionState.from_transcript(
+                messages,
+                accepted_boundary=len(messages) if spec.accepted_boundary is None else spec.accepted_boundary,
+                active_summary=spec.active_summary,
+                summary_transcript_builder=spec.summary_transcript_builder,
+                consolidate_history=spec.consolidate_history,
+            )
+        else:
+            compaction = ContextCompactionState.from_messages(messages, spec.consolidate_history)
+        config = ContextGovernanceConfig(
+            session_key=spec.session_key,
+            max_tool_result_chars=spec.max_tool_result_chars,
+            workspace=spec.workspace,
+            context_window_tokens=spec.context_window_tokens,
+            max_tokens=spec.max_tokens,
+        )
+        return ModelRequestState(config=config, compaction=compaction, events=spec.events)
+
+    @staticmethod
     async def _emit_checkpoint(spec: AgentRunSpec, payload: dict[str, Any]) -> None:
         """nanobot runner.py:1380."""
         if spec.checkpoint_callback is not None:
@@ -381,6 +441,7 @@ class AgentRunner:
         workspace_violation_counts: dict[str, int] = {}
         had_injections = False
         injection_cycles = 0
+        state = self._request_state(spec, messages)
 
         for iteration in range(spec.max_iterations):
             # A resumed iteration must not inherit a previous iteration's
@@ -397,7 +458,14 @@ class AgentRunner:
                 had_injections = True
             context = AgentHookContext(iteration=iteration, messages=messages, session_key=spec.session_key)
             await hook.before_iteration(context)
-            response, raw_usage = await self._request_model(spec, messages, hook, context)
+            # H plus what was added since; the request just sent becomes the
+            # new H (nanobot runner.py:495-513).
+            request_message_count = len(messages)
+            request_messages = state.compaction.request_messages(messages)
+            response, raw_usage = await self._request_model(spec, state, request_messages, hook, context)
+            assert state.messages is not None
+            messages_for_model = state.messages
+            self.context_governor.accept_request(state, messages_for_model, raw_boundary=request_message_count)
             context.response = response
             context.tool_calls = list(response.tool_calls)
             # Reasoning out, inline <think> stripped (nanobot runner.py:516-531).
@@ -440,13 +508,8 @@ class AgentRunner:
                     )
                     results.append(raw)
                     new_events.append(event)
-                    content = normalize_tool_result(
-                        call.name,
-                        call.id,
-                        "" if raw is None else str(raw),
-                        workspace=spec.workspace,
-                        max_chars=spec.max_tool_result_chars,
-                        bucket=spec.session_key or "default",
+                    content = self.context_governor.normalize_tool_result(
+                        state.config, call.id, call.name, "" if raw is None else str(raw)
                     )
                     tool_message = build_tool_message(call.id, call.name, content)
                     messages.append(tool_message)
@@ -505,9 +568,11 @@ class AgentRunner:
                 )
                 if hook.wants_streaming():
                     await hook.on_stream_end(context, resuming=False)
+                # The request just sent plus the prompt (nanobot runner.py:1169).
                 response = await self._request(
                     spec,
-                    messages + [{"role": "user", "content": FINALIZATION_RETRY_PROMPT}],
+                    state,
+                    messages_for_model + [{"role": "user", "content": FINALIZATION_RETRY_PROMPT}],
                     with_tools=False,
                 )
                 usage = _add_usage(usage, response.usage)
@@ -606,7 +671,7 @@ class AgentRunner:
         else:
             # Out of iterations: ask for a summary with tools off, else a fixed message.
             stop_reason = "max_iterations"
-            final_content, finalize_usage = await self._finalize_after_max_iterations(spec, hook, messages)
+            final_content, finalize_usage = await self._finalize_after_max_iterations(spec, state, hook, messages)
             usage = _add_usage(usage, finalize_usage)
             messages.append(build_assistant_message(final_content))
 
@@ -619,6 +684,7 @@ class AgentRunner:
             error,
             tool_events,
             had_injections=had_injections,
+            summary_checkpoint=state.compaction.summary_checkpoint,
         )
 
     def _retry_wait_callback(self, spec: AgentRunSpec) -> Callable[[str], Awaitable[None]] | None:
@@ -634,6 +700,7 @@ class AgentRunner:
     async def _request(
         self,
         spec: AgentRunSpec,
+        state: ModelRequestState,
         messages: list[dict[str, Any]],
         *,
         with_tools: bool,
@@ -641,14 +708,19 @@ class AgentRunner:
     ) -> LLMResponse:
         """One provider call through ``chat_stream_with_retry``, retried on transient errors.
 
-        ``stream`` holds the delta callbacks (only when the hook streams).
-        ``usage`` is always set: estimated if the provider sent none (on the
-        raw content, before <think> is stripped, since those tokens were
-        generated too). nanobot runner.py:1015 and :1266.
+        The messages first go through ``ContextGovernor.prepare_request``
+        (repaired, measured, compacted if needed; the exact request is kept in
+        ``state.messages``). ``stream`` holds the delta callbacks (only when
+        the hook streams). ``usage`` is always set: estimated if the provider
+        sent none (on the raw content, before <think> is stripped, since those
+        tokens were generated too), and becomes the next request's baseline.
+        nanobot runner.py:877, :1015, :1254 and :1321.
         """
-        tools = spec.tools.get_definitions() if with_tools else []
+        tools = spec.tools.get_definitions() if with_tools else None
+        _raise_if_cancelling()
+        prepared = await self.context_governor.prepare_request(state, messages, tool_definitions=tools)
         kwargs: dict[str, Any] = {
-            "messages": merge_adjacent_user_messages_for_model(messages),
+            "messages": prepared,
             "tools": tools or None,
             "model": spec.model,
             "max_tokens": spec.max_tokens,
@@ -665,6 +737,9 @@ class AgentRunner:
         )
         _raise_if_cancelling()
         response.usage = self._usage_or_estimate(spec.provider, response, kwargs)
+        # nanobot runner.py:1341 skips this after provider-native compaction or
+        # a fallback provider's answer (D10); NanoClaw has neither.
+        state.usage = response.usage
         return response
 
     @staticmethod
@@ -741,6 +816,7 @@ class AgentRunner:
     async def _request_model(
         self,
         spec: AgentRunSpec,
+        state: ModelRequestState,
         messages: list[dict[str, Any]],
         hook: AgentHook,
         context: AgentHookContext,
@@ -750,15 +826,16 @@ class AgentRunner:
         """Request with tools, recovering from tool calls that have no name.
 
         Mirrors nanobot runner.py _request_model: nameless calls are dropped.
-        If that leaves none, the request is retried once with a note; if the
-        retry is malformed too, one final request is made with tools off.
+        If that leaves none, the request is retried once with a note (added
+        to the request as sent, nanobot runner.py:1076); if the retry is
+        malformed too, one final request is made with tools off.
         """
         stream: dict[str, Any] | None = None
         close_native_reasoning: Callable[[], Awaitable[None]] | None = None
         if hook.wants_streaming():
             stream, close_native_reasoning = self._stream_callbacks(hook, context)
         try:
-            response = await self._request(spec, messages, with_tools=True, stream=stream)
+            response = await self._request(spec, state, messages, with_tools=True, stream=stream)
         finally:
             if close_native_reasoning is not None:
                 await close_native_reasoning()
@@ -767,20 +844,21 @@ class AgentRunner:
         if not all_dropped or original_finish not in ("tool_calls", "function_call"):
             return response, usage
 
-        retry_messages = messages + [build_malformed_tool_call_note(response.content)]
+        assert state.messages is not None
+        retry_messages = state.messages + [build_malformed_tool_call_note(response.content)]
         if not malformed_retry:
             logger.warning(
                 "Retrying LLM request after all {} malformed tool call(s) were dropped",
                 dropped,
             )
             retry, retry_usage = await self._request_model(
-                spec, retry_messages, hook, context, malformed_retry=True
+                spec, state, retry_messages, hook, context, malformed_retry=True
             )
             return retry, _add_usage(usage, retry_usage)
         logger.warning(
             "Malformed tool calls persisted after retry; falling back to no-tools request",
         )
-        fallback = await self._request(spec, retry_messages, with_tools=False)
+        fallback = await self._request(spec, state, retry_messages, with_tools=False)
         return fallback, _add_usage(usage, fallback.usage)
 
     @staticmethod
@@ -875,6 +953,7 @@ class AgentRunner:
     async def _finalize_after_max_iterations(
         self,
         spec: AgentRunSpec,
+        state: ModelRequestState,
         hook: AgentHook,
         messages: list[dict[str, Any]],
     ) -> tuple[str, LLMUsage | None]:
@@ -883,7 +962,9 @@ class AgentRunner:
             return self._max_iterations_fallback(spec), None
         response = await self._request(
             spec,
-            messages + [{"role": "user", "content": BUDGET_EXHAUSTED_FINALIZATION_PROMPT}],
+            state,
+            state.compaction.request_messages(messages)
+            + [{"role": "user", "content": BUDGET_EXHAUSTED_FINALIZATION_PROMPT}],
             with_tools=False,
         )
         if response.is_error or response.has_tool_calls:

@@ -175,14 +175,43 @@ The updated `MEMORY.md` appears in the system prompt of every later turn
 | `NANOCLAW_COMPACTION` | `nanobot` | `nanobot` (upstream behaviour) or `fixed` (bug 4 fix, being A/B tested); see "Compaction A/B" |
 | Token counting | tiktoken (`cl100k_base`) | Same as nanobot. The vocabulary is downloaded once to `~/.nanoclaw/cache/tiktoken`; without it, UTF-8 bytes are counted (overestimates, so compacts early) |
 
+### Since layer 15: context governance (mid-turn compaction)
+
+The check above now runs before **every** model request of a turn (also
+between tool calls, for retries, the final summary request, and inside
+subagents), as nanobot c4dac64 does (`nanoclaw/agent/context_governance.py`,
+`ContextGovernor.prepare_request`, called from `AgentRunner._request`):
+
+| Step | What |
+|---|---|
+| Model-facing copy | Remove `[Previous assistant message omitted.]` placeholders, tool calls without a name, tool results without a call (or answering one twice); add an error result for a call whose result is missing; re-apply the tool-result budget; merge adjacent user messages (not the summary continuation or hidden subagent reports). The saved transcript is not changed |
+| Measure | The provider's `context_tokens` when the previous request was exactly this one, or a prefix of it and the provider counted more than the estimate (nanobot D8); otherwise the estimate |
+| H and Δ | The last request as sent is the accepted history H; later requests send H plus the raw messages added since |
+| Compact | Summarize H (`Consolidator.summarize_transcript`); the request becomes system prompt + summary, a "Continue the active task..." message when Δ has no user message, then Δ. Event `ContextCompactionEvent(reason="context_pressure")` |
+| Still too big | The largest unread `read_file` results in Δ become a notice ("read a smaller range"), also in the saved turn (nanobot D9); otherwise `ContextWindowExceededError` |
+| Save | The summary is committed when the turn is saved, where H ended: before the turn's input (as before) or between two of the turn's messages. Temporary turns and subagents never journal or commit (`persist=False`) |
+
+The bug 4 switch works unchanged inside this: the summarizer is still
+`Consolidator.summarize_transcript`, so `nanobot` raw-dumps an archive request
+that doesn't fit and `fixed` summarizes it in parts, also mid-turn (test
+`test_the_bug_4_switch_applies_to_mid_turn_compaction`). A single turn whose
+accepted history is one user message plus tool steps can't be split at a user
+message, so `fixed` falls back to its keep-the-end raw dump there.
+
+Left out of nanobot's governance: provider conversation state and
+provider-native compaction (Responses API), running the preparation in a worker
+thread, and nanobot D10 (usage after a fallback provider or native compaction
+is not a baseline): NanoClaw has neither yet, so a response's usage is always
+the next baseline.
+
 ## Differences from nanobot (deliberate)
 
 | # | Difference | nanobot | NanoClaw | Why | Later |
 |---|---|---|---|---|---|
-| 1 | **When compaction is checked** | Before every model request, also in the middle of a turn (between tool calls) | Once, before the turn's first request | The mid-turn version rewrites the request while the runner is working; it is part of nanobot's larger context governance (token budgets, tool-result budgets). For conversations that grow over many turns the result is identical (checked). Only a single turn that overflows by itself is not handled: the request is sent and the model returns an error | Phase 2, "Context governance" |
+| 1 | **When compaction is checked** | Before every model request, also in the middle of a turn (between tool calls) | Once, before the turn's first request | The mid-turn version rewrites the request while the runner is working; it is part of nanobot's larger context governance (token budgets, tool-result budgets). For conversations that grow over many turns the result is identical (checked). Only a single turn that overflows by itself is not handled: the request is sent and the model returns an error | Phase 2, "Context governance" *(Layer 15: done. Checked before every model request, in the runner, as in nanobot; see "Since layer 15" below)* |
 | 2 | **Context window default** | 200,000 | 128,000, set with `NANOCLAW_CONTEXT_WINDOW` | Our default model `gpt-4o-mini` has 128,000; with 200,000 requests would fail before compaction started. Chosen with the user | — |
 | 3 | `/new` archiving | In the background; the reply comes first | Waits for it (one extra model call before the turn) | The CLI exits after the command, which would kill a background task | — |
-| 4 | Where the summary is stored when a turn compacts | Committed when the turn is saved | Same, but the compaction runs before the runner rather than inside it | Same saved result (checked) | — |
+| 4 | Where the summary is stored when a turn compacts | Committed when the turn is saved | Same, but the compaction runs before the runner rather than inside it | Same saved result (checked) | *(Layer 15: the compaction runs inside the runner, as in nanobot; the summary comes back as a `SessionSummaryCheckpoint` and `_save_turn` commits it at its transcript boundary, also between two of the turn's messages)* |
 | 5 | Dream's tools | `read_file`, `edit_file`, `write_file`, `apply_patch`; may also write under `skills/` | `read_file`, `edit_file`, `write_file`; only `MEMORY.md`, `USER.md`, `SOUL.md`. Error text names the allowed files | No `apply_patch` (layer 3); skills arrive in layer 7. General path restriction is layer 9; here a small wrapper (`_PathGuard`) does the check | Layer 7 (skills), layer 9. *(Layer 9: general restriction added for the normal tools (opt-in); Dream keeps its own guard, as in nanobot.)* *(Layer 7: `skills/` writes, built-in skill reads and nanobot's exact error text added; only `apply_patch` still differs)* |
 | 6 | Dream's instructions | Include a section on creating skills | Same text without the skills section and table row | Skills arrive in layer 7 | Layer 7 *(done: the full nanobot text is used)* |
 | 7 | "No memory changes" in Dream's report | Read from a git diff of the memory files | Compares the three files before and after | No git store (see below) | — |
@@ -193,7 +222,7 @@ The updated `MEMORY.md` appears in the system prompt of every later turn
 
 | nanobot feature | Where | What it does | Why not now | Later phase |
 |---|---|---|---|---|
-| Compaction in the middle of a turn | `agent/context_governance.py` `_compact_request_history`, `runner.py` | Summarizes while a long tool loop grows, keeping the newest steps | Needs the rest of context governance | **Phase 2: Context governance** |
+| Compaction in the middle of a turn | `agent/context_governance.py` `_compact_request_history`, `runner.py` | Summarizes while a long tool loop grows, keeping the newest steps | Needs the rest of context governance | **Phase 2: Context governance** *(layer 15: done)* |
 | Idle auto-compact | `agent/autocompact.py`, `loop.py` `_check_expired_sessions_if_due` | Summarizes a conversation after 15 idle minutes, in the background | Needs an always-running process; nanobot's own one-shot CLI doesn't run it either | **Phase 2: Message bus + channels** (long-running mode) |
 | Dream every 2 hours | `cli/gateway_runtime.py` cron job, `DreamConfig` | Runs Dream on a schedule | Same: needs the always-running gateway | **Phase 2: Cron + heartbeat** |
 | Git history of memory files | `utils/gitstore.py`, `/dream-log`, `/dream-restore` | Commits `SOUL.md`/`USER.md`/`MEMORY.md` after each Dream, so changes can be viewed and undone | An audit trail, not needed for memory to work; adds a `.git` folder to the workspace | **Phase 2: Memory history (git)** |

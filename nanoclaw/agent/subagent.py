@@ -15,9 +15,15 @@ Two ways to run one (the ``spawn`` tool's ``wait`` argument):
   turn, or runs it as a follow-up turn when the session is idle (since layer
   14; before, the report always waited for a follow-up turn).
 
+A child's requests go through the same context governance as the main
+agent's (since layer 15): when its transcript outgrows the context window it
+is compacted mid-run with the loop's ``Consolidator``, journaling nothing
+(nanobot subagent.py:826-860).
+
 Left out (see docs/notes/08-subagents.md): hooks that log each child tool
-call and update live status, compaction during a child's run, project-folder
-scopes, and background shell sessions shared by children.
+call and update live status, a saved transcript per child (so no summary
+marker is committed anywhere), project-folder scopes, and background shell
+sessions shared by children.
 """
 
 from __future__ import annotations
@@ -27,8 +33,9 @@ import dataclasses
 import time
 import uuid
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
@@ -40,6 +47,9 @@ from nanoclaw.bus.events import InboundMessage
 from nanoclaw.bus.queue import MessageBus
 from nanoclaw.utils.llm_runtime import LLMRuntime
 from nanoclaw.utils.templates import render_template
+
+if TYPE_CHECKING:
+    from nanoclaw.agent.memory import Consolidator
 
 # nanobot config AgentDefaults.max_concurrent_subagents.
 DEFAULT_MAX_CONCURRENT_SUBAGENTS = 4
@@ -147,8 +157,13 @@ class SubagentManager:
         max_concurrent_subagents: int = DEFAULT_MAX_CONCURRENT_SUBAGENTS,
         restrict_to_workspace: bool = False,
         bus: MessageBus | None = None,
+        consolidator: Consolidator | None = None,
     ) -> None:
         self.workspace = workspace
+        # Summarizes a child's history when it outgrows the context window
+        # (nanobot requires one, subagent.py:223). Without it, children are
+        # never compacted. The agent loop sets its own.
+        self.consolidator = consolidator
         # Where reports go (nanobot ``SubagentManager.bus``); the agent loop
         # passes its own bus.
         self.bus = bus if bus is not None else MessageBus()
@@ -318,6 +333,7 @@ class SubagentManager:
                         # Out of iterations: no extra summary request, just this message.
                         max_iterations_message=ITERATION_LIMIT_MESSAGE,
                         finalize_on_max_iterations=False,
+                        **self._governance(task_id, tools, runtime),
                     )
                 )
             finally:
@@ -351,6 +367,25 @@ class SubagentManager:
         if announce:
             await self._announce_result(task_id, label, task, final_result, channel, session_key, status, chat_id)
         return final_result
+
+    def _governance(self, task_id: str, tools: ToolRegistry, runtime: LLMRuntime) -> dict[str, Any]:
+        """Context-governance settings for a child's run (nanobot subagent.py:826-860).
+
+        The summary journals nothing (``persist=False``) and is logged under
+        the child's own key, ``subagent:<task id>``.
+        """
+        if self.consolidator is None:
+            return {}
+        return {
+            "context_window_tokens": runtime.context_window_tokens,
+            "consolidate_history": partial(
+                self.consolidator.summarize_transcript,
+                runtime=runtime,
+                session_key=f"subagent:{task_id}",
+                tools=tools.get_definitions(),
+                persist=False,
+            ),
+        }
 
     def _last_progress_text(self, run_messages: list[dict[str, Any]]) -> str | None:
         """The last text the child wrote alongside tool calls, cut to the result limit.

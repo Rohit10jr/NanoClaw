@@ -9,6 +9,7 @@ saved transcript shows where the summary starts) and the summary text is kept in
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, TypedDict
 
@@ -19,6 +20,18 @@ SUMMARY_CONTINUATION_TEXT = "Continue the active task from the working-memory ch
 class SessionSummary(TypedDict):
     text: str
     last_active: str
+
+
+@dataclass(frozen=True, slots=True)
+class SessionSummaryCheckpoint:
+    """A replacement summary and the raw transcript index it starts at.
+
+    Produced by mid-turn compaction (``ContextGovernor``); the loop commits it
+    when the turn is saved. (nanobot session/summary.py:31)
+    """
+
+    summary: str
+    transcript_boundary: int
 
 
 def is_hidden_history_message(message: Mapping[str, Any]) -> bool:

@@ -21,7 +21,9 @@ Two ways in:
 
 Since layer 6 a turn also compacts the conversation when it no longer fits the
 model's context window, and the loop runs nanobot's ``/compact``, ``/new``
-(with archiving) and ``/dream`` commands.
+(with archiving) and ``/dream`` commands. Since layer 15 that check runs before
+every model request of the turn, inside the runner (context_governance.py);
+the loop passes the summarizer and commits the summary when it saves the turn.
 
 Since layer 8 the main agent has the ``spawn`` tool. A background subagent's
 report arrives on the bus (since layer 14): injected into a running turn of
@@ -44,7 +46,6 @@ import asyncio
 import copy
 import dataclasses
 import time
-import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -56,7 +57,10 @@ from typing import Any
 from loguru import logger
 
 from nanoclaw.agent.context import ContextBuilder
-from nanoclaw.agent.context_governance import merge_adjacent_user_messages_for_model
+from nanoclaw.agent.context_governance import (
+    CONTEXT_SAFETY_BUFFER,
+    ContextWindowExceededError,
+)
 from nanoclaw.agent.hook import AgentHook
 from nanoclaw.agent.memory import COMPACTION_NANOBOT, Consolidator, MemoryStore
 from nanoclaw.agent.messages import EMPTY_FINAL_RESPONSE_MESSAGE, is_blank
@@ -77,7 +81,7 @@ from nanoclaw.bus.events import InboundMessage, OutboundMessage
 from nanoclaw.bus.outbound_events import StreamDeltaEvent, StreamedResponseEvent, StreamEndEvent
 from nanoclaw.bus.queue import MessageBus
 from nanoclaw.command import CommandContext, CommandRouter, command_text, register_builtin_commands
-from nanoclaw.events import NO_EVENTS, AgentEvent, ContextCompactionEvent, EventSink
+from nanoclaw.events import NO_EVENTS, AgentEvent, EventSink
 from nanoclaw.providers import LLMProvider
 from nanoclaw.runtime_context import (
     RUNTIME_CONTEXT_HISTORY_META,
@@ -96,10 +100,13 @@ from nanoclaw.session.recovery import (
     restore_pending_interruption,
     restore_runtime_checkpoint,
 )
-from nanoclaw.session.summary import HIDDEN_HISTORY_META, SessionSummary, session_summary_from_metadata
+from nanoclaw.session.summary import (
+    HIDDEN_HISTORY_META,
+    SessionSummaryCheckpoint,
+    session_summary_from_metadata,
+)
 from nanoclaw.utils.llm_runtime import LLMRuntime
 from nanoclaw.utils.progress_events import output_events
-from nanoclaw.utils.tokens import estimate_prompt_tokens
 
 DREAM_NO_INPUT_MESSAGE = "\n".join([
     "Dream has no conversation history to process yet.",
@@ -108,8 +115,6 @@ DREAM_NO_INPUT_MESSAGE = "\n".join([
     "Conversations only reach that file when they are compacted (`nanoclaw compact`, or",
     "automatically when they grow too long) or cleared with `nanoclaw ask --new`.",
 ])
-# Headroom for token-estimate drift (nanobot providers/base.py).
-CONTEXT_SAFETY_BUFFER = 1024
 # nanobot's default is 200,000; NanoClaw's default model, gpt-4o-mini, has 128,000.
 DEFAULT_CONTEXT_WINDOW_TOKENS = 128_000
 DEFAULT_SESSION_KEY = "cli:direct"
@@ -119,18 +124,8 @@ LAST_USAGE_KEY = "_last_usage"
 _SUBAGENT_TERMINAL_WAIT_SECONDS = 300.0
 
 
-class ContextWindowExceededError(RuntimeError):
-    """The request is still too big for the model after compacting."""
-
-    def __init__(self, *, session_key: str | None, estimated_tokens: int, input_budget: int, source: str) -> None:
-        self.session_key = session_key
-        self.estimated_tokens = estimated_tokens
-        self.input_budget = input_budget
-        self.source = source
-        super().__init__(
-            "Model input exceeds the local context budget "
-            f"for {session_key or 'default'}: {estimated_tokens}/{input_budget} via {source}"
-        )
+# ContextWindowExceededError now comes from the runner; callers keep importing it here.
+__all__ = ["AgentLoop", "ContextWindowExceededError", "TurnContext"]
 
 
 @dataclass
@@ -218,6 +213,7 @@ class AgentLoop:
         self.consolidator = Consolidator(
             self.memory, self.sessions, self.context.build_messages, self.tools.get_definitions, compaction=compaction
         )
+        self.subagents.consolidator = self.consolidator
         self.runner = AgentRunner()
         self.commands = CommandRouter()
         register_builtin_commands(self.commands)
@@ -750,7 +746,6 @@ class AgentLoop:
         msg, ephemeral = ctx.msg, ctx.ephemeral
         content = msg.content
         tools = ctx.tools if ctx.tools is not None else self.tools
-        events = ctx.events
 
         # Build: history first, then save the user's message before running,
         # so it survives a crash or an error mid-turn.
@@ -767,18 +762,20 @@ class AgentLoop:
         else:
             blocks = self._runtime_blocks(content, session, ephemeral=ephemeral)
             persisted_early = not ephemeral and self._persist_user_message_early(content, session, blocks)
-        messages = self.context.build_messages(
-            history, content, channel=msg.channel, runtime_context_blocks=blocks, session_summary=summary
-        )
-        # Temporary turns are checked too, but never journal or save a summary.
-        messages, checkpoint = await self._compact_if_needed(
-            session, messages, history, summary, content, msg.channel, blocks, tools,
-            persist=not ephemeral, events=events,
-        )
+        # [system, *history, new message], the new message never merged into
+        # the history (nanobot ``ContextBuilder.build_transcript``): system
+        # prompt + history are what the model has already accepted, so they
+        # are what compaction summarizes; the model copy merges adjacent users.
+        messages = [
+            *self.context.build_messages(history, None, channel=msg.channel, session_summary=summary),
+            self.context.build_current_message(content, runtime_context_blocks=blocks),
+        ]
 
         if ctx.delivery is not None:
             await ctx.delivery.running(started_at=time.time())
-        result = await self._run_agent_loop(ctx, messages, tools)
+        result = await self._run_agent_loop(
+            ctx, messages, tools, accepted_boundary=1 + len(history), active_summary=summary["text"] if summary else None
+        )
         if ctx.kind == "user" and is_blank(result.final_content):
             result = dataclasses.replace(result, final_content=EMPTY_FINAL_RESPONSE_MESSAGE)
         ctx.result = result
@@ -786,11 +783,10 @@ class AgentLoop:
         if ctx.delivery is not None:
             ctx.delivery.record_latency(ctx.latency_ms)
 
-        # Persist: the summary boundary (if compacted), then everything the
-        # runner added after the user's message.
+        # Persist everything the runner added after the user's message, with
+        # the summary marker where the compacted history ends (if compacted).
+        # Temporary turns never save a summary (nanobot loop.py:2393).
         if not ephemeral:
-            if checkpoint is not None:
-                session.commit_summary_checkpoint(checkpoint, insert_at=boundary)
             skip = len(messages) if persisted_early else len(messages) - 1
             # Token use of the last turn, for /status (nanobot ``_last_usage``).
             if result.usage is not None:
@@ -799,15 +795,27 @@ class AgentLoop:
             # subagent follow-up leaves it alone (nanobot loop.py:2385).
             if ctx.kind == "user":
                 record_iteration_limit(session.metadata, result.stop_reason)
-            self._save_turn(session, result.messages, skip)
+            self._save_turn(
+                session, result.messages, skip, summary_checkpoint=result.summary_checkpoint, input_boundary=boundary
+            )
             finish_turn(session)
             self.sessions.save(session)
 
     async def _run_agent_loop(
-        self, ctx: TurnContext, messages: list[dict[str, Any]], tools: ToolRegistry
+        self,
+        ctx: TurnContext,
+        messages: list[dict[str, Any]],
+        tools: ToolRegistry,
+        *,
+        accepted_boundary: int | None = None,
+        active_summary: str | None = None,
     ) -> AgentRunResult:
-        """Run the runner with the turn's hooks, checkpoints and injections.
-        (nanobot loop.py:1051)"""
+        """Run the runner with the turn's hooks, checkpoints, injections and
+        context governance. (nanobot loop.py:1051)
+
+        ``accepted_boundary``: the system prompt and history at the start of
+        ``messages``, which compaction may replace with a summary.
+        """
         session = ctx.session
         assert session is not None
         ephemeral, pending_queue, events = ctx.ephemeral, ctx.pending_queue, ctx.events
@@ -913,6 +921,19 @@ class AgentLoop:
                     checkpoint_callback=_checkpoint,
                     injection_callback=_drain_pending,
                     terminal_injection_callback=_wait_for_pending,
+                    # Checked before every model request (nanobot loop.py:1335-1361).
+                    # Temporary turns are checked too, but never journal.
+                    context_window_tokens=self.context_window_tokens,
+                    consolidate_history=partial(
+                        self.consolidator.summarize_transcript,
+                        runtime=self.runtime,
+                        session_key=session.key,
+                        tools=tools.get_definitions(),
+                        persist=not ephemeral,
+                    ),
+                    accepted_boundary=accepted_boundary,
+                    active_summary=active_summary,
+                    summary_transcript_builder=partial(self._summary_transcript, ctx.msg.channel),
                 )
             )
         finally:
@@ -990,82 +1011,22 @@ class AgentLoop:
         )
 
     def _input_budget(self) -> int:
-        """Tokens the request may use: window minus the reply and a safety margin."""
+        """Tokens a request may use: window minus the reply and a safety margin.
+        (nanobot ``ContextGovernor.input_budget``)"""
         if not self.context_window_tokens:
             return 0
         budget = self.context_window_tokens - self.max_tokens - CONTEXT_SAFETY_BUFFER
         return budget if budget > 0 else 0
 
-    async def _compact_if_needed(
-        self,
-        session: Session,
-        messages: list[dict[str, Any]],
-        history: list[dict[str, Any]],
-        summary: SessionSummary | None,
-        content: str,
-        channel: str,
-        blocks: list[RuntimeContextBlock],
-        tools: ToolRegistry,
-        *,
-        persist: bool = True,
-        events: EventSink = NO_EVENTS,
-    ) -> tuple[list[dict[str, Any]], str | None]:
-        """Summarize the history if the request doesn't fit the context window.
-
-        Returns the request to send and the new summary (``None`` if nothing
-        was compacted). Mirrors nanobot's compaction before a model request
-        (``ContextGovernor.prepare_request``) at the first request of a turn:
-        the history (everything before the new message) is replaced by a
-        summary in the system prompt, and the new message is kept. nanobot
-        checks before every request of a turn; NanoClaw only before the first
-        (see docs/notes/06-memory.md).
-
-        Publishes :class:`ContextCompactionEvent` (reason ``context_pressure``)
-        started, then succeeded, failed or cancelled (nanobot
-        context_governance.py:634-714).
-        """
-        if not self.context_window_tokens:
-            return messages, None
-        definitions = tools.get_definitions()
-        budget = self._input_budget()
-        measured, source = estimate_prompt_tokens(merge_adjacent_user_messages_for_model(messages), definitions)
-        if budget > 0 and measured < budget:
-            return messages, None
-
-        compaction_id = uuid.uuid4().hex
-        await events.emit(ContextCompactionEvent(compaction_id, "started", reason="context_pressure"))
-        try:
-            accepted = merge_adjacent_user_messages_for_model(messages[: 1 + len(history)])
-            new_summary = await self.consolidator.summarize_transcript(
-                accepted,
-                summary["text"] if summary else None,
-                runtime=self.runtime,
-                session_key=session.key,
-                tools=definitions,
-                persist=persist,
-            )
-            if not new_summary:
-                raise ContextWindowExceededError(
-                    session_key=session.key, estimated_tokens=measured, input_budget=budget, source=source
-                )
-            compacted = self.context.build_messages(
-                [],
-                content,
-                channel=channel,
-                runtime_context_blocks=blocks,
-                session_summary={"text": new_summary, "last_active": datetime.now().astimezone().isoformat()},
-            )
-        except (Exception, asyncio.CancelledError) as exc:
-            phase = "cancelled" if isinstance(exc, asyncio.CancelledError) else "failed"
-            await events.emit(ContextCompactionEvent(compaction_id, phase, reason="context_pressure"))
-            raise
-        await events.emit(ContextCompactionEvent(compaction_id, "succeeded", reason="context_pressure"))
-        measured, source = estimate_prompt_tokens(merge_adjacent_user_messages_for_model(compacted), definitions)
-        if budget <= 0 or measured >= budget:
-            raise ContextWindowExceededError(
-                session_key=session.key, estimated_tokens=measured, input_budget=budget, source=source
-            )
-        return compacted, new_summary
+    def _summary_transcript(self, channel: str | None, summary: str) -> list[dict[str, Any]]:
+        """The system prompt around a new summary, with no history or message.
+        (nanobot ``ContextCompactionState.from_transcript``, context_governance.py:162)"""
+        return self.context.build_messages(
+            [],
+            None,
+            channel=channel,
+            session_summary={"text": summary, "last_active": datetime.now().astimezone().isoformat()},
+        )
 
     # -- session commands -----------------------------------------------------
 
@@ -1216,14 +1177,49 @@ class AgentLoop:
         return True
 
     @staticmethod
-    def _save_turn(session: Session, messages: list[dict[str, Any]], skip: int) -> None:
+    def _validated_checkpoint_boundary(
+        checkpoint: SessionSummaryCheckpoint | None, *, skip: int, message_count: int, session_key: str
+    ) -> int | None:
+        """The checkpoint's boundary, if it lies in this turn. (nanobot loop.py:2470)"""
+        if checkpoint is None:
+            return None
+        boundary = checkpoint.transcript_boundary
+        if skip - 1 <= boundary <= message_count:
+            return boundary
+        logger.warning(
+            "Ignoring invalid summary boundary {} outside [{}, {}] for {}", boundary, skip - 1, message_count, session_key
+        )
+        return None
+
+    @staticmethod
+    def _save_turn(
+        session: Session,
+        messages: list[dict[str, Any]],
+        skip: int,
+        *,
+        summary_checkpoint: SessionSummaryCheckpoint | None = None,
+        input_boundary: int | None = None,
+    ) -> None:
         """Append the turn's new messages to the session.
 
         Skips empty assistant messages (they confuse later turns) and tool
         results whose call is unknown or already answered (providers reject
         those). Every message gets a timestamp; an injected user message keeps
         the time it arrived (nanobot loop.py:2492).
+
+        A ``summary_checkpoint`` (the turn compacted) is committed where its
+        transcript boundary falls: before the turn's input, or between two of
+        the turn's messages (nanobot loop.py:2526-2613). ``input_boundary`` is
+        the session length before the input was saved early; nanobot assumes
+        the last saved row is the input, which is wrong for a repeated
+        subagent report (docs/UPSTREAM_BUGS.md, bug 5).
         """
+        checkpoint_boundary = AgentLoop._validated_checkpoint_boundary(
+            summary_checkpoint, skip=skip, message_count=len(messages), session_key=session.key
+        )
+        if summary_checkpoint is not None and checkpoint_boundary == skip - 1:
+            insert_at = len(session.messages) if input_boundary is None else input_boundary
+            session.commit_summary_checkpoint(summary_checkpoint.summary, insert_at=insert_at)
         declared = {
             str(call["id"])
             for m in session.messages
@@ -1234,7 +1230,10 @@ class AgentLoop:
         fulfilled = {
             str(m["tool_call_id"]) for m in session.messages if m.get("role") == "tool" and m.get("tool_call_id")
         }
-        for message in messages[skip:]:
+        for message_index, message in enumerate(messages[skip:], start=skip):
+            # Before the message is filtered, so dropping one can't move the boundary.
+            if summary_checkpoint is not None and checkpoint_boundary == message_index:
+                session.commit_summary_checkpoint(summary_checkpoint.summary)
             entry = dict(message)
             meta = entry.pop("_meta", None)
             role, content = entry.get("role"), entry.get("content")
@@ -1265,4 +1264,6 @@ class AgentLoop:
                     for call in entry.get("tool_calls") or []
                     if isinstance(call, dict) and call.get("id")
                 )
+        if summary_checkpoint is not None and checkpoint_boundary == len(messages):
+            session.commit_summary_checkpoint(summary_checkpoint.summary)
         session.updated_at = datetime.now()

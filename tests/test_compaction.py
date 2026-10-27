@@ -151,12 +151,14 @@ async def test_large_overflow_gets_a_raw_checkpoint_like_nanobot(ws, tmp_path):
 
 async def test_crashed_turn_does_not_commit_its_summary(ws, tmp_path):
     window = await two_big_turns(ws, tmp_path)
-    loop, _ = make_loop(ws, tmp_path, "- s1", window=window)
+    loop, fake = make_loop(ws, tmp_path, "- s1", window=window)
 
-    async def boom(spec):
+    # Compaction now runs inside the runner, so the crash comes after it: in
+    # the turn's model request (the archive request uses chat_with_retry).
+    async def boom(**kwargs):
         raise RuntimeError("died")
 
-    loop.runner.run = boom
+    fake.chat_stream_with_retry = boom
     with pytest.raises(RuntimeError):
         await loop.process_direct(THIRD)
     session = SessionManager(ws, sessions_root=tmp_path / "sessions").get_or_create("cli:direct")
@@ -302,14 +304,17 @@ async def test_oversized_ephemeral_turn_is_refused_like_nanobot(ws, tmp_path):
 
 
 async def test_compaction_without_persist_journals_nothing(ws, tmp_path):
-    window = await two_big_turns(ws, tmp_path)
-    loop, _ = make_loop(ws, tmp_path, "- S", window=window)
-    session = loop.sessions.get_or_create("cli:direct")
-    history = session.get_history()
-    blocks = []
-    messages = loop.context.build_messages(history, THIRD, channel="cli")
-    compacted, summary = await loop._compact_if_needed(
-        session, messages, history, None, THIRD, "cli", blocks, loop.tools, persist=False
-    )
-    assert summary == "- S" and [m["role"] for m in compacted] == ["system", "user"]
+    # Was a direct call of the removed AgentLoop._compact_if_needed(persist=False).
+    # Now: a temporary turn (persist=False) whose tool result overflows mid-turn.
+    loop, fake = make_loop(ws, tmp_path, window=0)
+    system = request_size(loop, [], "")
+    loop.context_window_tokens = system + 6800 + 100 + 1024
+    echo = ToolCallRequest(id="e1", name="echo", arguments={"text": "r" * 3000})
+    fake.queue(LLMResponse(content=None, tool_calls=[echo], finish_reason="tool_calls"), "- S", "answer")
+    result = await loop.process_direct("go " + "q" * 1500, session_key="dream:x", ephemeral=True)
+    assert result.final_content == "answer"
+    archive_call, turn_call = fake.calls[1], fake.calls[2]
+    assert archive_call.messages[-1]["content"].startswith("Create a compact replacement checkpoint")
+    assert [m["role"] for m in turn_call.messages] == ["system", "user", "assistant", "tool"]
+    assert "- S" in turn_call.messages[0]["content"]
     assert loop.memory.read_unprocessed_history(0) == []
