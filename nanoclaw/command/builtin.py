@@ -22,6 +22,7 @@ from loguru import logger
 from nanoclaw import __version__
 from nanoclaw.bus.events import META_RENDER_AS, OutboundMessage
 from nanoclaw.command.router import CommandContext, CommandRouter, normalize_command_text
+from nanoclaw.session.summary import is_hidden_history_message
 
 if TYPE_CHECKING:
     from nanoclaw.agent.loop import AgentLoop
@@ -160,27 +161,15 @@ def _session(ctx: CommandContext) -> Session:
     return ctx.session or ctx.loop.sessions.get_or_create(ctx.key)
 
 
-async def _cancel_session_work(loop: AgentLoop, key: str) -> int:
-    """Cancel the session's running turn and subagents; returns how many.
-
-    nanobot calls ``loop._cancel_active_tasks`` (loop.py), which cancels both.
-    NanoClaw's loop gets that as ``cancel_active_tasks`` later in layer 14;
-    until then only the subagents can be cancelled.
-    """
-    cancel = getattr(loop, "cancel_active_tasks", None)
-    if cancel is not None:
-        return int(await cancel(key))
-    return await loop.subagents.cancel_by_session(key)
-
-
 async def cmd_stop(ctx: CommandContext) -> OutboundMessage:
-    """Cancel the session's active turn and subagents. (nanobot builtin.py:215)"""
-    total = await _cancel_session_work(ctx.loop, ctx.key)
+    """Cancel the session's active turn and subagents. (nanobot builtin.py:215)
+
+    ``cancel_active_tasks`` is nanobot's ``loop._cancel_active_tasks``.
+    """
+    total = await ctx.loop.cancel_active_tasks(ctx.key)
     # Also drop messages waiting to be injected into the turn, so a stopped
-    # turn cannot deadlock on them (nanobot builtin.py:221). NanoClaw's loop
-    # has no pending queues until the session workers land.
-    pending_queues: dict[str, asyncio.Queue[Any]] | None = getattr(ctx.loop, "_pending_queues", None)
-    pending = pending_queues.pop(ctx.key, None) if pending_queues is not None else None
+    # turn cannot deadlock on them (nanobot builtin.py:221).
+    pending = ctx.loop._pending_queues.pop(ctx.key, None)
     if pending is not None:
         while not pending.empty():
             try:
@@ -235,13 +224,8 @@ def build_status_content(
 
 
 def _active_task_count(loop: AgentLoop, key: str) -> int:
-    """Running turns plus subagents for the session (nanobot builtin.py:295-298).
-
-    NanoClaw's loop tracks running turns (``_active_tasks``) once the session
-    workers land; until then only subagents count.
-    """
-    active: dict[str, list[asyncio.Task[Any]]] = getattr(loop, "_active_tasks", {})
-    count = sum(1 for task in active.get(key, []) if not task.done())
+    """The session's running worker plus its subagents (nanobot builtin.py:295-298)."""
+    count = sum(1 for task in loop._active_tasks.get(key, ()) if not task.done())
     with suppress(Exception):
         count += loop.subagents.get_running_count_by_session(key)
     return count
@@ -280,10 +264,12 @@ async def cmd_new(ctx: CommandContext) -> OutboundMessage:
     """Stop the session's work and start a fresh conversation. (nanobot builtin.py:315)
 
     nanobot archives the old messages in the background; NanoClaw's
-    ``new_session`` waits for the archive (agent/loop.py).
+    ``new_session`` waits for the archive (agent/loop.py). It takes the
+    session lock, unless the command runs on the session's worker, which
+    holds it already (``ctx.session`` is set there).
     """
-    await _cancel_session_work(ctx.loop, ctx.key)
-    await ctx.loop.new_session(ctx.key)
+    await ctx.loop.cancel_active_tasks(ctx.key)
+    await ctx.loop.new_session(ctx.key, lock_held=ctx.session is not None)
     return _reply(ctx, "New session started.")
 
 
@@ -291,10 +277,11 @@ async def cmd_compact(ctx: CommandContext) -> None:
     """Compact the session now, keeping the conversation. (nanobot builtin.py:351)
 
     The compaction events (started / succeeded / failed) go to ``ctx.events``;
-    there is no reply.
+    there is no reply. On the session's worker (``ctx.session`` set) the
+    session lock is already held.
     """
     try:
-        await ctx.loop.compact_session(ctx.key, events=ctx.events)
+        await ctx.loop.compact_session(ctx.key, events=ctx.events, lock_held=ctx.session is not None)
     except Exception:
         logger.exception("Manual context compaction failed for {}", ctx.key)
     return None
@@ -331,9 +318,13 @@ async def cmd_dream(ctx: CommandContext) -> OutboundMessage:
 
 
 def _format_history_message(msg: dict[str, Any]) -> str | None:
-    """One message for /history, or None to skip it. (nanobot builtin.py:843)"""
+    """One message for /history, or None to skip it. (nanobot builtin.py:843)
+
+    Hidden rows (a subagent report injected into a turn) are skipped, as
+    nanobot's display history does (session/history.py:59).
+    """
     role = msg.get("role")
-    if role not in ("user", "assistant"):
+    if role not in ("user", "assistant") or is_hidden_history_message(msg):
         return None
     content = msg.get("content") or ""
     if isinstance(content, list):

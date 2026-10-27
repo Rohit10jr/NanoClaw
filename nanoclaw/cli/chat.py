@@ -1,29 +1,48 @@
 """The interactive terminal chat (``nanoclaw chat``).
 
 Mirrors nanobot's classic terminal chat (``nanobot agent --classic``,
-nanobot/cli/agent.py:266-443). Slash commands go through the channel-independent
-router in nanoclaw/command/ (nanobot command/); their replies are printed here.
-One difference in shape: nanobot's chat talks to the agent over its message
-bus; NanoClaw calls the loop directly and watches the subagent result queue
-(layer 8).
+nanobot/cli/agent.py:283-443). Since layer 14 it talks to the agent over the
+message bus, as nanobot's does: ``AgentLoop.run`` runs as a task, every line
+typed is published as an :class:`InboundMessage` (channel ``cli``, asking
+for stream events), and a consumer task draws what comes back on the
+outbound queue: stream deltas and ends, progress lines, command replies and
+final answers. Slash commands are handled by the loop's router; a
+background subagent's report reaches the loop on the bus too.
 
-Since layer 13 replies stream: each turn gets a new StreamRenderer and a
-:class:`TurnOutput` that draws the turn's events (nanobot cli/agent.py:310-443).
+Two input modes:
+
+- ``type_ahead=False`` (piped input, tests): like nanobot, the next line is
+  read only after the reply to the previous one arrived. Output is drawn
+  live: spinner, then the streamed Markdown (layer 13's StreamRenderer).
+- ``type_ahead=True`` (a terminal): the prompt stays open while a turn
+  runs, so ``/stop`` cancels it (a priority command) and other text is
+  injected into the running turn. nanobot's classic chat waits for the
+  reply instead; its WebUI behaves like this. Output lands above the prompt
+  (``patch_stdout``), each streamed round printed when it ends.
+
+Command replies and answers that did not stream are printed whole; a
+streamed answer is not printed again (nanobot cli/agent.py:405-428). Ctrl+C
+or Ctrl+D at the prompt, or an exit word, ends the chat.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import itertools
 import sys
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
+from loguru import logger
 from rich.console import Console
 
-from nanoclaw.agent.loop import AgentLoop, ContextWindowExceededError
-from nanoclaw.agent.runner import AgentRunResult
-from nanoclaw.bus import META_RENDER_AS, InboundMessage, MessageBus, OutboundMessage
+from nanoclaw.agent.loop import AgentLoop
+from nanoclaw.agent.turn_delivery import META_WANTS_STREAM
+from nanoclaw.bus import META_RENDER_AS, InboundMessage, OutboundMessage
+from nanoclaw.bus.outbound_events import StreamedResponseEvent
+from nanoclaw.bus.runtime_events import TurnRunStatusChanged
 from nanoclaw.cli.stream import StreamRenderer
 from nanoclaw.cli.terminal import (
     BOT_NAME,
@@ -31,26 +50,26 @@ from nanoclaw.cli.terminal import (
     TurnOutput,
     is_exit_command,
     print_agent_response,
-    print_progress_line,
-    progress_event_text,
     restore_terminal,
     sanitize_surrogates,
 )
-from nanoclaw.command import CommandContext, CommandRouter, register_builtin_commands
+from nanoclaw.command import CommandRouter, register_builtin_commands
 from nanoclaw.command.builtin import _format_history_message as _format_history_message
 from nanoclaw.command.builtin import build_help_text as build_help_text
 from nanoclaw.command.builtin import build_status_content as build_status_content
 from nanoclaw.command.router import normalize_command_text as normalize_command_text
-from nanoclaw.events import AgentEvent, EventSink
 
 if TYPE_CHECKING:
     from nanoclaw.config import ChannelsConfig
 
 CHANNEL = "cli"
 ReadInput = Callable[[], Awaitable[str]]
-# Wraps output written while the prompt may be waiting (a background
-# subagent's follow-up turn), so it lands above the prompt.
+# Wraps output written while the prompt is waiting (piped mode: a background
+# subagent's reply arriving between lines), so it lands above the prompt.
 OutputAbovePrompt = Callable[[], AbstractAsyncContextManager[None]]
+# Inbound metadata naming which typed line a reply answers (NanoClaw's own;
+# replies copy their input's metadata, nanobot loop.py:2066).
+META_CLI_INPUT_ID = "_cli_input_id"
 
 # The slash commands live in nanoclaw/command/ (nanobot command/); these
 # module-level helpers use a router with the built-in commands.
@@ -75,8 +94,16 @@ async def _output_directly() -> AsyncIterator[None]:
     yield
 
 
+def split_session_key(session_key: str) -> tuple[str, str]:
+    """The chat's channel and chat id: ``cli`` and the part after the colon.
+    (nanobot cli/agent.py:291-294)"""
+    if ":" in session_key:
+        return CHANNEL, session_key.split(":", 1)[1]
+    return CHANNEL, session_key
+
+
 class Chat:
-    """One interactive chat session in the terminal."""
+    """One interactive chat session in the terminal, over the agent's bus."""
 
     def __init__(
         self,
@@ -88,19 +115,28 @@ class Chat:
         render_markdown: bool = True,
         output_above_prompt: OutputAbovePrompt = _output_directly,
         channels: ChannelsConfig | None = None,
+        type_ahead: bool = False,
     ) -> None:
         self.loop = loop
+        self.bus = loop.bus
         self.session_key = session_key
+        self.channel, self.chat_id = split_session_key(session_key)
         self.console = console
         self.read_input = read_input
         self.render_markdown = render_markdown
         self.output_above_prompt = output_above_prompt
         # sendProgress / sendToolHints / showReasoning (nanobot ``channels_config``).
         self.channels = channels
+        self.type_ahead = type_ahead
         self.router = CommandRouter()
         register_builtin_commands(self.router)
-        self._turn_lock = asyncio.Lock()
+        self._input_ids = itertools.count(1)
+        self._command_input_ids: set[int] = set()
+        self._output: TurnOutput | None = None
+        self._output_scope: AsyncExitStack | None = None
         self._renderer: StreamRenderer | None = None
+        self._at_prompt = False
+        self._reply_seen = asyncio.Event()
 
     # -- output -----------------------------------------------------------
 
@@ -109,38 +145,38 @@ class Chat:
             self.console, text, render_markdown=self.render_markdown, render_as_text=as_text, show_header=show_header
         )
 
-    def _new_turn_output(self) -> TurnOutput:
-        """A fresh renderer for each turn (nanobot cli/agent.py:391)."""
-        self._renderer = StreamRenderer(render_markdown=self.render_markdown, bot_name=BOT_NAME, console=self.console)
-        return TurnOutput(self._renderer, self.channels)
+    async def _start_output(self, *, above_prompt: bool) -> TurnOutput:
+        """A fresh renderer for a turn (nanobot cli/agent.py:391). Without type-ahead
+        it draws live; with it, rounds are printed whole above the open prompt."""
+        await self._end_output()
+        if above_prompt:
+            self._output_scope = AsyncExitStack()
+            await self._output_scope.enter_async_context(self.output_above_prompt())
+        self._renderer = StreamRenderer(
+            render_markdown=self.render_markdown, bot_name=BOT_NAME, console=self.console, live=not self.type_ahead
+        )
+        self._output = TurnOutput(self._renderer, self.channels)
+        return self._output
 
-    async def _streamed_turn(self, run: Callable[[EventSink], Awaitable[AgentRunResult]]) -> None:
-        """Run a turn with streaming output, then print the reply unless it streamed.
+    async def _end_output(self) -> None:
+        output, scope = self._output, self._output_scope
+        self._output = self._output_scope = None
+        if output is not None:
+            await output.renderer.close()
+        if scope is not None:
+            await scope.aclose()
 
-        nanobot cli/agent.py:405-428: when the answer was not streamed (or is
-        an error) the renderer is closed and the whole reply printed, without
-        the name line if the renderer already printed it.
-        """
-        output = self._new_turn_output()
-        renderer = output.renderer
-        try:
-            result = await run(output.events)
-        except ContextWindowExceededError as exc:
-            await renderer.close()
-            self._reply(f"Error: {exc}", as_text=True, show_header=not renderer.header_printed)
-            return
-        except BaseException:
-            await renderer.close()
-            raise
-        reply = result.final_content or ""
-        if reply and not output.answer_on_screen(result.stop_reason):
-            await renderer.close()
-            self._reply(reply, show_header=not renderer.header_printed)
-        elif not renderer.streamed:
-            await renderer.close()
+    @property
+    def busy(self) -> bool:
+        """Whether a turn's output is being drawn."""
+        return self._output is not None
+
+    def status_toolbar(self) -> str:
+        """Text under the open prompt (type-ahead mode)."""
+        return f"{BOT_NAME} is working… type /stop to cancel" if self.busy else ""
 
     def banner(self) -> None:
-        """nanobot agent.py:271 (with the model name)."""
+        """nanobot agent.py:288 (with the model name)."""
         model = self.loop.model or self.loop.provider.default_model
         self.console.print(
             f"{BOT_NAME} Interactive mode [bold blue]({model})[/bold blue] "
@@ -151,14 +187,20 @@ class Chat:
 
     async def run(self) -> None:
         self.banner()
-        watcher = asyncio.create_task(self._deliver_subagent_results())
+        unsubscribe = self.bus.subscribe(self._on_run_status, TurnRunStatusChanged)
+        bus_task = asyncio.create_task(self.loop.run())
+        outbound_task = asyncio.create_task(self._consume_outbound())
         try:
             while True:
                 try:
                     # Stop the spinner before the prompt (nanobot cli/agent.py:363).
-                    if self._renderer:
+                    if self._renderer and not self.type_ahead:
                         self._renderer.stop_for_input()
-                    user_input = sanitize_surrogates(await self.read_input())
+                    self._at_prompt = True
+                    try:
+                        user_input = sanitize_surrogates(await self.read_input())
+                    finally:
+                        self._at_prompt = False
                 except (KeyboardInterrupt, EOFError):
                     restore_terminal()
                     self.console.print("\nGoodbye!")
@@ -170,89 +212,127 @@ class Chat:
                     restore_terminal()
                     self.console.print("\nGoodbye!")
                     break
-                # Only registered command names are commands; other slash text
-                # (paths, unknown names) is chat (nanobot router.py:107-122).
-                if self.router.command_name(command) is not None:
-                    await self.handle_command(command)
-                    continue
-                await self.turn(user_input)
+                await self.send(user_input)
+                if not self.type_ahead:
+                    await self._wait_for_reply()
         finally:
-            watcher.cancel()
-            await asyncio.gather(watcher, return_exceptions=True)
-            await self.loop.close()
+            unsubscribe()
+            self.loop.stop()
+            bus_task.cancel()
+            await asyncio.gather(bus_task, return_exceptions=True)
+            await self.loop.aclose()
+            outbound_task.cancel()
+            await asyncio.gather(outbound_task, return_exceptions=True)
+            await self._end_output()
 
-    async def turn(self, content: str) -> None:
-        """One user message: the reply streams in, with progress lines while it works."""
-        async with self._turn_lock:
-            await self._streamed_turn(
-                lambda events: self.loop.process_direct(
-                    content, session_key=self.session_key, channel=CHANNEL, events=events, streaming=True
-                )
+    async def send(self, text: str) -> None:
+        """Publish one typed line on the bus (nanobot cli/agent.py:405-413).
+
+        Ordinary text starts a turn's output unless one is being drawn (then
+        the loop injects the text into that turn). Commands get no turn output:
+        their reply is printed on its own.
+        """
+        input_id = next(self._input_ids)
+        if self.router.command_name(text.strip()) is not None:
+            self._command_input_ids.add(input_id)
+        elif not (self.type_ahead and self.busy):
+            await self._start_output(above_prompt=False)
+        self._reply_seen.clear()
+        await self.bus.publish_inbound(
+            InboundMessage(
+                channel=self.channel,
+                sender_id="user",
+                chat_id=self.chat_id,
+                content=text,
+                metadata={META_WANTS_STREAM: True, META_CLI_INPUT_ID: input_id},
+                session_key_override=self.session_key,
+            )
+        )
+
+    async def _wait_for_reply(self) -> None:
+        """Wait for the reply, as nanobot's classic chat does (``turn_done``),
+        then for work the command started in the background (/dream, shown
+        with a spinner) and until everything on the outbound queue is drawn."""
+        await self._reply_seen.wait()
+        if self.loop._background_tasks:
+            with ThinkingSpinner(self.console):
+                await self.loop.wait_for_background_tasks()
+        await self.bus.outbound.join()
+
+    async def _on_run_status(self, event: TurnRunStatusChanged) -> None:
+        """A turn of this chat went idle: queue that behind its output, so the
+        consumer closes the turn's renderer in order (also after /stop)."""
+        if event.status == "idle" and event.context.session_key == self.session_key:
+            await self.bus.publish_outbound(
+                OutboundMessage(channel=self.channel, chat_id=self.chat_id, content="", event=event)
             )
 
-    async def _deliver_subagent_results(self) -> None:
-        """Background subagent results become follow-up turns that stream like
-        user turns, above the prompt if it's waiting (nanobot agent.py:296-350)."""
+    # -- drawing the outbound queue ---------------------------------------
+
+    async def _consume_outbound(self) -> None:
+        """(nanobot cli/agent.py:310-350)"""
         while True:
-            report = await self.loop.subagents.results.get()
-            async with self._turn_lock, self.output_above_prompt():
-                await self._streamed_turn(
-                    lambda events: self.loop.process_subagent_result(report, events=events, streaming=True)
-                )
-                if self._renderer:
-                    self._renderer.stop_for_input()
+            msg = await self.bus.consume_outbound()
+            try:
+                await self._show(msg)
+            except Exception:
+                logger.exception("Could not show outbound message")
+            finally:
+                self.bus.outbound.task_done()
 
-    # -- slash commands ---------------------------------------------------
+    async def _show(self, msg: OutboundMessage) -> None:
+        event = msg.event
+        if isinstance(event, TurnRunStatusChanged):
+            await self._end_output()
+            return
+        if event is not None and not isinstance(event, StreamedResponseEvent):
+            # Stream and progress events. A turn nobody typed for (a
+            # subagent report's follow-up) gets its output here.
+            output = self._output or await self._start_output(above_prompt=self._at_prompt)
+            await output.publish(event)
+            return
+        await self._show_reply(msg)
+        self._reply_seen.set()
 
-    async def handle_command(self, raw: str) -> None:
-        """Run a registered slash command through the router and print its
-        reply (nanobot loop.py: ``dispatch_priority`` for /stop and /status,
-        else ``dispatch``; router.py:124-147)."""
+    async def _show_reply(self, msg: OutboundMessage) -> None:
+        """A command reply or a turn's final answer. (nanobot cli/agent.py:322-347, 415-428)"""
+        as_text = msg.metadata.get(META_RENDER_AS) == "text"
+        output = self._output
+        if output is None or msg.metadata.get(META_CLI_INPUT_ID) in self._command_input_ids:
+            if msg.content:
+                scope = self.output_above_prompt() if self._at_prompt else contextlib.nullcontext()
+                async with _async_scope(scope):
+                    with output.renderer.pause() if output is not None else contextlib.nullcontext():
+                        self._reply(msg.content, as_text=as_text)
+            return
+        renderer = output.renderer
+        if isinstance(msg.event, StreamedResponseEvent):
+            # Already on screen, unless nothing reached the renderer.
+            if msg.content and not renderer.streamed:
+                await renderer.close()
+                self._reply(msg.content, as_text=as_text, show_header=not renderer.header_printed)
+        elif msg.content:
+            await renderer.close()
+            self._reply(msg.content, as_text=as_text, show_header=not renderer.header_printed)
+        elif not renderer.streamed:
+            await renderer.close()
 
-        async def show(event: AgentEvent) -> None:
-            # /compact's progress events (nanobot terminal.py:372).
-            if (text := progress_event_text(event)) is not None:
-                print_progress_line(self.console, text)
 
-        # The chat has no bus consumer; follow-up replies (/dream's result)
-        # are collected here and printed when the command's work is done.
-        followups = MessageBus()
-        msg = InboundMessage(
-            channel=CHANNEL, sender_id="user", chat_id="direct", content=raw, session_key_override=self.session_key
-        )
-        ctx = CommandContext(
-            msg=msg,
-            session=None,
-            key=self.session_key,
-            raw=raw,
-            loop=self.loop,
-            is_user_turn=True,
-            events=EventSink(show),
-            bus=followups,
-        )
-        if self.router.is_priority(raw):
-            result = await self.router.dispatch_priority(ctx)
-        else:
-            result = await self.router.dispatch(ctx)
-        if isinstance(result, OutboundMessage):
-            self._print_outbound(result)
-        elif isinstance(result, InboundMessage):
-            await self.turn(result.content)
-        if ctx.tasks:
-            # nanobot shows "Dreaming..." and later the result; the chat waits
-            # for it with a spinner, so the reply lands before the next prompt.
-            with ThinkingSpinner(self.console):
-                await asyncio.gather(*ctx.tasks, return_exceptions=True)
-        while followups.outbound_size:
-            self._print_outbound(await followups.consume_outbound())
-
-    def _print_outbound(self, msg: OutboundMessage) -> None:
-        self._reply(msg.content, as_text=msg.metadata.get(META_RENDER_AS) == "text")
+@asynccontextmanager
+async def _async_scope(scope: Any) -> AsyncIterator[None]:
+    """Enter a sync or async context manager."""
+    if hasattr(scope, "__aenter__"):
+        async with scope:
+            yield
+    else:
+        with scope:
+            yield
 
 
 def install_exit_signal_handlers(console: Console) -> None:
-    """Ctrl+C (or a termination signal) while the agent works ends the chat,
-    as in nanobot (agent.py:283). The interrupted message gets the
+    """Ctrl+C (or a termination signal) outside the prompt ends the chat, as
+    in nanobot (agent.py:296). An interrupted turn is saved like a cancelled
+    one only when the loop gets to close; otherwise its message gets the
     "interrupted" reply on the next turn (layer 5 recovery)."""
     import signal
 
@@ -267,4 +347,3 @@ def install_exit_signal_handlers(console: Console) -> None:
         signal.signal(signal.SIGHUP, _handle)
     if hasattr(signal, "SIGPIPE"):
         signal.signal(signal.SIGPIPE, signal.SIG_IGN)
-

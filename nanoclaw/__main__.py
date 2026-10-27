@@ -229,15 +229,23 @@ async def _chat(
     markdown: bool,
     config: Config | None = None,
 ) -> int:
-    """The interactive chat (nanobot ``agent`` in classic mode)."""
+    """The interactive chat (nanobot ``agent`` in classic mode, over the bus).
+
+    In a terminal the prompt stays open while a turn runs (``type_ahead``):
+    ``/stop`` cancels the turn, other text is injected into it. Piped input
+    is read a line at a time after each reply, as nanobot does.
+    """
     from nanoclaw.cli.chat import Chat, install_exit_signal_handlers
-    from nanoclaw.cli.terminal import PromptInput, make_console, prompt_suspended, stdin_is_interactive
+    from nanoclaw.cli.terminal import PromptInput, make_console, stdin_is_interactive
 
     console = make_console()
     config = config or _runtime_config()
     loop = _make_loop(provider, workspace, restrict=restrict, config=config)
-    if stdin_is_interactive():
-        read_input, output_above_prompt = PromptInput(), prompt_suspended
+    interactive = stdin_is_interactive()
+    prompt: PromptInput | None = None
+    if interactive:
+        prompt = PromptInput(raw_stdout=True)
+        read_input = prompt
     else:
         # Piped input (scripts, tests): plain lines, no prompt_toolkit.
         async def read_input() -> str:
@@ -246,7 +254,6 @@ async def _chat(
                 raise EOFError
             return line.rstrip("\n")
 
-        from nanoclaw.cli.chat import _output_directly as output_above_prompt
     install_exit_signal_handlers(console)
     chat = Chat(
         loop,
@@ -254,9 +261,11 @@ async def _chat(
         console=console,
         read_input=read_input,
         render_markdown=markdown,
-        output_above_prompt=output_above_prompt,
         channels=config.channels,
+        type_ahead=interactive,
     )
+    if prompt is not None:
+        prompt.bottom_toolbar = chat.status_toolbar
     await chat.run()
     return 0
 
