@@ -7,19 +7,25 @@ and model name differ.
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import secrets
 import string
+from contextlib import suppress
 from typing import Any
 
 from openai import APIStatusError, AsyncOpenAI
 
 from nanoclaw.providers.base import (
+    ContentDeltaCallback,
     LLMProvider,
     LLMResponse,
     LLMUsage,
+    ToolCallDeltaCallback,
     ToolCallRequest,
     enforce_role_alternation,
     parse_tool_arguments,
+    resolve_stream_idle_timeout_s,
     sanitize_messages,
     tool_arguments_json_for_replay,
 )
@@ -88,19 +94,65 @@ def _is_direct_openai(api_base: str | None) -> bool:
 
 
 def _extract_text(value: Any) -> str | None:
-    """Content is usually a string, but some gateways return a list of parts."""
+    """Content is usually a string, but some gateways return a list of parts.
+
+    Mistral-style ``{"type": "thinking"}`` parts are skipped: they belong in
+    the reasoning (nanobot openai_compat_provider.py:1328).
+    """
     if value is None or isinstance(value, str):
         return value
     if isinstance(value, list):
-        parts = [
-            item["text"]
-            for item in value
-            if isinstance(item, dict)
-            and item.get("type") != "thinking"
-            and isinstance(item.get("text"), str)
-        ]
+        parts: list[str] = []
+        for item in value:
+            if isinstance(item, dict):
+                if item.get("type") != "thinking" and isinstance(item.get("text"), str):
+                    parts.append(item["text"])
+            elif isinstance(item, str):
+                parts.append(item)
         return "".join(parts) or None
     return str(value)
+
+
+def _extract_thinking(value: Any) -> str | None:
+    """Text of Mistral's ``{"type": "thinking", "thinking": [...]}`` content parts.
+
+    (nanobot openai_compat_provider.py:1356)
+    """
+    if not isinstance(value, list):
+        return None
+    parts = [
+        text
+        for item in value
+        if isinstance(item, dict) and item.get("type") == "thinking"
+        if (text := _extract_text(item.get("thinking")))
+    ]
+    return "".join(parts) or None
+
+
+def _delta_reasoning(delta: dict[str, Any]) -> str | None:
+    """Reasoning text in one stream delta (nanobot openai_compat_provider.py:1627-1633)."""
+    return (
+        _extract_text(delta.get("reasoning_content"))
+        or _extract_text(delta.get("reasoning"))
+        or _extract_thinking(delta.get("content"))
+    )
+
+
+def _as_mapping(value: Any) -> dict[str, Any] | None:
+    """A dict, or an SDK model dumped to one (nanobot openai_compat_provider.py:1317)."""
+    if isinstance(value, dict):
+        return value
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        try:
+            # Gateways put lists where the SDK types expect strings (Mistral's
+            # content parts); dump them as sent, without pydantic warnings.
+            dumped = model_dump(warnings=False)
+        except TypeError:
+            dumped = model_dump()
+        if isinstance(dumped, dict):
+            return dumped
+    return None
 
 
 class OpenAICompatProvider(LLMProvider):
@@ -205,6 +257,190 @@ class OpenAICompatProvider(LLMProvider):
         except Exception as exc:
             return self._error_response(exc)
         return self.parse(raw.model_dump())
+
+    async def chat_stream(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        max_tokens: int = 4096,
+        temperature: float = 0.7,
+        tool_choice: str | dict[str, Any] | None = None,
+        on_content_delta: ContentDeltaCallback | None = None,
+        on_thinking_delta: ContentDeltaCallback | None = None,
+        on_tool_call_delta: ToolCallDeltaCallback | None = None,
+    ) -> LLMResponse:
+        """Native streaming (nanobot openai_compat_provider.py:1839).
+
+        Each chunk must arrive within the idle timeout
+        (``NANOCLAW_STREAM_IDLE_TIMEOUT_S``); the whole call has no wall-clock
+        limit. Errors come back as error responses, like :meth:`chat`.
+        """
+        idle_timeout_s = resolve_stream_idle_timeout_s()
+        stream: Any = None
+        try:
+            kwargs = self.build_kwargs(messages, tools, model, max_tokens, temperature, tool_choice)
+            kwargs["stream"] = True
+            kwargs["timeout"] = idle_timeout_s
+            kwargs["stream_options"] = {"include_usage": True}
+            stream = await self._get_client().chat.completions.create(**kwargs)
+            chunks: list[dict[str, Any]] = []
+            completed = False
+            stream_iter = stream.__aiter__()
+            while True:
+                try:
+                    raw_chunk = await asyncio.wait_for(stream_iter.__anext__(), timeout=idle_timeout_s)
+                except StopAsyncIteration:
+                    break
+                chunk = _as_mapping(raw_chunk)
+                if chunk is None:
+                    raise TypeError(f"Unsupported chat chunk type: {type(raw_chunk).__name__}")
+                chunks.append(chunk)
+                choices = chunk.get("choices") or []
+                if not choices:
+                    continue
+                choice = _as_mapping(choices[0]) or {}
+                completed |= bool(choice.get("finish_reason"))
+                delta = _as_mapping(choice.get("delta")) or {}
+                await self._emit_stream_deltas(delta, on_content_delta, on_thinking_delta, on_tool_call_delta)
+            if not completed:
+                # Retryable: _extract_error_metadata classifies it as "connection".
+                raise ConnectionError("Model stream ended before a finish reason was received")
+            return self._parse_chunks(chunks)
+        except asyncio.TimeoutError:
+            return LLMResponse(
+                content=f"Error calling LLM: stream stalled for more than {idle_timeout_s:g} seconds",
+                finish_reason="error",
+                error_kind="timeout",
+            )
+        except Exception as exc:
+            return self._error_response(exc)
+        finally:
+            # Release the connection even when the stream was abandoned midway
+            # (nanobot leaves this to garbage collection).
+            close = getattr(stream, "close", None)
+            if callable(close):
+                with suppress(Exception):
+                    result = close()
+                    if inspect.isawaitable(result):
+                        await result
+
+    @staticmethod
+    async def _emit_stream_deltas(
+        delta: dict[str, Any],
+        on_content_delta: ContentDeltaCallback | None,
+        on_thinking_delta: ContentDeltaCallback | None,
+        on_tool_call_delta: ToolCallDeltaCallback | None,
+    ) -> None:
+        """Pass one chunk's delta to the callbacks (nanobot openai_compat_provider.py:1906-1950)."""
+        if on_content_delta and (text := _extract_text(delta.get("content"))):
+            await on_content_delta(text)
+        if on_thinking_delta and (reasoning := _delta_reasoning(delta)):
+            await on_thinking_delta(reasoning)
+        if not on_tool_call_delta:
+            return
+        for idx, tool_delta in enumerate(delta.get("tool_calls") or []):
+            tool_delta = _as_mapping(tool_delta) or {}
+            fn = _as_mapping(tool_delta.get("function"))
+            index = tool_delta.get("index")
+            await on_tool_call_delta(
+                {
+                    "index": index if index is not None else idx,
+                    "call_id": str(tool_delta.get("id") or ""),
+                    "name": str(fn.get("name") or "") if fn is not None else "",
+                    "arguments_delta": str(fn.get("arguments") or "") if fn is not None else "",
+                }
+            )
+        function_call = _as_mapping(delta.get("function_call"))
+        if function_call:
+            await on_tool_call_delta(
+                {
+                    "index": 0,
+                    "call_id": "",
+                    "name": str(function_call.get("name") or ""),
+                    "arguments_delta": str(function_call.get("arguments") or ""),
+                }
+            )
+
+    @classmethod
+    def _parse_chunks(cls, chunks: list[Any]) -> LLMResponse:
+        """Assemble streamed chunks into the response :meth:`parse` would give.
+
+        Chunks may be dicts, SDK chunk objects or bare strings (text). Tool-call
+        argument fragments are joined per ``index``; the legacy
+        ``delta.function_call`` form is call 0. (nanobot openai_compat_provider.py:1556)
+        """
+        content_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        tool_buffers: dict[int, dict[str, str]] = {}
+        finish_reason = "stop"
+        usage: LLMUsage | None = None
+
+        def buffer(index: int) -> dict[str, str]:
+            return tool_buffers.setdefault(index, {"id": "", "name": "", "arguments": ""})
+
+        for raw_chunk in chunks:
+            if isinstance(raw_chunk, str):
+                content_parts.append(raw_chunk)
+                continue
+            chunk = _as_mapping(raw_chunk)
+            if chunk is None:
+                raise TypeError(f"Unsupported chat chunk type: {type(raw_chunk).__name__}")
+            choices = chunk.get("choices") or []
+            if not choices:
+                # The include_usage chunk, or a gateway's top-level text.
+                usage = cls._parse_usage(chunk.get("usage")) or usage
+                if text := _extract_text(chunk.get("content") or chunk.get("output_text")):
+                    content_parts.append(text)
+                continue
+            choice = _as_mapping(choices[0]) or {}
+            if choice.get("finish_reason"):
+                finish_reason = str(choice["finish_reason"])
+            delta = _as_mapping(choice.get("delta")) or {}
+            if text := _extract_text(delta.get("content")):
+                content_parts.append(text)
+            if reasoning := _delta_reasoning(delta):
+                reasoning_parts.append(reasoning)
+            for idx, raw_tc in enumerate(delta.get("tool_calls") or []):
+                tc = _as_mapping(raw_tc) or {}
+                buf = buffer(tc["index"] if tc.get("index") is not None else idx)
+                if tc.get("id"):
+                    buf["id"] = str(tc["id"])
+                fn = _as_mapping(tc.get("function"))
+                if fn is not None:
+                    if fn.get("name"):
+                        buf["name"] = str(fn["name"])
+                    if fn.get("arguments"):
+                        buf["arguments"] += str(fn["arguments"])
+            function_call = _as_mapping(delta.get("function_call"))
+            if function_call:
+                buf = buffer(0)
+                if function_call.get("name"):
+                    buf["name"] = str(function_call["name"])
+                if function_call.get("arguments"):
+                    buf["arguments"] += str(function_call["arguments"])
+            usage = cls._parse_usage(chunk.get("usage")) or usage
+
+        # Some providers (Zhipu/GLM) stream one ID for parallel calls; each
+        # tool result must answer a unique ID (nanobot :1660).
+        seen_ids: set[str] = set()
+        tool_calls: list[ToolCallRequest] = []
+        for buf in tool_buffers.values():
+            call_id = buf["id"]
+            if not call_id or call_id in seen_ids:
+                call_id = _short_tool_id()
+            seen_ids.add(call_id)
+            tool_calls.append(
+                ToolCallRequest(id=call_id, name=buf["name"], arguments=parse_tool_arguments(buf["arguments"]))
+            )
+
+        return LLMResponse(
+            content="".join(content_parts) or None,
+            tool_calls=tool_calls,
+            finish_reason=finish_reason,
+            usage=usage,
+            reasoning_content="".join(reasoning_parts) or None,
+        )
 
     @staticmethod
     def parse(data: dict[str, Any]) -> LLMResponse:
