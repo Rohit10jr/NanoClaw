@@ -31,6 +31,7 @@ recovery, governance) for later.
 | 13 | Hooks, events, streaming replies | done |
 | 14 | Message bus, session workers, `/stop`, injections | done |
 | 15 | Crash recovery, compaction before every model request | done |
+| 16 | Shell: background exec sessions, Windows PowerShell | done |
 
 Phase 1 (the core agent) is complete. Phase 2 builds the production backend
 (layers 11–25; progress in [`docs/PHASE2_PROGRESS.md`](docs/PHASE2_PROGRESS.md)).
@@ -148,6 +149,13 @@ export NANOCLAW_SSRF_WHITELIST=100.64.0.0/10          # private ranges you trust
 
 These are guards, not a sandbox: run the agent somewhere you don't mind it
 working.
+
+Shell commands, as in nanobot: a command still running after a second keeps
+running in the background (up to an hour by default) and the agent checks on
+it, sends it input or stops it. `/new`, `/stop` and leaving the chat stop the
+commands it started. On Windows commands run in PowerShell (or `cmd`). Limits
+and allowed commands go in the config file under `tools.exec` (`maxRuntime`,
+`idleTimeout`, `allowPatterns`, `denyPatterns`, `enable`, ...).
 
 The agent's personality and instructions live in editable Markdown files in
 the workspace (`~/.nanoclaw/workspace` by default, change with `-w`):
