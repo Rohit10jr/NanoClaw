@@ -164,6 +164,19 @@ async def test_tool_error_result_is_reported_with_hint():
     assert result.tools_used == []
 
 
+async def test_tool_exception_reaches_model_with_neutral_hint_once():
+    # nanobot 841d2b8 tests/agent/test_runner_errors.py test_runner_returns_tool_exception_to_model_for_recovery
+    from toy_tools import BoomTool
+
+    error_hint = "[Consider this result in the context of the user's goal and decide whether and how to proceed.]"
+    fake = FakeProvider([wants_tools(call("boom", {})), "ok"])
+    result = await run(fake, BoomTool())
+    content = result.messages[2]["content"]
+    assert content.startswith("Error: RuntimeError: kaboom")
+    assert content.count(error_hint) == 1
+    assert "Analyze the error above" not in content
+
+
 # --- malformed (nameless) tool calls -----------------------------------------
 
 

@@ -11,6 +11,8 @@ from typing import Any
 from urllib.parse import urljoin, urlparse
 
 import httpx
+from ddgs.exceptions import DDGSException
+from ddgs.exceptions import TimeoutException as DDGSTimeoutException
 
 from nanoclaw.agent.tools.base import Tool, ToolResult
 from nanoclaw.agent.tools.schema import object_schema
@@ -81,18 +83,16 @@ class WebFetchTool(Tool):
 
     @property
     def description(self) -> str:
-        return (
-            "Fetch a URL and extract readable content (HTML → markdown/text). "
-            "Output is capped at maxChars (default 50 000). "
-            "Works for most web pages and docs; may fail on login-walled or JS-heavy sites."
-        )
+        # nanobot web.py:1298
+        return "Fetch a URL as readable markdown/text. May fail on login-walled or JavaScript-heavy pages."
 
     @property
     def parameters(self) -> dict[str, Any]:
         return object_schema(
             url={"type": "string", "description": "URL to fetch"},
             extractMode={"type": "string", "enum": ["markdown", "text"], "default": "markdown"},
-            maxChars={"type": "integer", "minimum": 100},
+            maxChars={"type": "integer", "description": "Maximum output characters; defaults to 50000.",
+                      "minimum": 100},
             required=["url"],
         )
 
@@ -221,6 +221,33 @@ def _duckduckgo_search(query: str, n: int) -> list[dict[str, Any]]:
     return [{"title": r.get("title", ""), "url": r.get("href", ""), "content": r.get("body", "")} for r in raw]
 
 
+def _search_error(e: Exception) -> ToolResult:
+    """Say what is known about a failed search (nanobot web.py:1206-1223).
+
+    ddgs 9.16.1 raises ``DDGSException`` for an empty result too, and its
+    message cannot be trusted to name the cause, so the model is told that
+    no matching pages is *not* established, rather than "no results".
+    """
+    if isinstance(e, TimeoutError):  # our own deadline (asyncio.wait_for)
+        return ToolResult.error(
+            "Error: Web search timed out while waiting for ddgs. "
+            "No usable search result was obtained before the tool deadline; "
+            "matching-page availability is unknown."
+        )
+    if isinstance(e, DDGSTimeoutException):
+        return ToolResult.error(
+            "Error: Web search unavailable (ddgs reported a timeout). "
+            "No usable search result was obtained; matching-page availability is unknown."
+        )
+    if isinstance(e, DDGSException):
+        return ToolResult.error(
+            "Error: Web search unavailable (ddgs; cause unknown). "
+            "No usable search result was obtained. The search library did not expose "
+            "a reliable cause; this does not establish that no matching pages exist."
+        )
+    return ToolResult.error(f"Error: DuckDuckGo search failed ({e})")
+
+
 class WebSearchTool(Tool):
     """nanobot supports ~10 search providers; we use its default, DuckDuckGo."""
 
@@ -240,17 +267,19 @@ class WebSearchTool(Tool):
 
     @property
     def description(self) -> str:
-        return (
-            "Search the web. Returns titles, URLs, and snippets. "
-            "count defaults to 5 (max 10). "
-            "Use web_fetch to read a specific page in full."
-        )
+        # nanobot web.py:397
+        return "Search the web for titles, URLs, and snippets. Use web_fetch to read a specific page."
 
     @property
     def parameters(self) -> dict[str, Any]:
         return object_schema(
             query={"type": "string", "description": "Search query"},
-            count={"type": "integer", "description": "Results (1-10)", "minimum": 1, "maximum": 10},
+            count={
+                "type": "integer",
+                "description": "Maximum results; uses the configured default if omitted.",
+                "minimum": 1,
+                "maximum": 10,
+            },
             required=["query"],
         )
 
@@ -260,5 +289,5 @@ class WebSearchTool(Tool):
             # ddgs is synchronous; run it in a thread so the event loop stays free.
             items = await asyncio.wait_for(asyncio.to_thread(self._search_fn, query, n), timeout=self.timeout)
         except Exception as e:
-            return ToolResult.error(f"Error: DuckDuckGo search failed ({e})")
+            return _search_error(e)
         return _format_results(query, items, n)

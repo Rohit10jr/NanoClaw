@@ -7,12 +7,21 @@ from typing import Any
 
 from nanoclaw.agent.tools.base import Tool, ToolResult, is_tool_error
 
-# Appended to every tool error so the model treats it as feedback, not a dead end.
-RETRY_HINT = "\n\n[Analyze the error above and try a different approach.]"
+# Appended to every tool error so the model weighs it against the user's goal
+# instead of stopping. Neutral since nanobot 841d2b8: the old "try a different
+# approach" pushed the model into retrying even when that was wrong.
+# (nanobot registry.py:14 ``_ERROR_HINT``)
+RETRY_HINT = (
+    "\n\n[Consider this result in the context of the user's goal "
+    "and decide whether and how to proceed.]"
+)
 
 
 def with_retry_hint(text: str) -> ToolResult:
-    """Mark ``text`` as an error and append the hint exactly once."""
+    """Mark ``text`` as an error and append the hint exactly once.
+
+    (nanobot registry.py:20 ``with_tool_error_hint``)
+    """
     return ToolResult.error(text if text.endswith(RETRY_HINT) else text + RETRY_HINT)
 
 

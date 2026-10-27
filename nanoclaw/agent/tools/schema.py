@@ -8,6 +8,7 @@ the model reads them and corrects its call.
 
 from __future__ import annotations
 
+import json
 import math
 from typing import Any
 
@@ -50,6 +51,43 @@ def _resolve_type(t: Any) -> str | None:
     return t
 
 
+def _is_json_integer(value: object) -> bool:
+    """JSON counts ``3.0`` as an integer; Python decodes it as a float (nanobot base.py:31)."""
+    return not isinstance(value, bool) and (
+        isinstance(value, int) or (isinstance(value, float) and value.is_integer())
+    )
+
+
+def _json_values_equal(left: Any, right: Any) -> bool:
+    """JSON equality: unlike Python, ``True`` is not ``1`` (nanobot base.py:37)."""
+    if isinstance(left, bool) or isinstance(right, bool):
+        return left is right
+    if isinstance(left, list) and isinstance(right, list):
+        return len(left) == len(right) and all(_json_values_equal(a, b) for a, b in zip(left, right))
+    if isinstance(left, dict) and isinstance(right, dict):
+        return left.keys() == right.keys() and all(_json_values_equal(v, right[k]) for k, v in left.items())
+    return left == right
+
+
+def _match_type(val: Any, types: list[Any]) -> str | None:
+    """Pick the union member ``val`` already matches, without coercion (nanobot base.py:74)."""
+    for t in types:
+        if not isinstance(t, str) or t not in _JSON_TYPE_MAP:
+            continue
+        if t in ("integer", "number") and isinstance(val, bool):
+            continue
+        if t == "integer" and _is_json_integer(val):
+            return t
+        if isinstance(val, _JSON_TYPE_MAP[t]):
+            return t
+    return None
+
+
+def _union_members(raw_type: Any) -> list[Any]:
+    """Non-null members of a ``type`` list; a single type gives ``[]``."""
+    return [x for x in raw_type if x != "null"] if isinstance(raw_type, list) else []
+
+
 def _subpath(path: str, key: str) -> str:
     return f"{path}.{key}" if path else key
 
@@ -64,9 +102,20 @@ def validate_json_schema_value(val: Any, schema: dict[str, Any] | bool, path: st
     nullable = (isinstance(raw_type, list) and "null" in raw_type) or schema.get("nullable", False)
     t = _resolve_type(raw_type)
 
+    # nanobot base.py:107-112: "null" alone rejects everything else; a nullable None still meets enum.
+    if raw_type in ("null", ["null"]) and val is not None:
+        return [f"{label} should be null"]
     if nullable and val is None:
+        if "enum" in schema and val not in schema["enum"]:
+            return [f"{label} must be one of {schema['enum']}"]
         return []
-    if t == "integer" and (not isinstance(val, int) or isinstance(val, bool)):
+    # nanobot base.py:113-118: a multi-type union is checked as whichever member the value matches.
+    types = _union_members(raw_type)
+    if len(types) > 1:
+        t = _match_type(val, types)
+        if t is None:
+            return [f"{label} should match one of the types {types}"]
+    if t == "integer" and not _is_json_integer(val):
         return [f"{label} should be integer"]
     if t == "number" and (not isinstance(val, (int, float)) or isinstance(val, bool)):
         return [f"{label} should be number"]
@@ -76,7 +125,7 @@ def validate_json_schema_value(val: Any, schema: dict[str, Any] | bool, path: st
         return [f"{label} must be finite"]
 
     errors: list[str] = []
-    if "enum" in schema and val not in schema["enum"]:
+    if "enum" in schema and not any(_json_values_equal(val, item) for item in schema["enum"]):
         errors.append(f"{label} must be one of {schema['enum']}")
     if t in ("integer", "number"):
         if "minimum" in schema and val < schema["minimum"]:
@@ -147,14 +196,66 @@ def _cast_object(obj: Any, schema: dict[str, Any]) -> Any:
     return casted
 
 
+def _container_types(schema: dict[str, Any]) -> set[str]:
+    """Container types a schema allows, if it allows nothing but containers (and null).
+
+    Looks at ``type`` or a ``oneOf``/``anyOf`` of plain typed branches, without
+    choosing a branch; anything that could accept a string gives an empty set
+    (nanobot base.py:315).
+    """
+    options = [schema] if "type" in schema else schema.get("oneOf", schema.get("anyOf"))
+    if not isinstance(options, list) or not options:
+        return set()
+    types: set[str] = set()
+    for option in options:
+        if not isinstance(option, dict):
+            return set()
+        raw_type = option.get("type")
+        for member in raw_type if isinstance(raw_type, list) else [raw_type]:
+            if not isinstance(member, str) or member not in ("object", "array", "null"):
+                return set()
+            if member != "null":
+                types.add(member)
+    return types
+
+
+def _decode_json_container(val: Any, schema: dict[str, Any]) -> Any:
+    """Decode a JSON string only when it holds the container the schema expects (nanobot base.py:334).
+
+    Models sometimes send a nested object or array as a JSON string.
+    """
+    if not isinstance(val, str):
+        return val
+    stripped = val.strip()
+    expected = "object" if stripped.startswith("{") else "array"
+    if not stripped.startswith(("{", "[")) or expected not in _container_types(schema):
+        return val
+    try:
+        parsed = json.loads(stripped)
+    except ValueError:
+        return val
+    if isinstance(parsed, dict if expected == "object" else list):
+        return parsed
+    return val
+
+
 def _cast_value(val: Any, schema: dict[str, Any] | bool) -> Any:
+    """nanobot base.py:355 ``Tool._cast_value``."""
     if isinstance(schema, bool):
         return val
-    t = _resolve_type(schema.get("type"))
+    val = _decode_json_container(val, schema)
+    raw_type = schema.get("type")
+    t = _resolve_type(raw_type)
+    types = _union_members(raw_type)
+    if len(types) > 1:
+        # A union has no preferred type, so there is no safe conversion target.
+        t = _match_type(val, types)
+        if t is None:
+            return val
     if t == "boolean" and isinstance(val, bool):
         return val
-    if t == "integer" and isinstance(val, int) and not isinstance(val, bool):
-        return val
+    if t == "integer" and _is_json_integer(val):
+        return int(val) if isinstance(val, float) else val
     if t in _JSON_TYPE_MAP and t not in ("boolean", "integer", "array", "object"):
         if isinstance(val, _JSON_TYPE_MAP[t]):
             return val

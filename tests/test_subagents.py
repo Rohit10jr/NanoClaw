@@ -192,7 +192,7 @@ async def test_wait_true_child_error_is_a_tool_error(ws, tmp_path):
     await loop.process_direct("go")
     content = provider.main_calls[1].messages[-1]["content"]
     assert content.startswith("Sorry, I encountered an error calling the AI model.")
-    assert "[Analyze the error above and try a different approach.]" in content  # error results get the hint
+    assert "[Consider this result in the context of the user's goal and decide whether and how to proceed.]" in content  # error results get the hint
 
 
 async def test_subagent_system_prompt(ws, tmp_path):

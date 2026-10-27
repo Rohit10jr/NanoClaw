@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from nanoclaw.agent.tools import ToolRegistry, is_tool_error
@@ -137,3 +139,299 @@ async def test_registry_keeps_real_arguments_parameter(registry):
 
 async def test_registry_parses_json_string_params(registry):
     assert await registry.execute("count_tool", '{"n": 5}') == "n=5"
+
+
+# --- nanobot c4dac64 schema fixes ---------------------------------------------------------------
+
+
+def _tool(schema):
+    """A throwaway tool exposing ``schema`` (nanobot tests' ``CastTestTool``)."""
+
+    class _SchemaTool(Tool):
+        name = "sample"  # type: ignore[assignment]
+        description = "x"  # type: ignore[assignment]
+        parameters = schema  # type: ignore[assignment]
+
+        def __init__(self):
+            self.calls = []
+
+        async def execute(self, **kwargs):
+            self.calls.append(kwargs)
+            return "ok"
+
+    return _SchemaTool()
+
+
+# 9fe061a: JSON Schema counts 3.0 as an integer; Python decodes it as a float.
+@pytest.mark.parametrize("schema_type", ["integer", ["integer", "null"], ["integer", "string"]])
+def test_integer_schema_accepts_integral_json_numbers(schema_type):
+    assert validate_json_schema_value(3.0, {"type": schema_type}) == []
+
+
+async def test_registry_casts_integral_json_number_to_integer(registry):
+    assert await registry.execute("count_tool", {"n": 3.0}) == "n=3"
+
+
+@pytest.mark.parametrize("value", [1.5, True, float("inf"), float("nan")])
+def test_integer_schema_still_rejects_non_integral_numbers(value):
+    assert validate_json_schema_value(value, {"type": "integer"}, "n") == ["n should be integer"]
+
+
+# 23bf1b8: enum uses JSON equality, so True is not 1 (Python says it is).
+@pytest.mark.parametrize(
+    ("value", "allowed", "valid"),
+    [
+        (True, 1, False),
+        (False, 0, False),
+        (1, True, False),
+        (0, False, False),
+        ([True], [1], False),
+        ({"enabled": True}, {"enabled": 1}, False),
+        (1.0, 1, True),
+        (True, True, True),
+        ("x", "x", True),
+        ({"a": 1, "b": 2}, {"b": 2.0, "a": 1.0}, True),
+    ],
+)
+async def test_registry_enforces_json_enum_equality(value, allowed, valid):
+    tool = _tool({"type": "object", "properties": {"value": {"enum": [allowed]}}, "required": ["value"]})
+    reg = ToolRegistry()
+    reg.register(tool)
+
+    result = await reg.execute("sample", {"value": value})
+
+    if valid:
+        assert result == "ok"
+        assert tool.calls == [{"value": value}]
+    else:
+        assert "value must be one of" in result
+        assert tool.calls == []
+
+
+# 9ea3268 / e3fc2a7: type "null" rejects other values; a nullable None is still checked against enum.
+@pytest.mark.parametrize("raw_type", ["null", ["null"]])
+@pytest.mark.parametrize("value", ["", 0, False, [], {}])
+def test_null_only_schema_rejects_non_null_values(raw_type, value):
+    schema = {"type": raw_type}
+    assert validate_json_schema_value(value, schema, "value") == ["value should be null"]
+    assert validate_json_schema_value(None, schema) == []
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {"type": ["string", "null"], "enum": ["fast"]},
+        {"type": "string", "nullable": True, "enum": ["fast"]},
+        {"type": ["integer", "null"], "enum": [1]},
+    ],
+)
+def test_nullable_schema_still_enforces_enum(schema):
+    assert validate_json_schema_value(None, schema, "mode") == [f"mode must be one of {schema['enum']}"]
+    assert validate_json_schema_value(None, {**schema, "enum": [None]}) == []
+
+
+# 432421b: a multi-type union picks the member the value already matches; nothing is coerced.
+@pytest.mark.parametrize("types", [["array", "object"], ["object", "array"]])
+@pytest.mark.parametrize(("value", "expected"), [(["2"], [2]), ({"count": "2"}, {"count": 2})])
+def test_cast_type_union_recurses_into_matching_container(types, value, expected):
+    schema = {
+        "type": "object",
+        "properties": {"value": {
+            "type": types,
+            "properties": {"count": {"type": "integer", "minimum": 1}},
+            "items": {"type": "integer", "minimum": 1},
+        }},
+    }
+
+    result = cast_params({"value": value}, schema)
+
+    assert result == {"value": expected}
+    assert validate_params(result, schema) == []
+    invalid = {"count": 0} if isinstance(value, dict) else [0]
+    assert "must be >= 1" in "; ".join(validate_params({"value": invalid}, schema))
+
+
+@pytest.mark.parametrize("types", [["integer", "string"], ["string", "integer"]])
+@pytest.mark.parametrize(("value", "error"), [(0, "must be >= 1"), ("ab", "must be at least 3 chars")])
+def test_type_union_enforces_matching_type_constraints(types, value, error):
+    schema = {"type": "object", "properties": {"value": {"type": types, "minimum": 1, "minLength": 3}}}
+
+    result = cast_params({"value": value}, schema)
+
+    assert result["value"] is value
+    assert error in "; ".join(validate_params(result, schema))
+
+
+@pytest.mark.parametrize("types", [["integer", "string"], ["string", "integer"]])
+@pytest.mark.parametrize("value", [True, 1.5, None])
+def test_type_union_rejects_undeclared_types_without_coercion(types, value):
+    schema = {"type": "object", "properties": {"value": {"type": types}}}
+
+    result = cast_params({"value": value}, schema)
+
+    assert result["value"] is value
+    assert validate_params(result, schema) == [f"value should match one of the types {types}"]
+
+
+@pytest.mark.parametrize(
+    ("types", "value", "error"),
+    [
+        (["number", "boolean", "null"], True, None),
+        (["number", "boolean", "null"], 1.5, None),
+        (["number", "boolean", "null"], None, None),
+        (["string", "number"], float("inf"), "value must be finite"),
+        (["string", "number"], float("nan"), "value must be finite"),
+    ],
+)
+def test_type_union_preserves_numeric_boolean_and_null_values(types, value, error):
+    for order in (types, types[::-1]):
+        schema = {"type": "object", "properties": {"value": {"type": order}}}
+
+        result = cast_params({"value": value}, schema)
+
+        assert result["value"] is value
+        assert validate_params(result, schema) == ([error] if error else [])
+
+
+@pytest.mark.parametrize(("value", "expected"), [("42", 42), (None, None)])
+def test_nullable_integer_retains_safe_casts(value, expected):
+    schema = {"type": "object", "properties": {"value": {"type": ["integer", "null"]}}}
+
+    result = cast_params({"value": value}, schema)
+
+    assert result == {"value": expected}
+    assert validate_params(result, schema) == []
+
+
+@pytest.mark.parametrize("types", [["integer", "string"], ["string", "integer"]])
+@pytest.mark.parametrize("value", ["00123", "doc-A", 42])
+async def test_registry_preserves_type_union_arguments(types, value):
+    # nanobot tests/tools/test_mcp_tool.py test_registry_preserves_mcp_type_union_arguments
+    tool = _tool({"type": "object", "properties": {"id": {"type": types}}, "required": ["id"]})
+    reg = ToolRegistry()
+    reg.register(tool)
+
+    assert await reg.execute("sample", {"id": value}) == "ok"
+    assert tool.calls == [{"id": value}]
+    assert type(tool.calls[0]["id"]) is type(value)
+
+
+# 6b93043: a JSON string is decoded only where the schema can hold nothing but a container.
+_READ_NOTE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "target": {
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {"type": {"type": "string"}, "path": {"type": "string"}},
+                    "required": ["type", "path"],
+                },
+                {
+                    "type": "object",
+                    "properties": {"type": {"type": "string"}, "name": {"type": "string"}},
+                    "required": ["type", "name"],
+                },
+            ],
+        },
+        "format": {"type": "string"},
+    },
+    "required": ["target", "format"],
+}
+
+
+def test_prepare_call_decodes_json_string_for_nested_object_schema():
+    reg = ToolRegistry()
+    reg.register(_tool(_READ_NOTE_SCHEMA))
+
+    tool, params, error = reg.prepare_call(
+        "sample", {"target": '{"type":"path","path":"Projects/nanobot.md"}', "format": "content"}
+    )
+
+    assert tool is not None
+    assert error is None
+    assert params == {"target": {"type": "path", "path": "Projects/nanobot.md"}, "format": "content"}
+
+
+def test_prepare_call_preserves_json_like_text_for_string_schema():
+    reg = ToolRegistry()
+    reg.register(_tool({"type": "object", "properties": {"value": {"type": "string"}}, "required": ["value"]}))
+
+    _, params, error = reg.prepare_call("sample", {"value": '{"type":"path"}'})
+
+    assert error is None
+    assert params == {"value": '{"type":"path"}'}
+
+
+@pytest.mark.parametrize("union", ["oneOf", "anyOf"])
+@pytest.mark.parametrize(
+    "branches",
+    [
+        [{"type": "object"}, {"type": "string"}],
+        [{"type": "string"}, {"type": "object"}],
+        [{"type": "object"}, {}],
+        [{"type": "object"}, True],
+    ],
+)
+def test_nested_json_cast_preserves_unions_that_can_accept_strings(union, branches):
+    reg = ToolRegistry()
+    reg.register(_tool({"type": "object", "properties": {"value": {union: branches}}}))
+    original = {"value": '{"mode":"text"}'}
+
+    _, params, error = reg.prepare_call("sample", original)
+
+    assert error is None
+    assert params == original
+
+
+@pytest.mark.parametrize("encoded", [True, False])
+def test_nested_json_cast_does_not_select_the_first_object_branch(encoded):
+    reg = ToolRegistry()
+    reg.register(_tool({"type": "object", "properties": {"value": {"oneOf": [
+        {"type": "object", "properties": {"count": {"type": "string"}}},
+        {"type": "object", "properties": {"count": {"type": "integer"}}},
+    ]}}}))
+    value = {"count": 12}
+
+    _, params, error = reg.prepare_call("sample", {"value": json.dumps(value) if encoded else value})
+
+    assert error is None
+    assert params == {"value": value}
+
+
+@pytest.mark.parametrize(
+    ("schema", "value", "expected"),
+    [
+        ({"type": "object"}, '{"count":12}', {"count": 12}),
+        ({"type": "array"}, '[{"count":12}]', [{"count": 12}]),
+        ({"type": ["object", "null"]}, '{"count":12}', {"count": 12}),
+        ({"type": ["object", "array"]}, "[1,2]", [1, 2]),
+        ({"anyOf": [{"type": "object"}, {"type": "array"}]}, "[1,2]", [1, 2]),
+        ({"type": ["string", "object"]}, '{"count":12}', '{"count":12}'),
+        ({"type": ["object", "string"]}, '{"count":12}', '{"count":12}'),
+        ({"type": "object"}, "{count:12}", "{count:12}"),
+        ({"type": "object"}, "[1,2]", "[1,2]"),
+        ({"type": "array"}, '{"count":12}', '{"count":12}'),
+        ({"$ref": "#/$defs/options"}, '{"count":12}', '{"count":12}'),
+    ],
+)
+def test_nested_container_decoding_is_lossless_and_schema_directed(schema, value, expected):
+    reg = ToolRegistry()
+    reg.register(_tool({
+        "type": "object", "properties": {"value": schema}, "$defs": {"options": {"type": "object"}},
+    }))
+    original = {"value": value}
+    schemas_before = json.dumps(reg.get_definitions())
+    arguments_before = json.dumps(original)
+
+    _, params, _ = reg.prepare_call("sample", original)
+
+    assert params == {"value": expected}
+    assert json.dumps(original) == arguments_before
+    assert json.dumps(reg.get_definitions()) == schemas_before
+
+
+def test_decoded_json_container_is_then_cast():
+    # nanobot tests/agent/test_runner_tool_execution.py: '["1","2"]' for an integer array reaches the tool as [1, 2]
+    schema = {"type": "object", "properties": {"value": {"type": "array", "items": {"type": "integer"}}}}
+    assert cast_params({"value": '["1","2"]'}, schema) == {"value": [1, 2]}
