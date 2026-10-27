@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+
 from nanoclaw.agent.context_governance import merge_adjacent_user_messages_for_model
 from nanoclaw.agent.messages import (
     BUDGET_EXHAUSTED_FINALIZATION_PROMPT,
@@ -69,6 +71,9 @@ class AgentRunSpec:
     max_iterations_message: str | None = None
     # Progress reports while the run works (nanobot ``on_progress``); see ProgressCallback.
     on_progress: ProgressCallback | None = None
+    # "standard" or "persistent" (nanobot ``provider_retry_mode``); see
+    # LLMProvider.chat_with_retry.
+    provider_retry_mode: str = "standard"
 
 
 @dataclass
@@ -88,14 +93,12 @@ class AgentRunResult:
 
 
 def _add_usage(total: LLMUsage | None, new: LLMUsage | None) -> LLMUsage | None:
+    """Sum a turn's usage across requests. (nanobot runner.py:1364 ``_merge_usage``)"""
     if new is None:
         return total
     if total is None:
         return new
-    return LLMUsage(
-        input_tokens=total.input_tokens + new.input_tokens,
-        output_tokens=total.output_tokens + new.output_tokens,
-    )
+    return total + new
 
 
 class AgentRunner:
@@ -110,7 +113,7 @@ class AgentRunner:
         # Per-run throttle for repeated attempts at the same outside target.
         workspace_violation_counts: dict[str, int] = {}
 
-        for _iteration in range(spec.max_iterations):
+        for iteration in range(spec.max_iterations):
             response, request_usage = await self._request_model(spec, messages)
             usage = _add_usage(usage, request_usage)
 
@@ -143,13 +146,32 @@ class AgentRunner:
 
             # Tool calls that arrive with a cut-off or filtered reply may be
             # incomplete; they are dropped and the reply is treated as text.
+            if response.has_tool_calls:
+                logger.warning(
+                    "Ignoring tool calls under finish_reason='{}' for {}",
+                    response.finish_reason,
+                    spec.session_key or "default",
+                )
             content = response.content
 
             # 2. Empty reply: retry, then ask once more with tools off.
             if response.finish_reason not in _NO_RETRY_FINISH_REASONS and is_blank(content):
                 empty_retries += 1
                 if empty_retries < _MAX_EMPTY_RETRIES:
+                    logger.warning(
+                        "Empty response on turn {} for {} ({}/{}); retrying",
+                        iteration,
+                        spec.session_key or "default",
+                        empty_retries,
+                        _MAX_EMPTY_RETRIES,
+                    )
                     continue
+                logger.warning(
+                    "Empty response on turn {} for {} after {} retries; attempting finalization",
+                    iteration,
+                    spec.session_key or "default",
+                    empty_retries,
+                )
                 response = await self._request(
                     spec,
                     messages + [{"role": "user", "content": FINALIZATION_RETRY_PROMPT}],
@@ -207,18 +229,36 @@ class AgentRunner:
         *,
         with_tools: bool,
     ) -> LLMResponse:
-        """One provider call. Inline <think> blocks are removed from the answer."""
+        """One provider call, retried on transient errors.
+
+        Inline <think> blocks are removed from the answer, and ``usage`` is
+        always set: estimated if the provider sent none (before <think> is
+        stripped, since those tokens were generated too).
+        """
         tools = spec.tools.get_definitions() if with_tools else []
-        response = await spec.provider.safe_chat(
-            messages=merge_adjacent_user_messages_for_model(messages),
-            tools=tools or None,
-            model=spec.model,
-            max_tokens=spec.max_tokens,
-            temperature=spec.temperature,
-        )
+        kwargs: dict[str, Any] = {
+            "messages": merge_adjacent_user_messages_for_model(messages),
+            "tools": tools or None,
+            "model": spec.model,
+            "max_tokens": spec.max_tokens,
+            "temperature": spec.temperature,
+        }
+        response = await spec.provider.chat_with_retry(**kwargs, retry_mode=spec.provider_retry_mode)
+        response.usage = self._usage_or_estimate(spec.provider, response, kwargs)
         if response.content and not response.is_error:
             response.content = strip_think(response.content)
         return response
+
+    @staticmethod
+    def _usage_or_estimate(provider: LLMProvider, response: LLMResponse, kwargs: dict[str, Any]) -> LLMUsage:
+        """The request's usage; estimated if missing, empty for a failed request.
+
+        (nanobot runner.py:1297)
+        """
+        usage = response.usage
+        if response.is_error:
+            return usage if usage is not None and usage.total_tokens > 0 else LLMUsage.empty_request()
+        return provider.usage_for_call(response, kwargs) or LLMUsage.empty_request()
 
     async def _request_model(
         self,
@@ -235,34 +275,50 @@ class AgentRunner:
         """
         response = await self._request(spec, messages, with_tools=True)
         usage = response.usage
-        all_dropped, original_finish = self._drop_malformed_tool_calls(response)
+        dropped, all_dropped, original_finish = self._drop_malformed_tool_calls(response)
         if not all_dropped or original_finish not in ("tool_calls", "function_call"):
             return response, usage
 
         retry_messages = messages + [build_malformed_tool_call_note(response.content)]
         if not malformed_retry:
+            logger.warning(
+                "Retrying LLM request after all {} malformed tool call(s) were dropped",
+                dropped,
+            )
             retry, retry_usage = await self._request_model(spec, retry_messages, malformed_retry=True)
             return retry, _add_usage(usage, retry_usage)
+        logger.warning(
+            "Malformed tool calls persisted after retry; falling back to no-tools request",
+        )
         fallback = await self._request(spec, retry_messages, with_tools=False)
         return fallback, _add_usage(usage, fallback.usage)
 
     @staticmethod
-    def _drop_malformed_tool_calls(response: LLMResponse) -> tuple[bool, str]:
-        """Remove tool calls with an empty name. Returns (all_dropped, original_finish_reason).
+    def _drop_malformed_tool_calls(response: LLMResponse) -> tuple[int, bool, str]:
+        """Remove tool calls with an empty name.
+
+        Returns (dropped_count, all_dropped, original_finish_reason).
 
         A nameless call can't run, and if saved to history the API would reject
         every later request in the conversation. (nanobot runner.py:1068)
         """
         original_finish = response.finish_reason
         if not response.tool_calls:
-            return False, original_finish
+            return 0, False, original_finish
         valid = [tc for tc in response.tool_calls if tc.has_valid_name()]
         if len(valid) == len(response.tool_calls):
-            return False, original_finish
+            return 0, False, original_finish
+        dropped = len(response.tool_calls) - len(valid)
+        logger.warning(
+            "Dropped {} malformed tool call(s) with missing/non-string name "
+            "from LLM response (finish_reason={!r})",
+            dropped,
+            original_finish,
+        )
         response.tool_calls = valid
         if not valid:
             response.finish_reason = "stop"
-        return not valid, original_finish
+        return dropped, not valid, original_finish
 
     async def _execute_tool_call(
         self,
@@ -312,7 +368,16 @@ class AgentRunner:
             messages + [{"role": "user", "content": BUDGET_EXHAUSTED_FINALIZATION_PROMPT}],
             with_tools=False,
         )
-        if response.is_error or response.has_tool_calls or is_blank(response.content):
+        if response.is_error or response.has_tool_calls:
+            logger.warning(
+                "Budget-exhausted finalization returned finish_reason='{}' "
+                "with {} tool call(s) for {}; using fallback",
+                response.finish_reason,
+                len(response.tool_calls),
+                spec.session_key or "default",
+            )
+            return self._max_iterations_fallback(spec), response.usage
+        if is_blank(response.content):
             return self._max_iterations_fallback(spec), response.usage
         return response.content or "", response.usage
 

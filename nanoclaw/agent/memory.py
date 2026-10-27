@@ -25,6 +25,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+
 from nanoclaw.agent.messages import build_assistant_message, strip_think, truncate_text
 from nanoclaw.agent.tools import Tool, ToolRegistry, ToolResult
 from nanoclaw.agent.tools.filesystem import EditFileTool, ReadFileTool, WriteFileTool
@@ -73,6 +75,10 @@ class MemoryStore:
         self.user_file = workspace / "USER.md"
         self._cursor_file = self.memory_dir / ".cursor"
         self._dream_cursor_file = self.memory_dir / ".dream_cursor"
+        # Each warning below is logged once per store, not once per turn.
+        self._oversize_logged = False
+        self._corruption_logged = False
+        self._malformed_entry_logged = False
 
     @staticmethod
     def read_file(path: Path) -> str:
@@ -95,13 +101,28 @@ class MemoryStore:
         """Clean model leftovers (``<think>``) and cap the size."""
         limit = max_chars if max_chars is not None else _HISTORY_ENTRY_HARD_CAP
         content = strip_think(entry.rstrip())
-        return truncate_text(content, limit) if len(content) > limit else content
+        if len(content) > limit:
+            if not self._oversize_logged:
+                self._oversize_logged = True
+                logger.warning(
+                    "history entry exceeds {} chars ({}); truncating. "
+                    "Usually means a caller forgot its own cap; "
+                    "further occurrences suppressed.",
+                    limit,
+                    len(content),
+                )
+            content = truncate_text(content, limit)
+        return content
 
     def append_history(self, entry: str, *, max_chars: int | None = None, session_key: str | None = None) -> int:
         """Append an entry and return its cursor (1, 2, 3, ...)."""
-        return self._append_history_record(
-            self._normalize_history_entry(entry, max_chars=max_chars), session_key=session_key
-        )
+        content = self._normalize_history_entry(entry, max_chars=max_chars)
+        if entry.rstrip() and not content:
+            logger.debug(
+                "history entry stripped to empty (likely template leak); "
+                "persisting empty content to avoid re-polluting Dream input",
+            )
+        return self._append_history_record(content, session_key=session_key)
 
     def _append_history_record(self, content: str, *, session_key: str | None = None) -> int:
         cursor = self._next_cursor()
@@ -133,10 +154,35 @@ class MemoryStore:
         )
 
     def _iter_valid_entries(self) -> Iterator[tuple[dict[str, Any], int]]:
+        """Well-formed entries with their cursors; a corrupt entry is skipped (and logged once)."""
+        poisoned: Any = None
+        malformed_cursor: int | None = None
         for entry in self._read_entries():
-            cursor = self._valid_cursor(entry.get("cursor"))
-            if cursor is not None and self._valid_history_payload(entry):
-                yield entry, cursor
+            raw = entry.get("cursor")
+            if raw is None:
+                continue
+            cursor = self._valid_cursor(raw)
+            if cursor is None:
+                poisoned = raw
+                continue
+            if not self._valid_history_payload(entry):
+                malformed_cursor = cursor
+                continue
+            yield entry, cursor
+        if poisoned is not None and not self._corruption_logged:
+            self._corruption_logged = True
+            logger.warning(
+                "history.jsonl contains an invalid cursor ({!r}); dropping it. "
+                "Usually caused by an external writer; further occurrences suppressed.",
+                poisoned,
+            )
+        if malformed_cursor is not None and not self._malformed_entry_logged:
+            self._malformed_entry_logged = True
+            logger.warning(
+                "history.jsonl contains a malformed entry at cursor {}; dropping it. "
+                "Usually caused by an external writer; further occurrences suppressed.",
+                malformed_cursor,
+            )
 
     def _read_cursor_counter(self) -> int | None:
         with suppress(ValueError, OSError):
@@ -178,7 +224,14 @@ class MemoryStore:
             len(entries),
         )
         keep_from = min(len(entries) - self.max_history_entries, first_unprocessed)
-        self._write_entries(entries[keep_from:])
+        kept = entries[keep_from:]
+        if len(kept) > self.max_history_entries:
+            logger.warning(
+                "History compaction retained {} unprocessed entries beyond the configured limit of {}",
+                len(kept),
+                self.max_history_entries,
+            )
+        self._write_entries(kept)
 
     def _read_entries(self) -> list[dict[str, Any]]:
         entries: list[dict[str, Any]] = []
@@ -335,6 +388,9 @@ class MemoryStore:
         for part, chunk in enumerate(chunks, start=1):
             suffix = f" (part {part}/{len(chunks)})" if len(chunks) > 1 else ""
             self._append_history_record(f"[RAW] {len(messages)} messages{suffix}\n{chunk}", session_key=session_key)
+        logger.warning(
+            "Memory consolidation degraded: raw-archived {} messages in {} entries", len(messages), len(chunks)
+        )
         return self._raw_text(len(messages), formatted, limit, keep_end)
 
     def _build_raw_checkpoint(
@@ -507,7 +563,7 @@ class MemoryArchiver:
         prompt = render_template("agent/consolidator_archive.md", strip=True, archive_count=len(source_messages))
         request_messages = [*[dict(m) for m in history], {"role": "user", "content": prompt}]
         if input_token_budget is not None:
-            estimated, _ = estimate_prompt_tokens(request_messages, request_tools)
+            estimated, source = estimate_prompt_tokens(request_messages, request_tools)
             if input_token_budget <= 0 or estimated > input_token_budget:
                 if self._fixed and input_token_budget > 0:
                     return await self._archive_in_parts(
@@ -519,6 +575,13 @@ class MemoryArchiver:
                         persist=persist,
                         raw_fallback=raw_fallback,
                     )
+                logger.debug(
+                    "Memory archive input does not fit for {}: {}/{} via {}; using raw checkpoint",
+                    session_key,
+                    estimated,
+                    input_token_budget,
+                    source,
+                )
                 return raw_fallback()
 
         summary = await self._ask_for_summary(request_messages, runtime=runtime, request_tools=request_tools)
@@ -534,7 +597,8 @@ class MemoryArchiver:
         """One archive request (retried once if the model wants tools). ``None`` if it gave no usable summary."""
         response = None
         for attempt in range(2):
-            response = await runtime.provider.safe_chat(
+            # Retried like any model call, in standard mode (nanobot memory.py:902).
+            response = await runtime.provider.chat_with_retry(
                 messages=request_messages,
                 tools=request_tools or None,
                 model=runtime.model,
@@ -544,6 +608,9 @@ class MemoryArchiver:
             if response.should_execute_tools is not True or attempt == 1:
                 break
             # The model wanted tools: answer each call with a refusal and ask once more.
+            logger.info(
+                "Memory archive provider returned {} tool call(s); requesting checkpoint", len(response.tool_calls)
+            )
             request_messages = [
                 *request_messages,
                 build_assistant_message(
@@ -557,13 +624,25 @@ class MemoryArchiver:
                 ],
             ]
         assert response is not None
-        if response.finish_reason in {"error", "length"} or response.has_tool_calls:
+        # nanobot memory.py:964-982. A failed call arrives here as finish_reason
+        # "error" (safe_chat never raises), not as nanobot's "provider call failed".
+        if response.finish_reason in {"error", "length"}:
+            logger.warning(
+                "Memory archive provider did not complete ({}); using raw checkpoint", response.finish_reason
+            )
+            return None
+        if response.has_tool_calls:
+            logger.warning("Memory archive provider returned tool calls; using raw checkpoint")
             return None
         summary = response.content
         if not summary or not summary.strip():
+            logger.warning("Memory archive provider returned no summary; using raw checkpoint")
             return None
         summary = self.store._normalize_history_entry(summary)
-        return summary or None
+        if not summary:
+            logger.warning("Memory archive provider summary was not safe to replay; using raw checkpoint")
+            return None
+        return summary
 
     async def _archive_in_parts(
         self,
@@ -652,6 +731,7 @@ class MemoryArchiver:
         summary_meta = session_summary_from_metadata(session.metadata, fallback_last_active=session.updated_at)
         previous_summary = summary_meta["text"] if summary_meta else None
         if input_token_budget <= 0:
+            logger.debug("Memory archive has no safe input budget for {}; raw-dumping", session.key)
             return self._raw_checkpoint(
                 messages, session_key=session.key, previous_summary=previous_summary, max_tokens=runtime.max_tokens
             )
@@ -663,6 +743,7 @@ class MemoryArchiver:
             history = archive_history
         elif not archive_history or history[-len(archive_history):] != archive_history:
             # The stretch to archive doesn't fit in one request: dump it raw.
+            logger.debug("Memory archive cannot replay the full chunk for {}; raw-dumping", session.key)
             return self._raw_checkpoint(
                 messages, session_key=session.key, previous_summary=previous_summary, max_tokens=runtime.max_tokens
             )
@@ -773,4 +854,12 @@ class Consolidator:
             return None
         session.commit_summary_checkpoint(summary, insert_at=end, last_active=last_active)
         self.sessions.save(session)
+        logger.info(
+            "Idle-session compact for {}: archived={}, visible={}, retained={}, summary={}",
+            session_key,
+            len(to_archive),
+            len(session.get_history()),
+            len(session.messages),
+            bool(summary),
+        )
         return summary

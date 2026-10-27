@@ -24,12 +24,19 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+
 from nanoclaw.agent.context import ContextBuilder
 from nanoclaw.agent.context_governance import merge_adjacent_user_messages_for_model
 from nanoclaw.agent.memory import COMPACTION_NANOBOT, Consolidator, MemoryStore
 from nanoclaw.agent.messages import EMPTY_FINAL_RESPONSE_MESSAGE, is_blank
 from nanoclaw.agent.runner import AgentRunner, AgentRunResult, AgentRunSpec, ProgressCallback
-from nanoclaw.agent.subagent import SUBAGENT_RESULT_EVENT, SubagentManager, SubagentResult
+from nanoclaw.agent.subagent import (
+    DEFAULT_MAX_CONCURRENT_SUBAGENTS,
+    SUBAGENT_RESULT_EVENT,
+    SubagentManager,
+    SubagentResult,
+)
 from nanoclaw.agent.tools import ToolRegistry, build_default_tools
 from nanoclaw.agent.tools.context import RequestContext, bind_request_context, reset_request_context
 from nanoclaw.agent.tools.spawn import SpawnTool
@@ -89,15 +96,21 @@ class AgentLoop:
         model: str | None = None,
         tools: ToolRegistry | None = None,
         sessions: SessionManager | None = None,
-        max_iterations: int = 20,
+        # nanobot config max_tool_iterations (schema.py:180); phase 2 decision 7.
+        max_iterations: int = 200,
         max_tool_result_chars: int = 16_000,
+        max_concurrent_subagents: int = DEFAULT_MAX_CONCURRENT_SUBAGENTS,
         max_tokens: int = 4096,
         temperature: float = 0.7,
         context_window_tokens: int = DEFAULT_CONTEXT_WINDOW_TOKENS,
         restrict_to_workspace: bool = False,
         compaction: str = COMPACTION_NANOBOT,
+        provider_retry_mode: str = "standard",
     ) -> None:
         self.provider = provider
+        # For the main agent's model calls only; subagents and memory archiving
+        # retry in standard mode, as in nanobot (loop.py:367, :1346).
+        self.provider_retry_mode = provider_retry_mode
         self.restrict_to_workspace = restrict_to_workspace
         self.workspace = workspace
         self.model = model
@@ -112,6 +125,7 @@ class AgentLoop:
             workspace,
             max_tool_result_chars=max_tool_result_chars,
             max_iterations=max_iterations,
+            max_concurrent_subagents=max_concurrent_subagents,
             restrict_to_workspace=restrict_to_workspace,
         )
         if tools is None:
@@ -119,6 +133,7 @@ class AgentLoop:
             # Dream build their own sets without it.
             tools = build_default_tools(workspace, restrict_to_workspace=restrict_to_workspace)
             tools.register(SpawnTool(self.subagents))
+            logger.info("Registered {} tools: {}", len(tools.tool_names), tools.tool_names)
         self.tools = tools
         self.sessions = sessions if sessions is not None else SessionManager(workspace)
         self.consolidator = Consolidator(
@@ -213,6 +228,13 @@ class AgentLoop:
         # Children follow the loop's current iteration limit (nanobot
         # _sync_subagent_runtime_limits).
         self.subagents.max_iterations = self.max_iterations
+        if subagent is not None:
+            logger.info("Processing system message from {}", "subagent")
+        elif not ephemeral:
+            preview = content[:80] + "..." if len(content) > 80 else content
+            logger.info("Processing message from {}:{}: {}", channel, "user", preview)
+        else:
+            logger.info("Processing message from {}:{}: [content hidden]", channel, "user")
         async with self._get_session_lock(session_key):
             if ephemeral:
                 session = Session(key=session_key)
@@ -231,6 +253,7 @@ class AgentLoop:
             if subagent is not None:
                 # Saved as the agent's own record; it reaches the model as input.
                 if self._persist_subagent_followup(session, subagent):
+                    logger.debug("Subagent result persisted for session {}", session.key)
                     self.sessions.save(session)
                 persisted_early = True
             else:
@@ -270,10 +293,15 @@ class AgentLoop:
                         temperature=self.temperature,
                         session_key=session.key,
                         on_progress=on_progress,
+                        provider_retry_mode=self.provider_retry_mode,
                     )
                 )
             finally:
                 reset_request_context(token)
+            if result.stop_reason == "max_iterations":
+                logger.warning("Max iterations ({}) reached", self.max_iterations)
+            elif result.stop_reason == "error":
+                logger.error("LLM returned error: {}", (result.final_content or "")[:200])
 
             # Persist: the summary boundary (if compacted), then everything the
             # runner added after the user's message.
@@ -283,11 +311,7 @@ class AgentLoop:
                 skip = len(messages) if persisted_early else len(messages) - 1
                 # Token use of the last turn, for /status (nanobot ``_last_usage``).
                 if result.usage is not None:
-                    session.metadata[LAST_USAGE_KEY] = {
-                        "input_tokens": result.usage.input_tokens,
-                        "output_tokens": result.usage.output_tokens,
-                        "total_tokens": result.usage.total_tokens,
-                    }
+                    session.metadata[LAST_USAGE_KEY] = result.usage.to_dict()  # nanobot loop.py:2384
                 # Only user turns set or clear the iteration-limit flag; a
                 # subagent follow-up leaves it alone (nanobot loop.py:2385).
                 if subagent is None:
@@ -406,6 +430,7 @@ class AgentLoop:
         start = time.monotonic()
         result = self.memory.build_dream_prompt()
         if result is None:
+            logger.info("Dream: nothing to process")
             return DREAM_NO_INPUT_MESSAGE
         prompt, last_cursor = result
         # nanobot reads the change from its git store; NanoClaw compares the files.
@@ -419,13 +444,21 @@ class AgentLoop:
             if response.stop_reason == "completed":
                 self.memory.set_last_dream_cursor(last_cursor)
                 if [MemoryStore.read_file(f) for f in files] != before:
+                    logger.info("Dream completed, cursor advanced to {}", last_cursor)
                     return f"Dream completed in {elapsed:.1f}s."
+                logger.info("Dream completed with no memory changes; cursor advanced to {}", last_cursor)
                 return f"Dream completed in {elapsed:.1f}s; no memory changes."
+            logger.warning(
+                "Dream did not complete ({}); cursor remains at {}",
+                f"stop_reason: {response.stop_reason}",
+                self.memory.get_last_dream_cursor(),
+            )
             return (
                 f"Dream did not complete after {elapsed:.1f}s (stop_reason: {response.stop_reason}); "
                 "memory cursor was not advanced."
             )
         except Exception as exc:
+            logger.exception("Dream failed")
             return f"Dream failed after {time.monotonic() - start:.1f}s: {exc}"
         finally:
             self.memory.compact_history()
@@ -503,6 +536,11 @@ class AgentLoop:
             if role == "tool":
                 call_id = str(entry.get("tool_call_id") or "")
                 if not call_id or call_id not in declared or call_id in fulfilled:
+                    logger.warning(
+                        "Dropping invalid tool result {} from session {} during persistence",
+                        call_id or "(missing id)",
+                        session.key,
+                    )
                     continue
                 fulfilled.add(call_id)
             elif role == "user" and isinstance(meta, dict):

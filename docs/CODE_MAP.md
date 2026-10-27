@@ -596,6 +596,27 @@ section point at `c4dac64`, the phase 2 reference.
 | `normalize_command_text`, `command_name`, `invalid_command_text` (`nanoclaw/cli/chat.py`) | [`command/router.py:26-168`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/command/router.py#L26) | Same results; functions instead of a router class |
 | `requires_posix_shell`, `symlink_or_skip` (`tests/conftest.py`) | — | NanoClaw only: Windows test skips (`WINDOWS.md`) |
 
+## Layer 12 — Foundations
+
+Note: [`notes/12-foundations.md`](notes/12-foundations.md). Links point at nanobot `c4dac64`.
+
+| NanoClaw | nanobot (`c4dac64`) | How it compares |
+|---|---|---|
+| `nanoclaw/config/base.py` `Base` | [`config_base.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/config_base.py) | Same: camelCase aliases, snake_case accepted |
+| `nanoclaw/config/schema.py` `Config`, `AgentDefaults`, `ProviderConfig`, `ToolsConfig` | [`config/schema.py:167`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/config/schema.py#L167) | Subset with the same names and defaults (except workspace, model, window); unknown keys ignored |
+| `Config.resolve_provider` | [`config/schema.py:588`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/config/schema.py#L588) `_match_provider` | Simplified: named entry, model prefix, first configured |
+| `nanoclaw/config/loader.py` `load_config`, `save_config`, `resolve_config_env_vars`, `refresh_config_file` | [`config/loader.py:33-344`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/config/loader.py#L33) | Same file location rules and `${VAR}` references; refresh only adds missing settings |
+| `apply_env_overrides`, `load_runtime_config` | — | NanoClaw only: the phase 1 `NANOCLAW_*` variables override the file |
+| `nanoclaw/config/errors.py` | [`config/errors.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/config/errors.py) | Copied |
+| `nanoclaw/config/timezone.py` | [`config/timezone.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/config/timezone.py) | Same rules; no tzlocal |
+| `nanoclaw config path/show/init` (`__main__.py`) | `nanobot config`, `onboard` | Simplified |
+| `nanoclaw/cli/log_control.py` `set_nanoclaw_logs`, `configure_console_logging`; `--logs` | [`cli/log_control.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/cli/log_control.py), `cli/agent.py:67` | Same flag; logger disabled at import instead of per command |
+| Log calls in memory, session, subagent, tool results, web, runner, loop, violations, tokens, retries | the same lines in nanobot (listed in note 12's tasks) | Same level and text where NanoClaw has the code path |
+| `LLMResponse` error fields, `LLMProvider.chat_with_retry`, `_run_with_retry`, `is_transient_response`, `is_arrearage_response`, Retry-After helpers (`providers/base.py`) | [`providers/base.py:318, 738-900, 1299, 1441-1771`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/providers/base.py#L1299) | Same decisions and waits (15 SDK errors compared); no image retry or status events |
+| `OpenAICompatProvider._extract_error_metadata`, `_error_response`, `max_retries=0` | [`providers/openai_compat_provider.py:1684-1767`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/providers/openai_compat_provider.py#L1684) | Same metadata; NanoClaw's error text |
+| `LLMUsage` (`providers/base.py`) | [`llm_usage/types.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/llm_usage/types.py) | Same fields and sum rules; no timing fields |
+| `LLMProvider.usage_for_call`, runner `_usage_or_estimate` | [`providers/base.py:449`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/providers/base.py#L449), `agent/runner.py:1297` | Same estimate rules |
+
 [nb-pta]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/providers/base.py#L118
 [nb-tcr]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/providers/base.py#L72
 [nb-tcr-hvn]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/providers/base.py#L81

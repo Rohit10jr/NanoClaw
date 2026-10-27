@@ -18,6 +18,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+
 # SSRF is a hard security block at the tool boundary, but the agent turn
 # should recover conversationally instead of aborting the runtime.
 _SSRF_MARKERS: tuple[str, ...] = (
@@ -109,6 +111,11 @@ def repeated_workspace_violation_error(tool_name: str, arguments: Any, seen_coun
     seen_counts[signature] = count
     if count <= _MAX_REPEAT_WORKSPACE_VIOLATIONS:
         return None
+    logger.warning(
+        "Escalating repeated workspace bypass attempt {} (attempt {})",
+        signature[:160],
+        count,
+    )
     target = signature.split("violation:", 1)[1] if "violation:" in signature else signature
     return (
         "Error: refusing repeated workspace-bypass attempts.\n"
@@ -132,8 +139,16 @@ def classify_violation(
 ) -> str | None:
     """The text to return for a boundary error, or ``None`` if it isn't one."""
     if is_ssrf_violation(raw_text):
+        logger.warning(
+            "Tool {} blocked by SSRF guard; returning non-retryable tool error: {}",
+            tool_name,
+            raw_text.replace("\n", " ").strip()[:200],
+        )
         return _ssrf_soft_payload(raw_text)
     if _is_workspace_violation(raw_text):
         escalation = repeated_workspace_violation_error(tool_name, arguments, workspace_violation_counts)
-        return escalation if escalation is not None else soft_payload
+        if escalation is not None:
+            logger.warning("Tool {} hit workspace boundary repeatedly; escalating hint", tool_name)
+            return escalation
+        return soft_payload
     return None

@@ -1,0 +1,213 @@
+"""The ``config.json`` schema: a subset of nanobot ``config/schema.py``.
+
+Every field here has nanobot's JSON name, nesting and default, except where a
+comment says otherwise. nanobot's other sections (channels, gateway, api,
+modelPresets, mcpServers, ...) are not read: unknown keys are ignored, so a
+nanobot ``config.json`` loads unchanged.
+
+Layout (camelCase in JSON)::
+
+    {
+      "agents": {"defaults": {"workspace", "model", "provider", "maxTokens",
+                              "contextWindowTokens", "temperature",
+                              "maxToolIterations", "maxConcurrentSubagents",
+                              "maxToolResultChars", "providerRetryMode",
+                              "timezone", "timezoneMode",
+                              "compaction"  # NanoClaw only
+                              }},
+      "providers": {"<name>": {"apiKey", "apiBase"}, ...},
+      "tools": {"restrictToWorkspace", "ssrfWhitelist"}
+    }
+
+nanobot builds ``Config`` on pydantic-settings, so ``NANOBOT_AGENTS__DEFAULTS__MODEL``
+style variables override the file (schema.py:757). NanoClaw keeps its own
+``NANOCLAW_*`` variables instead (see ``nanoclaw/config/loader.py``).
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Literal, cast
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from pydantic import Field, field_validator, model_validator
+
+from nanoclaw.config.base import Base
+from nanoclaw.config.timezone import detect_system_timezone
+
+# nanobot's default is ~/.nanobot/workspace (config/home.py:27).
+DEFAULT_WORKSPACE = "~/.nanoclaw/workspace"
+# nanobot's default is "anthropic/claude-opus-4-5" (schema.py:172), which needs
+# nanobot's provider registry; NanoClaw talks to an OpenAI-compatible endpoint,
+# api.openai.com by default.
+DEFAULT_MODEL = "gpt-4o-mini"
+# nanobot's default is 200,000 (schema.py:177); NanoClaw's default model,
+# gpt-4o-mini, has 128,000 (layer 6, difference #2).
+DEFAULT_CONTEXT_WINDOW_TOKENS = 128_000
+# nanobot schema.py:180 (decision 7 of phase 2).
+DEFAULT_MAX_TOOL_ITERATIONS = 200
+
+# NanoClaw only: the compaction switch (docs/UPSTREAM_BUGS.md, bug 4). Kept in
+# sync with nanoclaw/agent/memory.py COMPACTION_MODES (not imported, so the
+# schema stays free of agent imports, like nanobot's).
+CompactionMode = Literal["nanobot", "fixed"]
+
+# OpenAI-compatible base URLs nanobot's provider registry fills in when a
+# provider entry has no apiBase (providers/registry.py ``default_api_base``).
+# Only a few common gateways; others need an explicit apiBase. ``openai`` and
+# ``custom`` without an apiBase mean api.openai.com, as in NanoClaw before.
+DEFAULT_API_BASES = {
+    "openrouter": "https://openrouter.ai/api/v1",  # registry.py:280
+    "deepseek": "https://api.deepseek.com",  # registry.py:643
+    "aihubmix": "https://aihubmix.com/v1",  # registry.py:396
+    "siliconflow": "https://api.siliconflow.cn/v1",  # registry.py:409
+    "huggingface": "https://router.huggingface.co/v1",  # registry.py:368
+}
+
+
+def _provider_key(name: str) -> str:
+    """``lm_studio``, ``lmStudio`` and ``lm-studio`` name the same provider."""
+    return name.replace("-", "").replace("_", "").lower()
+
+
+class AgentDefaults(Base):
+    """Default agent configuration (nanobot schema.py:167 ``AgentDefaults``, a subset)."""
+
+    workspace: str = DEFAULT_WORKSPACE
+    model: str = DEFAULT_MODEL
+    provider: str = "auto"  # a key of ``providers``, or "auto" (schema.py:173)
+    max_tokens: int = 8192
+    context_window_tokens: int = DEFAULT_CONTEXT_WINDOW_TOKENS
+    temperature: float = 0.1
+    max_tool_iterations: int = DEFAULT_MAX_TOOL_ITERATIONS
+    max_concurrent_subagents: int = Field(default=4, ge=1)
+    max_tool_result_chars: int = 16_000
+    # Read by provider retries (schema.py:183); stored here, used once retries land.
+    provider_retry_mode: Literal["standard", "persistent"] = "standard"
+    # Stored for the time block; NanoClaw's time block still uses the host clock.
+    timezone: str = "UTC"
+    timezone_mode: Literal["auto", "manual"] = "auto"
+    # NanoClaw only (not in nanobot): "nanobot" (default, like upstream) or
+    # "fixed" (docs/UPSTREAM_BUGS.md, bug 4). nanobot ignores the key.
+    compaction: CompactionMode = "nanobot"
+
+    @model_validator(mode="before")
+    @classmethod
+    def resolve_timezone(cls, value: object) -> object:
+        """Detect new defaults while preserving configured timezones (nanobot schema.py:211)."""
+        if not isinstance(value, dict):
+            return value
+        data = dict(cast(dict[str, object], value))
+        timezone_mode = data.get("timezoneMode", data.get("timezone_mode"))
+        if timezone_mode is None:
+            timezone_mode = "manual" if "timezone" in data else "auto"
+            data["timezoneMode"] = timezone_mode
+        if timezone_mode == "auto":
+            data["timezone"] = detect_system_timezone()
+        return data
+
+    @field_validator("timezone")
+    @classmethod
+    def validate_timezone(cls, value: str) -> str:
+        # nanobot schema.py:227. "UTC" is always accepted: Windows has no tz
+        # database unless the tzdata package is installed.
+        if value == "UTC":
+            return value
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError):
+            raise ValueError(f"unknown timezone {value!r}") from None
+        return value
+
+
+class AgentsConfig(Base):
+    """Agent configuration (nanobot schema.py:239)."""
+
+    defaults: AgentDefaults = Field(default_factory=AgentDefaults)
+
+
+class ProviderConfig(Base):
+    """One provider entry (nanobot schema.py:245 ``ProviderConfig``, the two
+    connection fields; extraHeaders, extraBody, ... are ignored)."""
+
+    api_key: str | None = Field(default=None, repr=False)
+    api_base: str | None = None
+
+    @property
+    def is_configured(self) -> bool:
+        return bool(self.api_key or self.api_base)
+
+
+def _default_providers() -> dict[str, ProviderConfig]:
+    # An empty "custom" entry (nanobot's "any OpenAI-compatible endpoint",
+    # schema.py:301) so ``nanoclaw config init`` writes something to fill in.
+    return {"custom": ProviderConfig()}
+
+
+class ToolsConfig(Base):
+    """Tool settings (nanobot schema.py:430 ``ToolsConfig``, a subset)."""
+
+    restrict_to_workspace: bool = False  # schema.py:442
+    ssrf_whitelist: list[str] = Field(default_factory=list)  # schema.py:460, CIDR ranges
+
+
+class Config(Base):
+    """Root configuration (nanobot schema.py:501, a subset)."""
+
+    agents: AgentsConfig = Field(default_factory=AgentsConfig)
+    # nanobot declares ~40 named providers plus extra keys for custom ones
+    # (schema.py:292). NanoClaw has one OpenAI-compatible provider, so any key
+    # is accepted and the active one is picked by ``resolve_provider``.
+    providers: dict[str, ProviderConfig] = Field(default_factory=_default_providers)
+    tools: ToolsConfig = Field(default_factory=ToolsConfig)
+
+    @property
+    def workspace_path(self) -> Path:
+        """Expanded workspace path (nanobot schema.py:584)."""
+        return Path(self.agents.defaults.workspace).expanduser()
+
+    def find_provider(self, name: str) -> tuple[str, ProviderConfig] | None:
+        """The entry whose key names ``name`` (ignoring case, ``-`` and ``_``)."""
+        wanted = _provider_key(name)
+        for key, entry in self.providers.items():
+            if _provider_key(key) == wanted:
+                return key, entry
+        return None
+
+    def resolve_provider(self) -> tuple[str | None, ProviderConfig | None]:
+        """Pick the provider entry NanoClaw uses. Returns ``(key, entry)``.
+
+        A simplified nanobot ``_match_provider`` (schema.py:588):
+
+        1. ``agents.defaults.provider`` names an entry: that entry (configured
+           or not, as nanobot).
+        2. ``"auto"``: the entry named by the model's prefix
+           (``openrouter/...``), if it has an apiKey or apiBase.
+        3. ``"auto"``: the first entry, in file order, with an apiKey or
+           apiBase. (nanobot uses its registry order, gateways first, and
+           keyword matching; NanoClaw has no registry.)
+        """
+        forced = self.agents.defaults.provider
+        if forced != "auto":
+            found = self.find_provider(forced)
+            return found if found else (None, None)
+        model = self.agents.defaults.model
+        if "/" in model:
+            found = self.find_provider(model.split("/", 1)[0])
+            if found and found[1].is_configured:
+                return found
+        for key, entry in self.providers.items():
+            if entry.is_configured:
+                return key, entry
+        return None, None
+
+    def get_api_key(self) -> str | None:
+        _, entry = self.resolve_provider()
+        return (entry.api_key or None) if entry else None
+
+    def get_api_base(self) -> str | None:
+        """The entry's apiBase, else nanobot's default base for that provider name."""
+        key, entry = self.resolve_provider()
+        if entry and entry.api_base:
+            return entry.api_base
+        return DEFAULT_API_BASES.get(_provider_key(key)) if key else None

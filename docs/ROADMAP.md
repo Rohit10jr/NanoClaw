@@ -186,7 +186,7 @@ be used unchanged on top of it. Progress: [`PHASE2_PROGRESS.md`](PHASE2_PROGRESS
 | # | Layer | What it adds | Main nanobot references (`c4dac64`) | Est. lines | Status |
 |---|---|---|---|---|---|
 | 11 | Catch up with upstream | Phase 1 code updated to `c4dac64`: system prompt, iteration-limit notice, subagent report, edit/write fixes, shell guard, DNS pinning, argument checks, error hint, slash text, OpenAI reasoning models; Windows test fixes | `agent/context.py`, `agent/tools/filesystem.py`, `shell.py`, `schema.py`, `security/network.py`, `command/`, `providers/openai_compat_provider.py` | ~400 | ✅ done |
-| 12 | Foundations | Config file, logging, provider retries, richer usage, iteration limit setting | `config/`, `providers/base.py` (`chat_with_retry`), `llm_usage/` | ~600 | |
+| 12 | Foundations | Config file, logging, provider retries, richer usage, iteration limit setting | `config/`, `providers/base.py` (`chat_with_retry`), `llm_usage/` | ~600 | ✅ done |
 | 13 | Hooks, events, streaming | Hook system, typed events, streamed replies and reasoning | `agent/hook.py`, `turn_hooks.py`, `progress_hook.py`, `bus/outbound_events.py`, `chat_stream` | ~900 | |
 | 14 | Bus and session workers | Message bus, `AgentLoop.run()`, `TurnDelivery`, command router, `/stop`, mid-turn injections | `bus/`, `agent/loop.py`, `agent/turn_delivery.py`, `command/` | ~1,000 | |
 | 15 | Robustness | Checkpoints and crash recovery; compaction between tool calls (also subagents) | `session/recovery.py`, `agent/context_governance.py` | ~600 | |
@@ -265,4 +265,4 @@ replaces it.
 | Logging | `loguru` throughout | Warnings for degraded archives, corrupt files, ... (NanoClaw has no logging yet) |
 | Separate project folder | `agent/context.py` (`workspace` vs project), `security/workspace_access.py` | Keep `SOUL.md`/`USER.md`/memory/skills in the agent's home while tools and `AGENTS.md` use a chosen project folder; would add a `--project` CLI option; subagents would then run in the project folder (`workspace_scope`; deferred from layer 8) |
 | Long-running shell sessions | `agent/tools/exec_session.py`, `ExecSessionManager` | Background shell commands the agent checks on later, shared with subagents (deferred from layers 3 and 8) |
-| Iteration limit | `config/schema.py` `max_tool_iterations` (200) | NanoClaw uses 20 for the main agent and subagents; to be revisited (layer 8 decision) |
+| Iteration limit | `config/schema.py` `max_tool_iterations` (200) | NanoClaw used 20 for the main agent and subagents (layer 8 decision); 200 by default since layer 12, settable with `maxToolIterations` |
