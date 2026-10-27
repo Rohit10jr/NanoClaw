@@ -37,6 +37,56 @@ def _short_tool_id() -> str:
     return "".join(secrets.choice(_ALNUM) for _ in range(9))
 
 
+# Moonshot's Kimi K3 models have a fixed temperature and take
+# max_completion_tokens (nanobot/providers/registry.py:213).
+_KIMI_K3_MODELS = frozenset({"kimi-k3", "kimi-k3.1-pro", "kimi-k3.1-pro-highspeed"})
+
+
+def _model_slug(model_name: str) -> str:
+    """``openai/GPT-5`` -> ``gpt-5`` (nanobot openai_compat_provider.py:147)."""
+    return model_name.lower().rsplit("/", 1)[-1]
+
+
+def _requires_max_completion_tokens(model_name: str) -> bool:
+    """Reasoning models reject ``max_tokens`` (nanobot openai_compat_provider.py:151).
+
+    Matches the bare model name, so gateway names like ``openai/o3-mini``
+    count too; ``foo3-mini`` does not.
+    """
+    slug = _model_slug(model_name)
+    return (
+        slug in _KIMI_K3_MODELS
+        or "gpt-5" in slug
+        or any(slug == p or slug.startswith((p + "-", p + ".")) for p in ("o1", "o3", "o4"))
+    )
+
+
+def _supports_temperature(model_name: str) -> bool:
+    """False for fixed-temperature models (nanobot openai_compat_provider.py:859).
+
+    nanobot also takes a reasoning_effort: GPT-6 accepts temperature only with
+    effort "none". NanoClaw has no effort setting, so GPT-6 never gets one.
+    Unlike the slug match above, this is a substring test on the full name,
+    exactly as nanobot does it.
+    """
+    if _model_slug(model_name) in _KIMI_K3_MODELS:
+        return False
+    name = model_name.lower()
+    if "gpt-6" in name:
+        return False
+    return not any(token in name for token in ("gpt-5", "o1", "o3", "o4"))
+
+
+def _is_direct_openai(api_base: str | None) -> bool:
+    """True when requests go to api.openai.com (no base means the SDK default).
+
+    nanobot's "openai" spec sets supports_max_completion_tokens=True
+    (nanobot/providers/registry.py:504), so every model sent there uses
+    ``max_completion_tokens``.
+    """
+    return not api_base or "api.openai.com" in api_base.lower()
+
+
 def _extract_text(value: Any) -> str | None:
     """Content is usually a string, but some gateways return a list of parts."""
     if value is None or isinstance(value, str):
@@ -95,12 +145,18 @@ class OpenAICompatProvider(LLMProvider):
         tool_choice: str | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Build the keyword arguments for ``chat.completions.create``."""
+        model_name = model or self.default_model
         kwargs: dict[str, Any] = {
-            "model": model or self.default_model,
+            "model": model_name,
             "messages": self._sanitize_messages(messages),
-            "max_tokens": max(1, max_tokens),
-            "temperature": temperature,
         }
+        # nanobot openai_compat_provider.py:919-927.
+        if _supports_temperature(model_name):
+            kwargs["temperature"] = temperature
+        if _is_direct_openai(self.api_base) or _requires_max_completion_tokens(model_name):
+            kwargs["max_completion_tokens"] = max(1, max_tokens)
+        else:
+            kwargs["max_tokens"] = max(1, max_tokens)
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = tool_choice or "auto"
@@ -154,7 +210,18 @@ class OpenAICompatProvider(LLMProvider):
     def parse(data: dict[str, Any]) -> LLMResponse:
         """Convert a Chat Completions response (as a dict) into an LLMResponse."""
         choices = data.get("choices") or []
+        usage = OpenAICompatProvider._parse_usage(data.get("usage"))
         if not choices:
+            # Some gateways reply with top-level text instead of choices
+            # (nanobot openai_compat_provider.py:1470).
+            content = _extract_text(data.get("content") or data.get("output_text"))
+            if content is not None:
+                return LLMResponse(
+                    content=content,
+                    finish_reason=str(data.get("finish_reason") or "stop"),
+                    usage=usage,
+                    reasoning_content=_extract_text(data.get("reasoning_content")),
+                )
             return LLMResponse(content="Error: API returned empty choices.", finish_reason="error")
 
         choice = choices[0]
@@ -178,14 +245,6 @@ class OpenAICompatProvider(LLMProvider):
                 )
             )
 
-        usage = None
-        raw_usage = data.get("usage")
-        if raw_usage:
-            usage = LLMUsage(
-                input_tokens=int(raw_usage.get("prompt_tokens") or 0),
-                output_tokens=int(raw_usage.get("completion_tokens") or 0),
-            )
-
         reasoning = message.get("reasoning_content") or message.get("reasoning")
         return LLMResponse(
             content=_extract_text(message.get("content")),
@@ -193,6 +252,15 @@ class OpenAICompatProvider(LLMProvider):
             finish_reason=str(choice.get("finish_reason") or "stop"),
             usage=usage,
             reasoning_content=reasoning if isinstance(reasoning, str) else None,
+        )
+
+    @staticmethod
+    def _parse_usage(raw_usage: Any) -> LLMUsage | None:
+        if not isinstance(raw_usage, dict) or not raw_usage:
+            return None
+        return LLMUsage(
+            input_tokens=int(raw_usage.get("prompt_tokens") or 0),
+            output_tokens=int(raw_usage.get("completion_tokens") or 0),
         )
 
     @staticmethod

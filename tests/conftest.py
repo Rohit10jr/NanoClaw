@@ -1,16 +1,39 @@
 """Shared test setup."""
 
+import sys
+
 import pytest
 
 from nanoclaw.utils import tokens
 
 REAL_GET_TOKEN_ENCODING = tokens.get_token_encoding
 
+# The exec tool runs bash; Windows shell support (PowerShell, as nanobot) is
+# planned, so tests that really run a command are skipped there (docs/WINDOWS.md,
+# cause A). Tests that only check the guards still run everywhere.
+requires_posix_shell = pytest.mark.skipif(
+    sys.platform == "win32", reason="exec tool needs bash; Windows shell support is planned (docs/WINDOWS.md)"
+)
+
+
+def symlink_or_skip(link, target):
+    """Create ``link`` -> ``target``; on Windows, skip the test when symlinks need
+    admin rights or Developer Mode (docs/WINDOWS.md, cause D)."""
+    try:
+        link.symlink_to(target)
+    except OSError as exc:
+        if sys.platform != "win32":
+            raise
+        pytest.skip(f"cannot create symlinks here (admin rights or Developer Mode needed): {exc}")
+
 
 @pytest.fixture(autouse=True)
 def _isolated_home(tmp_path_factory, monkeypatch):
-    """Point ~ at a temporary folder, so no test touches the real ~/.nanoclaw."""
-    monkeypatch.setenv("HOME", str(tmp_path_factory.mktemp("home")))
+    """Point ~ at a temporary folder, so no test touches the real ~/.nanoclaw.
+    Windows looks up ~ in USERPROFILE, not HOME, so both are set."""
+    home = str(tmp_path_factory.mktemp("home"))
+    monkeypatch.setenv("HOME", home)
+    monkeypatch.setenv("USERPROFILE", home)
 
 
 @pytest.fixture(autouse=True)

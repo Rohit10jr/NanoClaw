@@ -285,7 +285,9 @@ class WriteFileTool(_FsTool):
                 raise ValueError("Unknown content")
             fp = self._resolve_write(path)
             fp.parent.mkdir(parents=True, exist_ok=True)
-            fp.write_text(content, encoding="utf-8")
+            # newline="" writes the text as given: no "\n" -> "\r\n" on
+            # Windows (nanobot ae6801d, filesystem.py:580).
+            fp.write_text(content, encoding="utf-8", newline="")
             return f"Successfully wrote {len(content)} characters to {fp}"
         except PermissionError as e:
             return ToolResult.error(f"Error: {e}")
@@ -356,8 +358,10 @@ def _reindent_like_match(old_text: str, actual_text: str, new_text: str) -> str:
     ``old_text="x = 1"``-style lines without the indent and ``new_text`` without it
     too. Without this, the replacement would land unindented and break the code.
     """
-    old_lines = old_text.split("\n")
-    actual_lines = actual_text.split("\n")
+    # A terminal newline does not add a logical line, even at an unterminated
+    # EOF (nanobot 042bcbb, filesystem.py:652).
+    old_lines = old_text.removesuffix("\n").split("\n")
+    actual_lines = actual_text.removesuffix("\n").split("\n")
     if len(old_lines) != len(actual_lines):
         return new_text
     comparable = [
@@ -384,6 +388,17 @@ def _reindent_like_match(old_text: str, actual_text: str, new_text: str) -> str:
     if not delta:
         return new_text
     return "\n".join((delta + line) if line else line for line in new_text.split("\n"))
+
+
+def _strip_trailing_ws(text: str, *, preserve_last_line: bool = False) -> str:
+    """Strip line-ending whitespace, except a final fragment that continues inline.
+
+    nanobot ``EditFileTool._strip_trailing_ws`` (filesystem.py:900).
+    """
+    lines = text.split("\n")
+    return "\n".join(
+        line if preserve_last_line and i == len(lines) - 1 else line.rstrip() for i, line in enumerate(lines)
+    )
 
 
 @dataclass(slots=True)
@@ -426,7 +441,9 @@ def _find_trim_matches(content: str, old_text: str, *, normalize_quotes: bool = 
         if [norm(line) for line in content_lines[i : i + size]] != wanted:
             continue
         start, end = offsets[i], offsets[i + size]
-        if keepends[i + size - 1].endswith("\n"):
+        # Include the line terminator only when the requested match includes
+        # it (nanobot 042bcbb, filesystem.py:758).
+        if not old_text.endswith("\n") and keepends[i + size - 1].endswith("\n"):
             end -= 1
         matches.append(_MatchSpan(start, end, content[start:end], i + 1))
     return matches
@@ -572,7 +589,7 @@ class EditFileTool(_FsTool):
             if not file_exists:
                 if old_text == "":
                     fp.parent.mkdir(parents=True, exist_ok=True)
-                    fp.write_text(new_text, encoding="utf-8")
+                    fp.write_text(new_text, encoding="utf-8", newline="")  # nanobot ae6801d
                     return self._summary(fp, "", new_text, created=True)
                 return self._file_not_found_msg(path, fp)
 
@@ -585,7 +602,7 @@ class EditFileTool(_FsTool):
                 content = raw.decode("utf-8")
                 if content.strip():
                     return ToolResult.error(f"Error: Cannot create file — {path} already exists and is not empty.")
-                fp.write_text(new_text, encoding="utf-8")
+                fp.write_text(new_text, encoding="utf-8", newline="")  # nanobot ae6801d
                 return self._summary(fp, content, new_text)
 
             uses_crlf = b"\r\n" in raw
@@ -613,10 +630,6 @@ class EditFileTool(_FsTool):
                 )
 
             norm_new = new_text.replace("\r\n", "\n")
-            # Strip trailing whitespace from new lines, except in Markdown where
-            # two trailing spaces mean a line break.
-            if fp.suffix.lower() not in self._MARKDOWN_EXTS:
-                norm_new = "\n".join(line.rstrip() for line in norm_new.split("\n"))
 
             if replace_all:
                 selected = matches
@@ -627,7 +640,19 @@ class EditFileTool(_FsTool):
 
             new_content = content
             for match in reversed(selected):
-                replacement = _preserve_quote_style(norm_old, match.text, norm_new)
+                replacement = norm_new
+                # Strip trailing whitespace from the replacement's line ends, per
+                # match, keeping the last line's when text follows on the same
+                # line (nanobot e36a016, filesystem.py:1036). Markdown keeps all
+                # trailing whitespace: two spaces there mean a line break.
+                if fp.suffix.lower() not in self._MARKDOWN_EXTS:
+                    line_end = content.find("\n", match.end)
+                    if line_end == -1:
+                        line_end = len(content)
+                    replacement = _strip_trailing_ws(
+                        replacement, preserve_last_line=bool(content[match.end : line_end].strip())
+                    )
+                replacement = _preserve_quote_style(norm_old, match.text, replacement)
                 replacement = _reindent_like_match(norm_old, match.text, replacement)
                 end = match.end
                 # Deleting whole lines also removes their line break.

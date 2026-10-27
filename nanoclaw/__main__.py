@@ -179,7 +179,12 @@ async def _compact(provider: LLMProvider, workspace: Path, session_key: str) -> 
 
 
 def _skills(workspace: Path) -> int:
-    """List the skills (nanobot's ``/skill`` command)."""
+    """List the skills (nanobot's ``/skill`` command).
+
+    Unlike nanobot, skills whose requirements are missing are marked with what
+    is missing: since nanobot 32f5cc7 the prompt's skill list leaves them out,
+    so this is the one place that says why a skill is not offered.
+    """
     loader = ContextBuilder(workspace).skills
     skills = loader.list_skills(filter_unavailable=False)
     if not skills:
@@ -187,7 +192,11 @@ def _skills(workspace: Path) -> int:
         return 0
     lines = [f"Available skills ({len(skills)}):", ""]
     for entry in skills:
-        lines.append(f"- **{entry['name']}** — {loader.get_skill_description(entry['name'])}")
+        line = f"- **{entry['name']}** — {loader.get_skill_description(entry['name'])}"
+        available, missing = loader.get_skill_availability(entry["name"])
+        if not available:
+            line += f" (unavailable: {missing})" if missing else " (unavailable)"
+        lines.append(line)
     print("\n".join(lines))
     return 0
 

@@ -98,3 +98,31 @@ def test_retry_hint_is_added_once():
     once = with_retry_hint("Error: x")
     assert with_retry_hint(once) == once
     assert once.count(RETRY_HINT) == 1
+
+
+def test_retry_hint_text_matches_nanobot():
+    # nanobot 841d2b8 registry.py:14 _ERROR_HINT: neutral guidance, not "try a different approach".
+    assert RETRY_HINT == (
+        "\n\n[Consider this result in the context of the user's goal "
+        "and decide whether and how to proceed.]"
+    )
+
+
+@pytest.mark.parametrize("already_hinted", [False, True])
+async def test_error_result_is_hinted_exactly_once(already_hinted):
+    # nanobot tests/tools/test_tool_registry.py test_registry_uses_structured_tool_result_for_errors
+    error_hint = (
+        "\n\n[Consider this result in the context of the user's goal "
+        "and decide whether and how to proceed.]"
+    )
+
+    class _HintedFail(FailTool):
+        async def execute(self, **kwargs):
+            return ToolResult.error("Error: real failure" + (error_hint if already_hinted else ""))
+
+    reg = ToolRegistry()
+    reg.register(_HintedFail())
+    result = await reg.execute("fail", {})
+
+    assert is_tool_error(result)
+    assert result == "Error: real failure" + error_hint

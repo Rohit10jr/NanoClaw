@@ -2,10 +2,15 @@
 
 import json
 import os
+import socket
+import sys
+from pathlib import Path
+from unittest.mock import patch
 
 import httpx
 import pytest
 
+from conftest import requires_posix_shell, symlink_or_skip
 from nanoclaw.__main__ import main
 from nanoclaw.agent.loop import AgentLoop
 from nanoclaw.agent.runner import AgentRunner, AgentRunSpec
@@ -24,6 +29,7 @@ from nanoclaw.security.network import (
     configure_ssrf_whitelist_from_env,
     contains_internal_url,
     httpx_env_proxy_mounts,
+    pin_resolved_url_dns,
     resolve_url_target,
     validate_url_target,
 )
@@ -49,15 +55,15 @@ def _dns_and_whitelist(fake_dns):
 def ws(tmp_path):
     path = tmp_path / "ws"
     (path / "memory").mkdir(parents=True)
-    (path / "memory" / "history.jsonl").write_text('{"cursor": 1}\n')
-    (path / "notes.txt").write_text("inside\n")
+    (path / "memory" / "history.jsonl").write_text('{"cursor": 1}\n', encoding="utf-8")
+    (path / "notes.txt").write_text("inside\n", encoding="utf-8")
     return path
 
 
 @pytest.fixture
 def outside(tmp_path):
     path = tmp_path / "secret.txt"
-    path.write_text("outside\n")
+    path.write_text("outside\n", encoding="utf-8")
     return path
 
 
@@ -231,6 +237,7 @@ async def test_pinned_transport_connects_to_the_checked_addresses(fake_dns):
 # --- exec: always-on checks ------------------------------------------------
 
 
+@requires_posix_shell
 async def test_exec_blocks_internal_urls_even_unrestricted(ws):
     tool = ExecTool(working_dir=ws)
     out = await tool.execute(command="curl -s http://169.254.169.254/latest/meta-data/")
@@ -240,6 +247,7 @@ async def test_exec_blocks_internal_urls_even_unrestricted(ws):
     assert "https://public.test/ok" in out
 
 
+@requires_posix_shell
 async def test_unrestricted_exec_and_files_can_leave_the_workspace(ws, outside):
     assert "outside" in await ExecTool(working_dir=ws).execute(command=f"cat {outside}")
     assert "outside" in await ExecTool(working_dir=ws).execute(command="cat ../secret.txt")
@@ -263,7 +271,7 @@ async def test_restricted_reads_and_writes_stay_inside(ws, outside):
 
     write = WriteFileTool(ws, restrict_to_workspace=True)
     assert await write.execute(path=str(outside), content="x") == boundary(outside, ws)
-    assert outside.read_text() == "outside\n"
+    assert outside.read_text(encoding="utf-8") == "outside\n"
     assert "Successfully wrote" in await write.execute(path="sub/new.txt", content="x")
 
     edit = EditFileTool(ws, restrict_to_workspace=True)
@@ -275,8 +283,8 @@ async def test_restricted_reads_and_writes_stay_inside(ws, outside):
 
 
 async def test_restricted_symlink_escape_is_blocked(ws, outside):
-    (ws / "link.txt").symlink_to(outside)
-    (ws / "linkdir").symlink_to(outside.parent)
+    symlink_or_skip(ws / "link.txt", outside)
+    symlink_or_skip(ws / "linkdir", outside.parent)
     read = ReadFileTool(ws, restrict_to_workspace=True)
     assert await read.execute(path="link.txt") == boundary("link.txt", ws)
     assert await read.execute(path="linkdir/secret.txt") == boundary("linkdir/secret.txt", ws)
@@ -339,6 +347,72 @@ async def test_restricted_exec_allows(ws, command):
     assert "Command blocked" not in out
 
 
+# nanobot 1d43b46 (tests/tools/test_tool_validation.py:408): a "~user" path
+# that cannot be expanded is blocked, not skipped unchecked.
+@pytest.mark.skipif(sys.platform == "win32", reason="Unix resolves named homes through passwd")
+@pytest.mark.parametrize("command", ["cat {p}", "cat --config={p}", "cat <{p}"])
+async def test_restricted_exec_blocks_unknown_user_home(ws, tmp_path, command):
+    home_path = f"~nanoclaw-missing-{tmp_path.name}/file.txt"
+    with pytest.raises(RuntimeError):
+        Path(home_path).expanduser()
+    out = await ExecTool(working_dir=ws, restrict_to_workspace=True).execute(command=command.format(p=home_path))
+    assert out == f"Error: Command blocked by safety guard (path outside working dir){NOTE_SHELL}"
+
+
+# nanobot 1d43b46 (tests/tools/test_tool_validation.py:426): "~" with no home
+# directory at all is blocked too.
+async def test_restricted_exec_blocks_home_path_without_home_directory(ws, monkeypatch):
+    for key in ("HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH"):
+        monkeypatch.delenv(key, raising=False)
+    if sys.platform != "win32":
+        import pwd
+
+        def missing_passwd_entry(uid):
+            raise KeyError(uid)  # a container UID may have no passwd entry
+
+        monkeypatch.setattr(pwd, "getpwuid", missing_passwd_entry)
+    with pytest.raises(RuntimeError):
+        Path("~/file.txt").expanduser()
+    out = await ExecTool(working_dir=ws, restrict_to_workspace=True).execute(command="cat ~/file.txt")
+    assert out == f"Error: Command blocked by safety guard (path outside working dir){NOTE_SHELL}"
+
+
+# nanobot 1d43b46 (tests/tools/test_tool_validation.py:1191, :1212)
+@pytest.mark.parametrize(
+    "command", ["cat ~unknown/file.txt", "cat --config=~unknown/file.txt", "cat <~unknown/file.txt", "cat ~/file.txt"]
+)
+def test_exec_guard_rejects_unresolvable_home_path(ws, monkeypatch, command):
+    original = Path.expanduser
+
+    def expanduser(path):
+        if str(path).startswith("~"):
+            raise RuntimeError("Could not determine home directory.")
+        return original(path)
+
+    monkeypatch.setattr(Path, "expanduser", expanduser)
+    error = ExecTool(working_dir=ws, restrict_to_workspace=True)._guard_command(command, str(ws))
+    assert error == f"Error: Command blocked by safety guard (path outside working dir){NOTE_SHELL}"
+
+
+def test_exec_guard_allows_resolved_home_inside_workspace(ws, monkeypatch):
+    original = Path.expanduser
+
+    def expanduser(path):
+        return ws / "notes.txt" if str(path).startswith("~") else original(path)
+
+    monkeypatch.setattr(Path, "expanduser", expanduser)
+    assert ExecTool(working_dir=ws, restrict_to_workspace=True)._guard_command("cat ~/notes.txt", str(ws)) is None
+
+
+@requires_posix_shell
+async def test_restricted_exec_allows_resolved_home_inside_workspace(ws, monkeypatch):
+    monkeypatch.setenv("HOME", str(ws))
+    monkeypatch.setenv("USERPROFILE", str(ws))  # where Windows looks for ~
+    out = await ExecTool(working_dir=ws, restrict_to_workspace=True).execute(command="cat ~/notes.txt")
+    assert "inside" in out and "Command blocked" not in out
+
+
+@requires_posix_shell
 async def test_restricted_exec_working_dir(ws, tmp_path):
     tool = ExecTool(working_dir=ws, restrict_to_workspace=True)
     assert await tool.execute(command="pwd", working_dir=str(tmp_path)) == (
@@ -380,18 +454,30 @@ async def test_ssrf_errors_get_the_boundary_note_not_the_retry_hint(ws):
     assert RETRY_HINT not in tool_message
 
 
-async def test_repeated_workspace_violations_escalate(ws, outside):
+async def _escalation_messages(ws, outside, third):
     tools = build_default_tools(ws, restrict_to_workspace=True)
-    third = calls(("read_file", {"path": str(outside)}), ("exec", {"command": f"cat {outside}"}))
     provider = FakeProvider(
         [calls(("read_file", {"path": str(outside)})), calls(("list_dir", {"path": str(outside)})), third, "ok"]
     )
     result = await AgentRunner().run(AgentRunSpec([{"role": "user", "content": "go"}], tools, provider))
-    tool_messages = [m["content"] for m in result.messages if m["role"] == "tool"]
+    return [m["content"] for m in result.messages if m["role"] == "tool"]
+
+
+async def test_repeated_workspace_violations_escalate(ws, outside):
+    tool_messages = await _escalation_messages(ws, outside, calls(("read_file", {"path": str(outside)})))
     assert tool_messages[0] == boundary(outside, ws) + RETRY_HINT
     assert tool_messages[1] == boundary(outside, ws) + RETRY_HINT
     assert tool_messages[2].startswith("Error: refusing repeated workspace-bypass attempts.\n")
-    assert f"You have tried to access '{str(outside).lower()}' (or an equivalent path) 3 times" in tool_messages[2]
+    # The target is shown resolved, lower-cased and with "/" separators on every OS, as nanobot.
+    target = outside.resolve().as_posix().lower()
+    assert f"You have tried to access '{target}' (or an equivalent path) 3 times" in tool_messages[2]
+
+
+@requires_posix_shell
+async def test_exec_counts_toward_the_same_escalation(ws, outside):
+    third = calls(("read_file", {"path": str(outside)}), ("exec", {"command": f"cat {outside}"}))
+    tool_messages = await _escalation_messages(ws, outside, third)
+    assert tool_messages[2].startswith("Error: refusing repeated workspace-bypass attempts.\n")
     assert tool_messages[3].startswith("Error: refusing repeated workspace-bypass attempts.\n")  # exec, same target
     assert "4 times" in tool_messages[3]
 
@@ -504,3 +590,34 @@ async def test_rebound_target_is_rejected_before_the_connection(monkeypatch):
     result = await WebFetchTool(transport=Fail()).execute(url="http://evil.example/page")
     assert is_tool_error(result) and "blocked" in json.loads(result)["error"].lower()
     assert calls["n"] == 3  # first check, redirect-loop check, pinned transport
+
+
+# nanobot cb03b09 (tests/security/test_security_network.py:246): the pinned
+# resolver also answers for a hostname given as bytes, as callers may pass it.
+@pytest.mark.parametrize("host", ["example.com", b"example.com", "EXAMPLE.COM.", b"EXAMPLE.COM."])
+def test_pin_resolved_url_dns_prevents_second_resolution_rebind(host):
+    def rebinding_resolver(hostname, port, family=0, type_=0, proto=0, flags=0):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("169.254.169.254", 0))]
+
+    with patch("nanoclaw.security.network.socket.getaddrinfo", side_effect=rebinding_resolver) as resolver:
+        with pin_resolved_url_dns("http://example.com/page", ("93.184.216.34",)):
+            infos = socket.getaddrinfo(host, 80, socket.AF_UNSPEC, socket.SOCK_STREAM)
+        assert socket.getaddrinfo is resolver
+        resolver.assert_not_called()
+    assert infos[0][4][0] == "93.184.216.34"
+
+
+# nanobot cb03b09 (tests/security/test_security_network.py:263)
+@pytest.mark.parametrize("host", ["other.example", b"other.example"])
+def test_pin_resolved_url_dns_preserves_other_host_lookups(host):
+    expected = [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("93.184.216.35", 443))]
+    with patch("nanoclaw.security.network.socket.getaddrinfo", return_value=expected) as resolver:
+        with pin_resolved_url_dns("https://example.com/", ("93.184.216.34",)):
+            infos = socket.getaddrinfo(
+                host, 443, socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, socket.AI_CANONNAME
+            )
+        assert socket.getaddrinfo is resolver
+        resolver.assert_called_once_with(
+            host, 443, socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, socket.AI_CANONNAME
+        )
+    assert infos == expected

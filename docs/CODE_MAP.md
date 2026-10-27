@@ -106,7 +106,7 @@ Note: [`notes/02-runner.md`](notes/02-runner.md)
 | ↳ [`_suggest_name()`](../nanoclaw/agent/tools/registry.py#L55) | [`:58`][nb-l2-suggest] | Same: "Did you mean ...?" for case/punctuation differences, never auto-runs |
 | ↳ [`prepare_call()`](../nanoclaw/agent/tools/registry.py#L66) | [`:110`][nb-l2-prepare] | Simplified: unknown tool, non-object arguments, missing required keys. Same messages. No argument unwrapping, casting or full schema validation |
 | ↳ [`execute()`](../nanoclaw/agent/tools/registry.py#L119) | [`:187`][nb-l2-execute] | Same: never raises; errors get the retry hint. (The runner uses `prepare_call` + its own execution, like nanobot's runner) |
-| [`RETRY_HINT`](../nanoclaw/agent/tools/registry.py#L11), [`with_retry_hint`](../nanoclaw/agent/tools/registry.py#L14) | [`agent/tools/execution.py:23`][nb-l2-hint], `:50` `_with_retry_hint` | Same text; added once |
+| [`RETRY_HINT`](../nanoclaw/agent/tools/registry.py#L11), [`with_retry_hint`](../nanoclaw/agent/tools/registry.py#L14) | [`agent/tools/execution.py:23`][nb-l2-hint], `:50` `_with_retry_hint` | Same text (since layer 11: nanobot `c4dac64` `registry.py:14` `_ERROR_HINT`); added once |
 
 ### Runner — `nanoclaw/agent/runner.py`
 
@@ -406,7 +406,7 @@ Note: [`notes/07-skills.md`](notes/07-skills.md)
 | [`MemoryStore.default_dream_prompt()`](../nanoclaw/agent/memory.py#L287) | [`agent/memory.py:503`][nb-l7-dreamprompt] | Same (no `prompts/dream.md` override) |
 | `templates/agent/skills_section.md`, `templates/agent/dream.md` | same files | Same text |
 | `nanoclaw/skills/` (6 skills + README) | `nanobot/skills/` (11) | Same text with the name changed, except two lines adapted to NanoClaw's tools (difference #4); 5 left out (difference #1) |
-| [`nanoclaw skills`](../nanoclaw/__main__.py#L170) | [`command/builtin.py:954`][nb-l7-cmdskill] `/skill` | Same output (checked) |
+| [`nanoclaw skills`](../nanoclaw/__main__.py#L170) | [`command/builtin.py:954`][nb-l7-cmdskill] `/skill` | Same list (checked); since layer 11 it also marks unavailable skills, which the prompt no longer lists |
 | `sync_workspace_templates` creates `skills/` | [`utils/helpers.py:983`][nb-l7-syncskills] | Same |
 
 ## Layer 8 — Subagents
@@ -571,6 +571,30 @@ Note: [`notes/10-terminal-chat.md`](notes/10-terminal-chat.md)
 | `tests/test_safety.py` | blocked address ranges, whitelist, internal URLs in commands, proxies, `web_fetch` blocks and redirects, DNS pinning and rebinding, restricted file tools and `exec`, blocked-call reporting and escalation, wiring and CLI |
 | `tests/test_runner.py` | the loop end to end with `FakeProvider`: exact history, requests sent, tool failures, truncation, cut-off replies, empty-reply handling, model errors, iteration limit, usage, no mutation, one result per call |
 | `tests/test_cli_version.py` | `--version` |
+
+## Layer 11 — Catch up with upstream
+
+Note: [`notes/11-catch-up.md`](notes/11-catch-up.md). nanobot links in this
+section point at `c4dac64`, the phase 2 reference.
+
+| NanoClaw | nanobot (`c4dac64`) | How it compares |
+|---|---|---|
+| `ContextBuilder.build_system_prompt` memory part (`nanoclaw/agent/context.py`) | [`agent/context.py:113`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/context.py#L113) | Same: `MEMORY.md` as is |
+| `templates/agent/identity.md`, `platform_policy.md` | [`templates/agent/identity.md`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/templates/agent/identity.md) | Same, apart from the NanoClaw name |
+| `SkillsLoader.build_skills_summary` (`nanoclaw/agent/skills.py`) | [`agent/skills.py:270`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/skills.py#L270) | Same: available skills only, absolute built-in root |
+| `record_iteration_limit`, `iteration_limit_block`, `ITERATION_LIMIT_META` (`nanoclaw/runtime_context.py`) | [`session/turn_continuation.py:44`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/session/turn_continuation.py#L44) | Same text and rules; no internal continuations |
+| `Session.clear()` drops the flag (`nanoclaw/session/manager.py`) | `session/manager.py:355` | Same |
+| `SubagentManager` outcomes, partial result, `_announce_result` (`nanoclaw/agent/subagent.py`) | [`agent/subagent.py:678-885`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/subagent.py#L678) | Same strings; partial result from the run's messages (no hook yet) |
+| `templates/agent/subagent_announce.md` | [`templates/agent/subagent_announce.md`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/templates/agent/subagent_announce.md) | Identical |
+| `WriteFileTool`/`EditFileTool` (`newline=""`), `_reindent_like_match`, `_find_trim_matches`, `_strip_trailing_ws` (`nanoclaw/agent/tools/filesystem.py`) | [`agent/tools/filesystem.py:580-1047`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/tools/filesystem.py#L580) | Same behaviour |
+| `ExecTool._guard_command` `~user` check (`nanoclaw/agent/tools/shell.py`) | [`agent/tools/shell.py:894`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/tools/shell.py#L894) | Same error text |
+| `pin_resolved_url_dns` (`nanoclaw/security/network.py`) | [`security/network.py:241`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/security/network.py#L241) | Same |
+| `_is_json_integer`, `_json_values_equal`, `match_json_schema_type`, `_decode_json_container` (`nanoclaw/agent/tools/schema.py`) | [`agent/tools/base.py:31-367`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/tools/base.py#L31) | Identical results on 7,922 cases |
+| `RETRY_HINT` (`nanoclaw/agent/tools/registry.py`) | [`agent/tools/registry.py:14`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/tools/registry.py#L14) `_ERROR_HINT` | Same text, NanoClaw name kept |
+| `_search_error`, tool descriptions (`nanoclaw/agent/tools/web.py`) | [`agent/tools/web.py:1206`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/tools/web.py#L1206) | Same texts |
+| `_model_slug`, `_requires_max_completion_tokens`, `_supports_temperature`, `_is_direct_openai`, `_parse_usage` (`nanoclaw/providers/openai_compat.py`) | [`providers/openai_compat_provider.py:147-927`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/providers/openai_compat_provider.py#L147) | Same request settings in 17 cases; no effort setting or provider specs |
+| `normalize_command_text`, `command_name`, `invalid_command_text` (`nanoclaw/cli/chat.py`) | [`command/router.py:26-168`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/command/router.py#L26) | Same results; functions instead of a router class |
+| `requires_posix_shell`, `symlink_or_skip` (`tests/conftest.py`) | — | NanoClaw only: Windows test skips (`WINDOWS.md`) |
 
 [nb-pta]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/providers/base.py#L118
 [nb-tcr]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/providers/base.py#L72

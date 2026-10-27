@@ -232,7 +232,17 @@ class ExecTool(Tool):
                             + _WORKSPACE_BOUNDARY_NOTE
                         )
                     else:
-                        p = Path(expanded).expanduser().resolve()
+                        # A "~user" whose home cannot be found (or "~" with no
+                        # home at all) is blocked, not skipped unchecked
+                        # (nanobot 1d43b46, shell.py:894).
+                        try:
+                            home_path = Path(expanded).expanduser()
+                        except RuntimeError:
+                            return ToolResult.error(
+                                "Error: Command blocked by safety guard (path outside working dir)"
+                                + _WORKSPACE_BOUNDARY_NOTE
+                            )
+                        p = home_path.resolve()
                     # Check the unresolved path first: /dev/stderr is a symlink
                     # to /proc/self/fd/2, which would hide the device.
                     if self._is_benign_device_path(expanded):

@@ -1,6 +1,7 @@
 """Layer 10: the terminal chat, slash commands, progress lines and tool hints."""
 
 import asyncio
+import contextlib
 import io
 import signal
 
@@ -12,7 +13,7 @@ from nanoclaw.__main__ import main
 from nanoclaw.agent.loop import AgentLoop
 from nanoclaw.agent.runner import AgentRunner, AgentRunSpec
 from nanoclaw.agent.tools import ToolRegistry
-from nanoclaw.cli.chat import Chat, build_help_text, build_status_content, invalid_command_text
+from nanoclaw.cli.chat import Chat, build_help_text, build_status_content, command_name, invalid_command_text
 from nanoclaw.cli.terminal import EXIT_COMMANDS, is_exit_command, progress_line_markup
 from nanoclaw.providers import FakeProvider, LLMResponse, ToolCallRequest
 from nanoclaw.session import SessionManager
@@ -104,7 +105,8 @@ def test_exit_signal_handler(monkeypatch):
     assert exc.value.code == 0
     assert restored == [1]  # terminal put back before leaving
     assert out.getvalue() == "\nReceived SIGINT, goodbye!\n"
-    assert handlers[signal.SIGPIPE] is signal.SIG_IGN
+    if hasattr(signal, "SIGPIPE"):  # Windows has no SIGPIPE; the app checks the same way
+        assert handlers[signal.SIGPIPE] is signal.SIG_IGN
 
 
 # --- progress lines and tool hints ----------------------------------------
@@ -193,25 +195,63 @@ def test_help_text():
 @pytest.mark.parametrize(
     "raw, text",
     [
-        ("/nwe", 'Unknown command "/nwe". Did you mean "/new"?'),
-        ("/hepl", 'Unknown command "/hepl". Did you mean "/help"?'),
-        ("/xyz", 'Unknown command "/xyz". Use "/help" to list available commands.'),
+        # nanobot tests/agent/test_loop_save_turn.py (7e00d6a) and test_router_dispatchable.py
         ("/new now", 'Command "/new" does not accept arguments. Did you mean "/new"?'),
         ("/NEW please", 'Command "/new" does not accept arguments. Did you mean "/new"?'),
-        ("/historyx", 'Unknown command "/historyx". Did you mean "/history"?'),
+        ("/stop now", 'Command "/stop" does not accept arguments. Did you mean "/stop"?'),
+        ("/status now", 'Command "/status" does not accept arguments. Did you mean "/status"?'),
+        ("/STOP extra", 'Command "/stop" does not accept arguments. Did you mean "/stop"?'),
+        ("/help@nanoclaw me", 'Command "/help" does not accept arguments. Did you mean "/help"?'),
+        ("/history\t5", 'Invalid command "/history". Use "/help" to list available commands.'),
     ],
 )
-def test_invalid_commands(raw, text):
+def test_registered_commands_with_wrong_arguments(raw, text):
     assert invalid_command_text(raw) == text
 
 
+# nanobot tests/command/test_router_dispatchable.py::test_non_command_returns_none (7e00d6a)
+NOT_COMMANDS = [
+    "hello world", "/", "/tmp", "/tmp 看看这个目录", "/home/user/project",
+    "/Users/alice/report.md", "/new/file.txt", "/model/preset", "/neaw",
+    "/totally-unknown-command", "/tmp/file@new", "请看看 /home/user/project",
+    "/nwe", "/historyx", "/xyz",
+]
+
+
+@pytest.mark.parametrize("content", NOT_COMMANDS)
+def test_unregistered_slash_text_is_not_a_command(content):
+    assert command_name(content) is None
+    assert invalid_command_text(content) is None
+
+
+def test_command_names_ignore_case_and_bot_suffix():
+    assert command_name("  /new  ") == "/new"
+    assert command_name("/NEW@nanobot") == "/new"
+    assert command_name("/history 5") == "/history"
+    assert command_name("/STOP extra") == "/stop"
+
+
 async def test_slash_commands_never_reach_the_model(ws, tmp_path):
-    chat, provider, out = make_chat(ws, tmp_path, [], ["/help", "/nwe", "/HELP"])
+    chat, provider, out = make_chat(ws, tmp_path, [], ["/help", "/new now", "/HELP", "/Help@nanoclaw"])
     await chat.run()
     assert provider.calls == []
     text = out.getvalue()
-    assert text.count("nanoclaw commands:") == 2
-    assert 'Did you mean "/new"?' in text
+    assert text.count("nanoclaw commands:") == 3
+    assert 'Command "/new" does not accept arguments. Did you mean "/new"?' in text
+
+
+@pytest.mark.parametrize("content", ["/tmp 看看这个目录", "/home/user/project", "/new/file.txt", "/neaw", "/tmp/foo.py explain"])
+async def test_paths_and_unknown_slash_text_reach_the_model(ws, tmp_path, content):
+    """nanobot tests/agent/test_loop_save_turn.py::test_absolute_path_reaches_provider_as_chat (7e00d6a)."""
+    chat, provider, out = make_chat(ws, tmp_path, ["Looked."], [content])
+    await chat.run()
+    assert len(provider.calls) == 1
+    assert any(m["role"] == "user" and content in str(m["content"]) for m in provider.calls[0].messages)
+    text = out.getvalue()
+    assert "Looked." in text and "Unknown command" not in text
+    session = chat.loop.sessions.get_or_create(chat.session_key)
+    assert session.get_history(include_runtime_context=False)[0]["content"] == content
+    assert not session.messages[0].get("_command")
 
 
 async def test_new_history_and_status(ws, tmp_path):
@@ -231,7 +271,7 @@ async def test_new_history_and_status(ws, tmp_path):
     assert "💬 Session: 2 messages" in text and "⚡ Tasks: 0 active" in text
     assert "New session started." in text
     assert text.count("No conversation history yet.") == 2  # cleared by /new
-    assert (ws / "memory" / "history.jsonl").read_text().count("said hi") == 1  # archived first
+    assert (ws / "memory" / "history.jsonl").read_text(encoding="utf-8").count("said hi") == 1  # archived first
 
 
 def test_status_content_uses_last_usage():
@@ -449,13 +489,25 @@ def test_cli_chat_markdown_option(ws, monkeypatch, capsys):
 # --- second review: nanobot's terminal handling ------------------------------
 
 
-async def test_prompt_enter_sends_and_alt_enter_adds_a_line(tmp_path):
+@contextlib.contextmanager
+def dummy_terminal():
+    """A pipe for keys and a dummy screen, also as the app session's default,
+    so ``patch_stdout`` never asks for a real console (on Windows that raises
+    NoConsoleScreenBufferError under pytest: docs/WINDOWS.md, cause G)."""
+    from prompt_toolkit.application import create_app_session
     from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    with create_pipe_input() as pipe, create_app_session(input=pipe, output=DummyOutput()):
+        yield pipe
+
+
+async def test_prompt_enter_sends_and_alt_enter_adds_a_line(tmp_path):
     from prompt_toolkit.output import DummyOutput
 
     from nanoclaw.cli.terminal import PromptInput
 
-    with create_pipe_input() as pipe:
+    with dummy_terminal() as pipe:
         reader = PromptInput(tmp_path / "hist", input=pipe, output=DummyOutput())
         pipe.send_text("line one\x1b\rline two\r")
         assert await reader() == "line one\nline two"
@@ -464,7 +516,7 @@ async def test_prompt_enter_sends_and_alt_enter_adds_a_line(tmp_path):
         from prompt_toolkit.filters import to_filter
 
         assert to_filter(reader._session.multiline)()  # a multi-line input box, as nanobot
-    history = (tmp_path / "hist").read_text()
+    history = (tmp_path / "hist").read_text(encoding="utf-8")
     assert "+line one\n+line two\n" in history and "+second\n" in history
 
 
@@ -533,14 +585,13 @@ def test_spinner_clears_its_line_on_a_terminal():
 
 
 async def test_typed_ahead_keys_are_dropped_before_each_prompt(tmp_path, monkeypatch):
-    from prompt_toolkit.input import create_pipe_input
     from prompt_toolkit.output import DummyOutput
 
     from nanoclaw.cli import terminal
 
     flushed = []
     monkeypatch.setattr(terminal, "flush_pending_tty_input", lambda: flushed.append(1))
-    with create_pipe_input() as pipe:
+    with dummy_terminal() as pipe:
         reader = terminal.PromptInput(tmp_path / "hist", input=pipe, output=DummyOutput())
         pipe.send_text("hi\r")
         await reader()

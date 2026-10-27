@@ -1,8 +1,10 @@
 """Oversized tool results: saved to the workspace with a preview, read_file exempt."""
 
 import hashlib
+import os
 from pathlib import Path
 
+from conftest import requires_posix_shell
 from nanoclaw.agent.messages import TRUNCATED_SUFFIX
 from nanoclaw.agent.runner import AgentRunner, AgentRunSpec
 from nanoclaw.agent.tool_results import TOOL_RESULTS_DIR, maybe_persist_tool_result, normalize_tool_result
@@ -30,7 +32,7 @@ def test_large_result_is_saved_with_head_and_tail_preview(tmp_path):
 
     digest = hashlib.sha256(content.encode()).hexdigest()[:12]
     saved = tmp_path / TOOL_RESULTS_DIR / "default" / f"call_1-{digest}.txt"  # unsafe "/" replaced
-    assert saved.read_text() == content
+    assert saved.read_text(encoding="utf-8") == content
     assert out.startswith(f"[tool output persisted]\nFull output saved to workspace path: {saved.resolve()}\n")
     assert "Original size: 5008 chars" in out
     assert "HEAD" in out and "TAIL" in out
@@ -51,8 +53,8 @@ def test_repeated_call_id_never_points_to_stale_output(tmp_path):
     # Each reference shows a preview of, and points to, its own output.
     assert r_old.split("Preview:\n")[1].startswith("OLD-")
     assert r_new.split("Preview:\n")[1].startswith("NEW-")
-    assert _saved_path(r_old).read_text() == old  # the earlier reference is not overwritten
-    assert _saved_path(r_new).read_text() == new
+    assert _saved_path(r_old).read_text(encoding="utf-8") == old  # the earlier reference is not overwritten
+    assert _saved_path(r_new).read_text(encoding="utf-8") == new
     assert _saved_path(r_old) != _saved_path(r_new)
 
 
@@ -93,13 +95,14 @@ def _run(tmp_path: Path, tool_name: str, args: dict, *, workspace: Path | None, 
 
 
 async def test_runner_keeps_read_file_footer_on_large_files(tmp_path):
-    (tmp_path / "big.txt").write_text("\n".join(f"line {i:05d} " + "x" * 20 for i in range(3000)))
+    (tmp_path / "big.txt").write_text("\n".join(f"line {i:05d} " + "x" * 20 for i in range(3000)), encoding="utf-8")
     result = await _run(tmp_path, "read_file", {"path": "big.txt"}, workspace=tmp_path)
     content = result.messages[2]["content"]
     assert len(content) > 16_000
     assert content.endswith("(Showing lines 1-2000 of 3000. Use offset=2001 to continue.)")
 
 
+@requires_posix_shell
 async def test_runner_offloads_large_exec_output_to_workspace(tmp_path):
     result = await _run(
         tmp_path, "exec", {"command": "seq 1 3000"}, workspace=tmp_path, max_chars=2000
@@ -109,8 +112,8 @@ async def test_runner_offloads_large_exec_output_to_workspace(tmp_path):
     saved = _saved_path(content)
     assert saved.parent == tmp_path / TOOL_RESULTS_DIR / "default"
     assert saved.name.startswith("c1-") and saved.suffix == ".txt"
-    assert saved.read_text().startswith("1\n2\n3\n")
-    assert "Exit code: 0" in saved.read_text()
+    assert saved.read_text(encoding="utf-8").startswith("1\n2\n3\n")
+    assert "Exit code: 0" in saved.read_text(encoding="utf-8")
 
 
 async def test_runner_normalizes_error_results_too(tmp_path):
@@ -121,7 +124,8 @@ async def test_runner_normalizes_error_results_too(tmp_path):
 
 def test_each_session_gets_its_own_folder(tmp_path):
     out = normalize_tool_result("exec", "c1", "x" * 500, workspace=tmp_path, max_chars=300, bucket="cli:direct")
-    assert "/.nanoclaw/tool-results/cli_direct/c1-" in out
+    # The path uses the OS separator ("\" on Windows), as nanobot.
+    assert os.sep.join(["", ".nanoclaw", "tool-results", "cli_direct", "c1-"]) in out
 
 
 def test_old_session_folders_are_cleaned_up(tmp_path):

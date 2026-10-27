@@ -26,9 +26,10 @@ recovery, governance) for later.
 | 8 | Subagents | done |
 | 9 | Safety (workspace limits, shell guards) | done |
 | 10 | Terminal chat (CLI) | done |
+| 11 | Catch up with upstream nanobot (`c4dac64`) | done |
 
-Phase 1 (the core agent) is complete; phase 2 reviews nanobot's production
-features.
+Phase 1 (the core agent) is complete. Phase 2 builds the production backend
+(layers 11–25; progress in [`docs/PHASE2_PROGRESS.md`](docs/PHASE2_PROGRESS.md)).
 
 - [`docs/ROADMAP.md`](docs/ROADMAP.md): every layer in build order, plus the
   production features we'll review afterwards.

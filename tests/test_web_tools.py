@@ -1,9 +1,12 @@
 """web_fetch over a mocked HTTP transport; web_search with a fake search function."""
 
 import json
+import threading
+from types import SimpleNamespace
 
 import httpx
 import pytest
+from ddgs.exceptions import DDGSException, RatelimitException, TimeoutException
 
 from nanoclaw.agent.tools import is_tool_error
 from nanoclaw.agent.tools.web import UNTRUSTED_BANNER, WebFetchTool, WebSearchTool
@@ -160,3 +163,108 @@ async def test_search_failure_is_an_error():
 
     out = await WebSearchTool(search_fn=broken).execute(query="x")
     assert is_tool_error(out) and out == "Error: DuckDuckGo search failed (rate limited)"
+
+
+# nanobot a8873bb: say what is known about a ddgs failure, never "no results".
+
+
+async def test_search_deadline_says_availability_is_unknown():
+    gate = threading.Event()
+
+    def hanging(query, n):
+        gate.wait(5)
+        return []
+
+    try:
+        out = await WebSearchTool(search_fn=hanging, timeout=0.2).execute(query="x")
+    finally:
+        gate.set()
+    assert is_tool_error(out)
+    assert out == (
+        "Error: Web search timed out while waiting for ddgs. "
+        "No usable search result was obtained before the tool deadline; "
+        "matching-page availability is unknown."
+    )
+
+
+@pytest.mark.parametrize(
+    ("exc", "expected"),
+    [
+        (
+            TimeoutException("request timed out"),
+            "Error: Web search unavailable (ddgs reported a timeout). "
+            "No usable search result was obtained; matching-page availability is unknown.",
+        ),
+        (
+            DDGSException("No results found."),
+            "Error: Web search unavailable (ddgs; cause unknown). "
+            "No usable search result was obtained. The search library did not expose "
+            "a reliable cause; this does not establish that no matching pages exist.",
+        ),
+        (
+            RatelimitException("202 Ratelimit"),
+            "Error: Web search unavailable (ddgs; cause unknown). "
+            "No usable search result was obtained. The search library did not expose "
+            "a reliable cause; this does not establish that no matching pages exist.",
+        ),
+    ],
+)
+async def test_search_reports_ddgs_failures_as_unavailable(exc, expected):
+    def broken(query, n):
+        raise exc
+
+    out = await WebSearchTool(search_fn=broken).execute(query="x")
+    assert is_tool_error(out) and out == expected
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected_header"),
+    [
+        ("empty", "Error: Web search unavailable (ddgs; cause unknown)."),
+        ("forbidden", "Error: Web search unavailable (ddgs; cause unknown)."),
+        ("rate_limited", "Error: Web search unavailable (ddgs; cause unknown)."),
+        ("timeout", "Error: Web search unavailable (ddgs reported a timeout)."),
+    ],
+)
+async def test_real_ddgs_failures_reach_the_tool_result(monkeypatch, outcome, expected_header):
+    # nanobot tests/agent/test_runner_web_search_errors.py: real ddgs parsing and
+    # aggregation, one engine, offline.
+    from ddgs.ddgs import DDGS
+    from ddgs.engines.wikipedia import Wikipedia
+    from ddgs.http_client import HttpClient
+
+    engine = Wikipedia(timeout=1)
+    monkeypatch.setattr(DDGS, "_get_engines", lambda *_args: [engine])
+    requests = []
+
+    def request(_self, method, url, **_kwargs):
+        requests.append(url)
+        if outcome == "timeout":
+            raise TimeoutException("request timed out")
+        status = {"empty": 200, "forbidden": 403, "rate_limited": 429}[outcome]
+        return SimpleNamespace(status_code=status, text=json.dumps(["nanobot", [], [], []]))
+
+    monkeypatch.setattr(HttpClient, "request", request)
+
+    out = await WebSearchTool().execute(query="nanobot")
+
+    assert len(requests) == 1
+    assert is_tool_error(out)
+    assert out.startswith(expected_header)
+    assert "No usable search result was obtained" in out
+
+
+def test_tool_descriptions_match_nanobot():
+    # nanobot 6b90e40 web.py:375,397 (web_search) and :1288,1298 (web_fetch)
+    search, fetch = WebSearchTool(), WebFetchTool()
+    assert search.description == (
+        "Search the web for titles, URLs, and snippets. Use web_fetch to read a specific page."
+    )
+    assert search.parameters["properties"]["count"]["description"] == (
+        "Maximum results; uses the configured default if omitted."
+    )
+    assert fetch.description == (
+        "Fetch a URL as readable markdown/text. May fail on login-walled or JavaScript-heavy pages."
+    )
+    max_chars = fetch.parameters["properties"]["maxChars"]
+    assert max_chars["description"] == "Maximum output characters; defaults to 50000."

@@ -62,7 +62,8 @@ The commands NanoClaw has, with nanobot's descriptions and texts
 | `/dream` | "Dreaming...", then Dream's result | `cmd_dream` `:453` |
 | `/skill` | Lists the skills | `cmd_skill` `:954` |
 | `/help` | Lists these commands | `cmd_help` `:1022` |
-| Anything else starting with `/` | Never sent to the model: `Unknown command "/nwe". Did you mean "/new"?`, or `Command "/new" does not accept arguments. Did you mean "/new"?` | `router.py:130` |
+| A registered command with wrong arguments | Never sent to the model: `Command "/new" does not accept arguments. Did you mean "/new"?` | `router.py:130` |
+| Other text starting with `/` (paths, unknown names) | Since layer 11 sent to the model like any message, as nanobot `c4dac64` (`7e00d6a`); the "Unknown command … Did you mean" suggestions are gone. A path named like a command (`/new`) is still the command: write `/new/` or `look at /new` | `c4dac64 router.py:98-168` |
 
 ## What changed underneath
 
@@ -118,7 +119,7 @@ The commands NanoClaw has, with nanobot's descriptions and texts
 
 | File | Contents | nanobot |
 |---|---|---|
-| `nanoclaw/cli/chat.py` (new) | `Chat` (loop, turns, subagent results, commands), command specs, help, unknown-command text, `/history` format, `/status` text, exit signals | `cli/agent.py`, `command/builtin.py`, `command/router.py`, `utils/helpers.py` |
+| `nanoclaw/cli/chat.py` (new) | `Chat` (loop, turns, subagent results, commands), command specs, help, malformed-command text, `/history` format, `/status` text, exit signals | `cli/agent.py`, `command/builtin.py`, `command/router.py`, `utils/helpers.py` |
 | `nanoclaw/cli/terminal.py` (new) | Exit words, reply and progress printing, spinner, prompt with history | `cli/terminal.py`, `cli/stream.py` |
 | `nanoclaw/utils/tool_hints.py`, `utils/path.py` (new) | Tool hints and path shortening (copied) | `utils/tool_hints.py`, `utils/path.py` |
 | `agent/runner.py`, `agent/loop.py`, `session/manager.py` | `on_progress`, `_last_usage`, `start_time`, `include_runtime_context` | see above |

@@ -137,18 +137,23 @@ class SkillsLoader:
         )
 
     def build_skills_summary(self, exclude: set[str] | None = None) -> str:
-        """Name, description, availability and path of each skill, grouped by source.
+        """Name, description and path of each available skill, grouped by source.
 
-        Paths are relative to the group's folder (shown as ``skills`` for the
-        workspace), so the model joins them to read a skill with ``read_file``.
+        Skills whose required programs or environment variables are missing
+        are left out (nanobot/agent/skills.py:270-308); ``nanoclaw skills``
+        still lists them with what is missing. Paths are relative to the
+        group's folder, so the model joins them to read a skill with
+        ``read_file``. The workspace folder is shown as ``skills``; the
+        built-in one by its absolute path, because directory tools need the
+        real path (only ``read_file`` maps ``skills/<name>/...`` to it).
         """
-        all_skills = self.list_skills(filter_unavailable=False)
+        all_skills = self.list_skills(filter_unavailable=True)
         if not all_skills:
             return ""
         sections: list[str] = []
         groups = (
             ("Workspace skills", "workspace", self.workspace_skills, Path("skills")),
-            ("Built-in skills", "builtin", self.builtin_skills, Path("skills")),
+            ("Built-in skills", "builtin", self.builtin_skills, self.builtin_skills.expanduser().resolve()),
         )
         for label, source, root, display_root in groups:
             entries = [e for e in all_skills if e["source"] == source and (not exclude or e["name"] not in exclude)]
@@ -157,13 +162,8 @@ class SkillsLoader:
             lines = [f"### {label} (`{display_root}`)"]
             for entry in entries:
                 name = entry["name"]
-                meta = self._get_skill_meta(name)
-                suffix = ""
-                if not self._check_requirements(meta):
-                    missing = self._get_missing_requirements(meta)
-                    suffix = f" (unavailable: {missing})" if missing else " (unavailable)"
                 relative_path = Path(entry["path"]).relative_to(root).as_posix()
-                lines.append(f"- **{name}** — {self.get_skill_description(name)}{suffix}  `{relative_path}`")
+                lines.append(f"- **{name}** — {self.get_skill_description(name)}  `{relative_path}`")
             sections.append("\n".join(lines))
         return "\n\n".join(sections)
 
