@@ -98,3 +98,18 @@ error."; `/history` hides injected reports; layer 8 differences #3 and #4
 Crash recovery and "Continue" after a restart (layer 15), idle
 auto-compaction (layer 21; the loop's idle tick is in place), a global
 concurrency limit, goals and cron turns.
+
+## Tests and mutation checks
+
+Layer 14 adds 114 tests (1,111 → 1,225): `test_bus.py`,
+`test_command_router.py`, `test_runner_injections.py`, `test_loop_bus.py`,
+`test_cancellation.py` and additions to the chat and subagent tests, adapted
+from nanobot's bus, router, runner-injection and loop tests.
+
+90 rules were broken on purpose: 78 caught at once; of the 12 survivors, 10
+were real gaps, closed with 11 new tests (e.g. `/status` counting a finished
+task, `/new` from the bus taking the session lock, the worker continuing after
+a failed message, a cancelled turn written to disk, one stream id per
+segment); 2 are equivalent (re-queue order that can't differ on one event
+loop; a deadline check that ends in the same empty result). Result: 88 of 90
+caught, 2 equivalent.
