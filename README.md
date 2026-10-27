@@ -30,6 +30,7 @@ recovery, governance) for later.
 | 12 | Foundations: config file, logging, retries, token usage | done |
 | 13 | Hooks, events, streaming replies | done |
 | 14 | Message bus, session workers, `/stop`, injections | done |
+| 15 | Crash recovery, compaction before every model request | done |
 
 Phase 1 (the core agent) is complete. Phase 2 builds the production backend
 (layers 11–25; progress in [`docs/PHASE2_PROGRESS.md`](docs/PHASE2_PROGRESS.md)).
@@ -91,7 +92,9 @@ at once. `"providerRetryMode": "persistent"` keeps retrying. Add `--logs` to
 `chat`, `ask`, `compact` or `dream` to see what the agent does internally.
 
 Conversations are saved in `~/.nanoclaw/sessions/`, outside the workspace, so
-the agent's file tools can't edit them. Use `--session NAME` to keep several
+the agent's file tools can't edit them. If the process is killed in the middle
+of a turn, the next turn starts with the interrupted turn restored (finished
+tool results kept, unfinished calls marked as interrupted). Use `--session NAME` to keep several
 separate conversations (default `cli:direct`).
 
 Replies stream word by word, with the model's reasoning shown as dim `✻` lines
@@ -107,7 +110,7 @@ is folded into the running turn, as in nanobot.
 Memory, as in nanobot:
 
 ```bash
-uv run nanoclaw compact     # summarize the conversation so far (also automatic when it gets too long)
+uv run nanoclaw compact     # summarize the conversation so far (also automatic, before any model request that would be too long)
 uv run nanoclaw dream       # fold the summaries into long-term memory (memory/MEMORY.md, USER.md, SOUL.md)
 export NANOCLAW_CONTEXT_WINDOW=128000   # your model's context window in tokens (default 128000)
 export NANOCLAW_COMPACTION=nanobot      # or "fixed": NanoClaw's fix for upstream bug 4 (A/B testing it:

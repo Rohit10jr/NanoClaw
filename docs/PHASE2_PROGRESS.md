@@ -66,14 +66,17 @@ Legend: ⏳ in progress · ✅ done and verified · ⛔ blocked
 
 | Task | Scope (files) | Sub-agent | Verification | Status |
 |---|---|---|---|---|
-| 15.1 Crash recovery | `session/recovery.py`, loop restore stage | sub-agent (worktree) | | ⏳ |
-| 15.2 Context governance | `agent/context_governance.py`, runner call site, loop (replaces `_compact_if_needed`), memory, subagents | sub-agent (worktree) | | ⏳ |
-| Comparison, mutation checks, docs, PR | | | | |
+| 15.1 Crash recovery | `session/recovery.py`, loop restore stage | sub-agent (worktree), parallel | 21 checkpoint cases byte-identical to nanobot; real process killed mid-tool, next run restores the turn | ✅ |
+| 15.2 Context governance | `agent/context_governance.py`, runner call site, loop (replaces `_compact_if_needed`), memory, subagents | sub-agent (worktree), parallel | 109 checks, 0 differences (re-run by main session); own mutation run 28/29, 1 equivalent | ✅ |
+| Integration | merges | main session | No conflicts; 1,287 passed | ✅ |
+| Mutation checks | recovery + governance | sub-agent (worktree) | | ⏳ |
+| Docs | note 15, CODE_MAP, README, ROADMAP | main session | — | ✅ |
+| PR | `p2/layer-15` → `main` | main session | | ⏳ |
 
 ## Blockers and open items
 
 | Item | Status |
 |---|---|
 | Real-model tests need API keys as environment secrets | Open; FakeProvider only until then |
-| PRs #2–#4 merged; #5 (layer 13) open | — |
+| PRs #2–#4 merged; #5, #6 (layers 13, 14) open; later layers stacked on them | — |
 | Rewrite earlier commits to the user's author | After phase 2 (user decision) |
