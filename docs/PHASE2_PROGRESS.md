@@ -62,16 +62,16 @@ Legend: ⏳ in progress · ✅ done and verified · ⛔ blocked
 | Docs | note 14, CODE_MAP, README, notes 08, UPSTREAM_BUGS | main session | — | ✅ |
 | PR | `p2/layer-14` → `main` | main session | PR #6 | ✅ |
 
-## Layer 15 — robustness (`p2/layer-15`) ⏳
+## Layer 15 — robustness (`p2/layer-15`) ✅
 
 | Task | Scope (files) | Sub-agent | Verification | Status |
 |---|---|---|---|---|
 | 15.1 Crash recovery | `session/recovery.py`, loop restore stage | sub-agent (worktree), parallel | 21 checkpoint cases byte-identical to nanobot; real process killed mid-tool, next run restores the turn | ✅ |
 | 15.2 Context governance | `agent/context_governance.py`, runner call site, loop (replaces `_compact_if_needed`), memory, subagents | sub-agent (worktree), parallel | 109 checks, 0 differences (re-run by main session); own mutation run 28/29, 1 equivalent | ✅ |
 | Integration | merges | main session | No conflicts; 1,287 passed | ✅ |
-| Mutation checks | recovery + governance | sub-agent (worktree) | | ⏳ |
+| Mutation checks | 96 rules (+29 by 15.2) | sub-agent (worktree) | 90 caught, 6 equivalent (22 tests added); 1,309 passed | ✅ |
 | Docs | note 15, CODE_MAP, README, ROADMAP | main session | — | ✅ |
-| PR | `p2/layer-15` → `main` | main session | | ⏳ |
+| PR | `p2/layer-15` → `main` | main session | PR #7 | ✅ |
 
 ## Blockers and open items
 

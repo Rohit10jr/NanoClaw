@@ -86,11 +86,32 @@ present in both: the crash path restores the same single checkpoint.
 
 ## Tests
 
-Layer 15 adds 62 tests (1,225 → 1,287): `tests/test_recovery.py` (39, adapted
+Layer 15 adds 84 tests (1,225 → 1,309): `tests/test_recovery.py` (39, adapted
 from nanobot's recovery and loop-restore tests, plus a real subprocess killed
-mid-tool) and `tests/test_context_governance.py` (+23); two `test_compaction.py`
+mid-tool) and `tests/test_context_governance.py`, plus the mutation-check tests below; two `test_compaction.py`
 tests now expect compaction inside the runner.
 
 ### Mutation checks
 
-MUTATION_RESULTS
+The task that wrote context governance broke 29 rules (28 caught, 1
+equivalent). A second run broke 96 more across recovery and governance:
+
+| Area | Rules | Caught at once | Gaps closed with tests | Equivalent | Result |
+|---|---|---|---|---|---|
+| Recovery (checkpoints, restore stage, cancel path) | 49 | 41 | 7 | 1 | 48 caught |
+| Context governance (governor, runner, loop, subagent, CLI) | 47 | 26 | 16 | 5 | 42 caught |
+
+22 new tests close the gaps, for example: more malformed-checkpoint cases;
+the longest saved overlap wins; provider counts used only for the same
+request or a prefix of it sent with the same tools; a request exactly at the
+budget fits; the largest unread file is replaced first; an empty summary
+fails the run; the max-iterations summary request builds on the compacted
+request.
+
+Equivalent: skipping the save right after a restore (the next load restores
+the same rows, and the turn's next save writes them); a budget exemption that
+`normalize_tool_result` enforces again; usage kept after compaction (always
+replaced before it is read); fitting older read results (none remain after
+compaction); two boundary checks whose out-of-range values never match a
+commit position (only a log line differs).
+
