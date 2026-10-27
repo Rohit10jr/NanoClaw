@@ -120,8 +120,24 @@ the chat (layer 13); the timezone in the time block; the usage store.
 
 ## Tests
 
-Layer 12 adds about 130 tests (784 → ~915): `tests/test_config.py`,
+Layer 12 adds 139 tests (784 → 923): `tests/test_config.py`,
 `tests/test_logging.py`, `tests/test_retry.py`, `tests/test_usage.py`, plus
 additions to the provider, runner and chat tests, adapted from nanobot's
 `tests/config/`, `test_provider_retry.py`, `test_provider_error_metadata.py`,
 `test_usage_contract.py` and `test_cached_tokens.py`.
+
+### Mutation checks
+
+23 rules were broken on purpose. 17 were caught at once; 6 survived and were
+looked at:
+
+| Survived | Verdict | Now |
+|---|---|---|
+| A 429 with `insufficient_quota` only in the error code | Gap: tests always had quota words in the text too | Test added; caught |
+| Retry mode read from the config | Gap: `_make_loop` test didn't check it | Assertion added; caught |
+| Logger off at package import | Gap: tests turn logs on and off themselves | Fresh-interpreter test added; caught |
+| `--logs` turning logs on | Gap: never run through the CLI | CLI test added; caught |
+| "giving up" log text | Gap | Retry log test added; caught |
+| Error for an unset `${VAR}` in `_env_replace` | Equivalent: unset variables are reported earlier (`_missing_env_issues`), so this message is never shown | Recorded |
+
+Result: 22 of 23 caught, 1 equivalent.

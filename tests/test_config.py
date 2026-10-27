@@ -382,6 +382,7 @@ def test_make_loop_uses_the_config(tmp_path):
                     "temperature": 0.5,
                     "contextWindowTokens": 60_000,
                     "compaction": "fixed",
+                    "providerRetryMode": "persistent",
                 }
             },
             "tools": {"restrictToWorkspace": True},
@@ -392,6 +393,7 @@ def test_make_loop_uses_the_config(tmp_path):
     assert (loop.max_tool_result_chars, loop.max_tokens, loop.temperature) == (999, 100, 0.5)
     assert loop.context_window_tokens == 60_000 and loop.restrict_to_workspace is True
     assert loop.consolidator.archiver.compaction == "fixed"
+    assert loop.provider_retry_mode == "persistent"
     # --restrict can turn the restriction on, not off.
     assert _make_loop(FakeProvider([]), tmp_path, restrict=True).restrict_to_workspace is True
 

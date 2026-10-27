@@ -25,15 +25,18 @@ Legend: ⏳ in progress · ✅ done and verified · ⛔ blocked
 | Docs | note 11, CODE_MAP, ROADMAP, README, WINDOWS, UPSTREAM_BUGS, stale lines | main session | — | ✅ |
 | PR | `p2/layer-11` → `main` | main session | PR #3 | ✅ |
 
-## Layer 12 — foundations (`p2/layer-12`) ⏳
+## Layer 12 — foundations (`p2/layer-12`) ✅
 
 | Task | Scope (files) | Sub-agent | Verification | Status |
 |---|---|---|---|---|
-| 12.1 Config file | new `nanoclaw/config/`, `__main__.py`, `providers/factory.py`, iteration defaults (200), `nanoclaw config` | sub-agent (worktree) | | ⏳ |
-| 12.2 Logging | loguru, `cli/log_control.py`, log calls in memory/session/subagent/skills/tools | sub-agent (worktree) | | ⏳ |
-| 12.3 Retries and usage | `providers/base.py`, `openai_compat.py`, `runner.py`, memory model calls, `LLMUsage` | sub-agent (worktree) | | ⏳ |
-| Integration | wire `providerRetryMode` and `--logs`; merges | main session | | |
-| Comparison, mutation checks, docs, PR | | main session | | |
+| 12.1 Config file | new `nanoclaw/config/`, `__main__.py`, `providers/factory.py`, iteration defaults (200), `nanoclaw config` | sub-agent (worktree) | Same nanobot-style config loaded through both: identical shared values; nanobot's full default config loads; `config init` output loads in nanobot | ✅ |
+| 12.2 Logging | loguru, `cli/log_control.py`, log calls in memory/session/subagent/tool results/web | sub-agent (worktree) | Texts checked against nanobot lines | ✅ |
+| 12.3 Retries and usage | `providers/base.py`, `openai_compat.py`, `runner.py`, memory model calls, `LLMUsage` | sub-agent (worktree) | 15 SDK errors: same decision and wait as nanobot | ✅ |
+| 12.4 Remaining log calls | `runner.py`, `loop.py`, `violations.py`, `utils/tokens.py` | sub-agent (worktree, after integration) | Diff reviewed: only logging plus a count in one return value | ✅ |
+| Integration | retry mode from config, `--logs`, provider retry logs | main session | 3 merges without conflicts | ✅ |
+| Mutation checks | 23 rules | main session | 22 caught, 1 equivalent (5 gaps closed with new tests) | ✅ |
+| Docs | note 12, CODE_MAP, README, ROADMAP | main session | — | ✅ |
+| PR | `p2/layer-12` → `main` | main session | — | ⏳ |
 
 ## Blockers and open items
 

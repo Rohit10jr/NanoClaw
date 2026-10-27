@@ -162,6 +162,8 @@ async def test_long_waits_are_chunked_with_heartbeats(delays):
         (error("request failed", error_kind="timeout"), True),
         (error("429 rate limit", error_should_retry=False), False),
         (error('{"error":{"type":"insufficient_quota"}}', error_status_code=429, error_type="insufficient_quota"), False),
+        # The structured code alone decides, even when the text says nothing about quota.
+        (error("too many requests", error_status_code=429, error_code="insufficient_quota"), False),
         (error("rate limited", error_status_code=429, error_code="rate_limit_exceeded", error_retry_after_s=0.2), True),
         # ZhiPu's rate limit: code 1302 with Chinese text.
         (error("Error: {'code': '1302', 'message': '您的账户已达到速率限制，请您控制请求频率'}"), True),

@@ -360,3 +360,48 @@ def test_repeated_workspace_violation_is_warned(tmp_path, logs):
         f"Escalating repeated workspace bypass attempt {signature} (attempt 3)",
         "Tool read_file hit workspace boundary repeatedly; escalating hint",
     ]
+
+
+# --- off by default, --logs, retry log lines -------------------------------------------------
+
+
+def test_logs_are_off_in_a_fresh_interpreter():
+    """Importing nanoclaw turns its logs off; nothing reaches a sink until enabled."""
+    import subprocess
+
+    code = (
+        "import sys, tempfile; from pathlib import Path; from loguru import logger; "
+        "from nanoclaw.agent.memory import MemoryStore; logger.remove(); "
+        "logger.add(sys.stdout, format='{message}'); "
+        "store = MemoryStore(Path(tempfile.mkdtemp())); "
+        "store.append_history('x' * 70000); print('done')"  # oversized entry: a WARNING when logs are on
+    )
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True).stdout
+    assert out.strip() == "done"
+
+
+def test_cli_logs_flag_turns_logs_on(tmp_path, capsys):
+    from nanoclaw.__main__ import main
+
+    try:
+        assert main(["ask", "hi", "--logs", "-w", str(tmp_path / "ws")], provider=FakeProvider(["hello"])) == 0
+        err = capsys.readouterr().err
+        assert "Processing message from cli:user" in err
+        assert main(["ask", "hi again", "-w", str(tmp_path / "ws")], provider=FakeProvider(["hello"])) == 0
+        assert "Processing message" not in capsys.readouterr().err  # off again without --logs
+    finally:
+        set_nanoclaw_logs(False)
+        logger.remove()
+
+
+async def test_retry_steps_are_logged(logs, monkeypatch):
+    async def no_sleep(_delay):
+        return None
+
+    monkeypatch.setattr("nanoclaw.providers.base.asyncio.sleep", no_sleep)
+    fake = FakeProvider([LLMResponse(content="HTTP 503 down", finish_reason="error", error_status_code=503)] * 4)
+    fake.retries = True
+    await fake.chat_with_retry(messages=[{"role": "user", "content": "x"}])
+    warnings = messages(logs, "WARNING")
+    assert warnings[0] == "LLM transient error (attempt 1/3), retrying in 1s: http 503 down"
+    assert warnings[-1] == "LLM request failed after 4 attempts, giving up: http 503 down"
