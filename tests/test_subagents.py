@@ -6,6 +6,8 @@ import json
 
 import pytest
 
+from nanoclaw.agent.tools.registry import RETRY_HINT
+
 from nanoclaw.__main__ import main
 from nanoclaw.agent.loop import AgentLoop
 from nanoclaw.agent.runner import AgentRunner, AgentRunSpec
@@ -224,7 +226,7 @@ async def test_child_hitting_max_iterations_gets_no_summary_request(ws, tmp_path
     assert len(provider.child_calls) == 3  # no extra finalization request
     # An unfinished child is a tool error (nanobot subagent.py:681).
     assert provider.main_calls[1].messages[-1]["content"].startswith(
-        f"Task incomplete (max_iterations).\n{ITERATION_LIMIT_MESSAGE}\n\n[Analyze the error above"
+        f"Task incomplete (max_iterations).\n{ITERATION_LIMIT_MESSAGE}{RETRY_HINT}"
     )
 
 
