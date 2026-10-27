@@ -23,7 +23,7 @@ Legend: ⏳ in progress · ✅ done and verified · ⛔ blocked
 | Integration | merges | main session | One conflict (old hint text in a new test), fixed; 784 passed | ✅ |
 | Mutation checks | 25 rules | main session | 25/25 caught | ✅ |
 | Docs | note 11, CODE_MAP, ROADMAP, README, WINDOWS, UPSTREAM_BUGS, stale lines | main session | — | ✅ |
-| PR | `p2/layer-11` → `main` | main session | — | ⏳ |
+| PR | `p2/layer-11` → `main` | main session | PR #3 | ✅ |
 
 ## Blockers and open items
 
