@@ -616,3 +616,105 @@ def test_runtime_block_names_the_configured_sandbox(tmp_path):
     plain = access_text(ExecToolConfig())
     assert line not in plain
     assert "File access: no workspace restriction." in plain
+
+
+# --- Gaps found by the layer 18 mutation checks ---
+
+
+def _targets(tokens: list[str], flag: str) -> list[str]:
+    return [tokens[i + 1] for i, token in enumerate(tokens) if token == flag]
+
+
+class TestBindPathNormalization:
+    def test_relative_binds_add_no_mount_at_all(self, tmp_path):
+        """A relative bind is dropped, not resolved against the current directory."""
+        ws = str(tmp_path / "project")
+        tokens = _parse(
+            wrap_command("bwrap", "ls", ws, ws, sandbox_ro_binds=["relative/bin"], sandbox_rw_binds=["relative/cache"])
+        )
+        assert tokens == _parse(wrap_command("bwrap", "ls", ws, ws))
+
+    def test_bind_paths_expand_variables_and_home(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("NC_TOOLS", str(tmp_path / "tools"))
+        ws = str(tmp_path / "project")
+        tokens = _parse(
+            wrap_command("bwrap", "ls", ws, ws, sandbox_ro_binds=["$NC_TOOLS/bin"], sandbox_rw_binds=["~/cache"])
+        )
+        assert str((tmp_path / "tools" / "bin").resolve()) in _targets(tokens, "--ro-bind-try")
+        assert _targets(tokens, "--bind-try") == [str((home / "cache").resolve())]
+
+    def test_symlinked_cwd_inside_the_workspace_keeps_its_subfolder(self, tmp_path):
+        from tests.conftest import symlink_or_skip
+
+        ws = tmp_path / "project"
+        (ws / "sub").mkdir(parents=True)
+        link = tmp_path / "link"
+        symlink_or_skip(link, ws / "sub")
+        tokens = _parse(wrap_command("bwrap", "ls", str(ws), str(link)))
+        assert tokens[tokens.index("--chdir") + 1] == str(ws.resolve() / "sub")
+
+    def test_every_optional_system_path_is_try_bound(self, tmp_path):
+        """nanobot's optional read-only list, in order (DNS, loader cache and certificates included)."""
+        ws = str(tmp_path / "project")
+        assert _targets(_parse(wrap_command("bwrap", "ls", ws, ws)), "--ro-bind-try") == [
+            "/bin",
+            "/lib",
+            "/lib64",
+            "/etc/alternatives",
+            "/etc/ssl/certs",
+            "/etc/pki/tls/certs",
+            "/etc/pki/ca-trust",
+            "/etc/crypto-policies",
+            "/etc/resolv.conf",
+            "/etc/ld.so.cache",
+        ]
+
+
+class TestExecBindRoots:
+    def test_bind_roots_are_absolute_expanded_resolved_and_unique(self, tmp_path, monkeypatch):
+        cache = tmp_path / "cache"
+        monkeypatch.setenv("NC_CACHE", str(cache))
+        assert ExecTool(sandbox="bwrap", sandbox_ro_binds=["relative/bin", "  "]).sandbox_ro_binds == []
+        assert ExecTool(sandbox="bwrap", sandbox_rw_binds=["$NC_CACHE"]).sandbox_rw_binds == [cache.resolve()]
+        assert ExecTool(sandbox="bwrap", sandbox_rw_binds=[str(cache), f"{cache}/"]).sandbox_rw_binds == [
+            cache.resolve()
+        ]
+        dotted = ExecTool(sandbox="bwrap", sandbox_ro_binds=[str(tmp_path / "a" / ".." / "tools")])
+        assert dotted.sandbox_ro_binds == [(tmp_path / "tools").resolve()]
+
+    def test_bind_roots_widen_the_guard_only_for_bwrap(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("nanoclaw.agent.tools.shell._IS_WINDOWS", False)
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        cache = tmp_path / "cache"
+        other = ExecTool(working_dir=str(ws), sandbox="seatbelt", sandbox_rw_binds=[str(cache)])
+        assert other._active_sandbox_bind_roots(ws) == []
+        bwrap = ExecTool(working_dir=str(ws), sandbox="bwrap", sandbox_rw_binds=[str(cache)])
+        assert bwrap._active_sandbox_bind_roots(ws) == [cache.resolve()]
+
+    async def test_sandbox_restricts_every_file_tool_and_passes_both_bind_lists(self, tmp_path):
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        target = outside / "x.txt"
+        target.write_text("a\n")
+        tools, cache = tmp_path / "tools", tmp_path / "cache"
+        cfg = ExecToolConfig(sandbox="bwrap", sandbox_ro_binds=[str(tools)], sandbox_rw_binds=[str(cache)])
+        registry = build_default_tools(ws, exec_config=cfg)
+        calls = [
+            ("read_file", {"path": str(target)}),
+            ("write_file", {"path": str(target), "content": "b\n"}),
+            ("edit_file", {"path": str(target), "old_text": "a", "new_text": "b"}),
+            ("apply_patch", {"edits": [{"path": str(target), "action": "replace", "old_text": "a", "new_text": "b"}]}),
+            ("list_dir", {"path": str(outside)}),
+        ]
+        for name, kwargs in calls:
+            result = await registry.get(name).execute(**kwargs)
+            assert "outside allowed directory" in result, (name, result)
+        assert target.read_text() == "a\n"
+        exec_tool = registry.get("exec")
+        assert exec_tool.sandbox_ro_binds == [tools.resolve()]
+        assert exec_tool.sandbox_rw_binds == [cache.resolve()]

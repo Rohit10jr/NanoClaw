@@ -624,3 +624,206 @@ def test_cli_restrict_with_project_keeps_tools_in_the_project(capsys, layout):
     assert main(["ask", "go", "-w", str(agent), "-p", str(project), "--restrict"], provider=fake) == 0
     assert "outside allowed directory" in fake.calls[1].messages[-1]["content"]
     assert "File access: project and tool-specific allowed paths only." in fake.calls[0].messages[-1]["content"]
+
+
+# --- Gaps found by the layer 18 mutation checks ---------------------------------------------------
+
+
+def test_scope_paths_are_expanded_and_resolved(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    scope = build_workspace_scope(tmp_path / "a" / ".." / "b", "full")
+    assert scope.project_path == (tmp_path / "b").resolve()
+    status = workspace_sandbox_status(restrict_to_workspace=False, workspace="~/proj", environ={})
+    assert status.workspace_root == str((home / "proj").resolve())
+    assert current_tool_workspace("~/proj").project_path == home / "proj"
+    root = Path(tmp_path.anchor)
+    assert build_workspace_scope(root, "full").project_name == str(root)
+
+
+def test_validate_scope_payload_defaults_aliases_and_type_errors(layout):
+    agent, project = layout
+
+    def validate(raw, restrict=False):
+        return validate_workspace_scope_payload(raw, default_workspace=agent, default_restrict_to_workspace=restrict)
+
+    assert validate(None, True) == default_workspace_scope(agent, True)
+    assert validate({"path": str(project)}).project_path == project.resolve()
+    assert validate({"project_path": "", "path": ""}).project_path == agent.resolve()
+    bad = [
+        ("project", "workspace_scope must be an object"),
+        ({"project_path": 5}, "project_path must be a string"),
+        ({"project_path": f"{project}\0x"}, "invalid characters"),
+        ({"project_path": str(project), "access_mode": 1}, "access_mode must be a string"),
+    ]
+    for raw, message in bad:
+        with pytest.raises(WorkspaceScopeError, match=message):
+            validate(raw)
+
+
+@pytest.mark.parametrize(("environ", "level", "provider", "label"), [
+    ({"NANOCLAW_WORKSPACE_SANDBOX_ENFORCED": "0", "NANOCLAW_WORKSPACE_SANDBOX_PROVIDER": "bwrap"}, "application", "none", "None"),
+    ({"NANOCLAW_WORKSPACE_SANDBOX_ENFORCED": "", "NANOCLAW_WORKSPACE_SANDBOX_PROVIDER": "bwrap"}, "application", "none", "None"),
+    ({"NANOCLAW_WORKSPACE_SANDBOX_ENFORCED": "yes", "NANOCLAW_WORKSPACE_SANDBOX_PROVIDER": "bwrap"}, "system", "bwrap", "Bubblewrap"),
+    ({"NANOCLAW_WORKSPACE_SANDBOX_ENFORCED": "1"}, "system", "unknown", "Unknown system sandbox"),
+    ({"NANOCLAW_WORKSPACE_SANDBOX_ENFORCED": "1", "NANOCLAW_WORKSPACE_SANDBOX_PROVIDER": "   "}, "system", "unknown", "Unknown system sandbox"),
+    ({"NANOCLAW_WORKSPACE_SANDBOX_ENFORCED": "macOS-App-Sandbox"}, "system", "macos_app_sandbox", "macOS App Sandbox"),
+    ({"NANOCLAW_WORKSPACE_SANDBOX_ENFORCED": "my_box"}, "system", "my_box", "My Box"),
+])
+def test_sandbox_status_markers(tmp_path, environ, level, provider, label):
+    status = workspace_sandbox_status(restrict_to_workspace=True, workspace=tmp_path, environ=environ)
+    assert (status.level, status.enforced, status.provider, status.provider_label) == (
+        level, level == "system", provider, label
+    )
+
+
+def test_workspace_access_block_escapes_both_brackets_and_keeps_unicode(tmp_path):
+    scope = build_workspace_scope(tmp_path / "[a]" / "café", "full")
+    line = workspace_access_block(scope).content.splitlines()[1]
+    path_json = line.split(": ", 1)[1]
+    assert "[" not in path_json and "]" not in path_json
+    assert "café" in path_json
+    assert json.loads(path_json) == str(scope.project_path)
+
+
+async def test_patch_summary_is_relative_to_the_bound_project(layout):
+    agent, project = layout
+    (project / "app.py").write_text("x = 1\n")
+    with bound(scope_for(project, "full", agent)):
+        result = await ApplyPatchTool(agent).execute(
+            edits=[{"path": "app.py", "action": "replace", "old_text": "x = 1", "new_text": "x = 2"}]
+        )
+    assert "- update app.py" in result
+
+
+def test_skills_summary_resolves_a_linked_agent_workspace(tmp_path):
+    real = tmp_path / "real-agent"
+    link = tmp_path / "agent-link"
+    project = tmp_path / "project"
+    project.mkdir()
+    skill = real / "skills" / "release" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("---\nname: release\ndescription: How we release.\n---\n", encoding="utf-8")
+    symlink_or_skip(link, real)
+    prompt = ContextBuilder(link).build_system_prompt(workspace=project)
+    assert f"### Workspace skills (`{(real / 'skills').resolve()}`)" in prompt
+
+
+async def test_dream_keeps_the_workspace_restriction(layout, tmp_path):
+    agent, project = layout
+    sync_workspace_templates(agent)
+    loop = AgentLoop(
+        FakeProvider([]),
+        agent,
+        sessions=SessionManager(agent, sessions_root=tmp_path / "s"),
+        project=project,
+        restrict_to_workspace=True,
+    )
+    loop.memory.append_history("- [durable] the user prefers tabs")
+    loop.provider = fake = FakeProvider(["done"])
+    await loop.run_dream()
+    current = fake.calls[0].messages[-1]["content"]
+    assert json.dumps(str(agent.resolve())) in current
+    assert "File access: project and tool-specific allowed paths only." in current
+
+
+async def test_turn_scope_reaches_spill_folder_summary_builder_and_consolidator(layout, tmp_path):
+    import contextlib
+
+    agent, project = layout
+    loop = AgentLoop(
+        FakeProvider([]), agent, sessions=SessionManager(agent, sessions_root=tmp_path / "s"), project=project
+    )
+    specs = []
+
+    async def capture(spec):
+        specs.append(spec)
+        raise RuntimeError("captured")
+
+    loop.runner.run = capture
+    with contextlib.suppress(RuntimeError):
+        await loop.process_direct("hi")
+    with contextlib.suppress(RuntimeError):
+        await loop.process_direct("hi", session_key="cli:agent", workspace_scope=loop.agent_workspace_scope)
+    project_turn, agent_turn = specs
+    # Tool-result spill files go to the turn's project.
+    assert project_turn.workspace == project.resolve()
+    assert agent_turn.workspace == agent.resolve()
+    # A mid-turn summary rebuilds the system prompt for the turn's own project.
+    assert "# Current Project" in project_turn.summary_transcript_builder("s")[0]["content"]
+    assert "# Current Project" not in agent_turn.summary_transcript_builder("s")[0]["content"]
+    # Archiving builds the same project prompt as the turns.
+    assert f"Working directory: {project.resolve()}" in loop.consolidator._build_messages([], None)[0]["content"]
+
+
+def _child_runtime(provider):
+    from nanoclaw.utils.llm_runtime import LLMRuntime
+
+    return LLMRuntime(provider=provider, model="m", max_tokens=100, temperature=0.3, context_window_tokens=0)
+
+
+async def test_inline_subagent_binds_the_given_scope_itself(layout):
+    """Outside a bound turn the child binds the scope it was given."""
+    agent, project = layout
+    manager = SubagentManager(agent)
+    provider = FakeProvider([calls(("write_file", {"path": "child.txt", "content": "x"})), "done"])
+    await manager.run_inline("write", runtime=_child_runtime(provider), workspace_scope=scope_for(project, "full", agent))
+    assert (project / "child.txt").read_text() == "x"
+    assert not (agent / "child.txt").exists()
+
+
+async def test_background_subagent_works_in_the_given_scope(layout):
+    import asyncio
+
+    agent, project = layout
+    manager = SubagentManager(agent)
+    provider = FakeProvider([calls(("write_file", {"path": "bg.txt", "content": "y"})), "done"])
+    await manager.spawn("write", runtime=_child_runtime(provider), workspace_scope=scope_for(project, "full", agent))
+    await asyncio.wait_for(manager.bus.consume_inbound(), 5)
+    assert (project / "bg.txt").read_text() == "y"
+    assert not (agent / "bg.txt").exists()
+
+
+async def test_subagent_spills_into_the_project_and_lists_absolute_skills(layout):
+    import contextlib
+
+    agent, project = layout
+    skill = agent / "skills" / "release" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("---\nname: release\ndescription: How we release.\n---\n", encoding="utf-8")
+    manager = SubagentManager(agent)
+    prompt = manager._build_subagent_prompt(workspace=project)
+    assert f"`{(agent / 'skills').resolve()}`" in prompt
+    specs = []
+
+    async def capture(spec):
+        specs.append(spec)
+        raise RuntimeError("captured")
+
+    manager.runner.run = capture
+    with contextlib.suppress(RuntimeError):
+        await manager.run_inline(
+            "t", runtime=_child_runtime(FakeProvider([])), workspace_scope=scope_for(project, "full", agent)
+        )
+    assert specs[0].workspace == project.resolve()
+
+
+def test_cli_chat_project_flag(layout, monkeypatch, capsys):
+    import io
+
+    import nanoclaw.cli.chat as chat_module
+
+    agent, project = layout
+    monkeypatch.setattr(chat_module, "install_exit_signal_handlers", lambda console: None)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("go\n"))
+    fake = FakeProvider([calls(("write_file", {"path": "chat.txt", "content": "z"})), "ok"])
+    assert main(["chat", "-w", str(agent), "-p", str(project), "--no-markdown"], provider=fake) == 0
+    assert (project / "chat.txt").read_text() == "z"
+
+
+def test_cli_blank_project_environment_is_ignored(capsys, layout, monkeypatch):
+    agent, _ = layout
+    monkeypatch.setenv("NANOCLAW_PROJECT", "   ")
+    assert main(["prompt", "-w", str(agent)]) == 0
+    assert "# Current Project" not in capsys.readouterr().out
