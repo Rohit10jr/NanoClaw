@@ -102,12 +102,23 @@ The most model-friendly tool, because models rarely copy text perfectly:
 `📁 src` / `📄 README.md`; skips `.git`, `node_modules`, `__pycache__`,
 `.venv` and similar; notes truncation.
 
-### `exec(command, working_dir, timeout=60)`
-- Runs `bash -c` in the workspace. The model may pick a timeout up to 600 s;
-  the configured default is 60 s and may be higher, and 0 means no limit.
-  On timeout the whole process group is killed, including background children.
-- Output: stdout, `STDERR:` + stderr, `Exit code: N`; over 10,000 characters
-  keeps the start and the end. A non-zero exit code is **not** a tool error:
+### `exec(command, working_dir, max_runtime, yield_time_ms, ...)`
+*(Layer 16 replaced the original one-shot version with nanobot's exec
+sessions; the layer-3 version is described in git history.)*
+- Runs `bash -c` in the workspace, in its own process group, as an **exec
+  session** (`exec_session.py`). `exec` waits `yield_time_ms` (default 1 s,
+  max 30 s): a finished command returns its output, `Exit code: N` and
+  `Elapsed: N.Ns`; a running one returns `Process running. session_id: ...`
+  and keeps running. The model then uses `exec_session` (poll, send stdin,
+  `close_stdin`, `wait_for` a string, `until_exit`, `terminate`) and
+  `list_exec_sessions`. Sessions are private to the chat that started them.
+- Runtime budget: `max_runtime` (alias `timeout`, not both) defaults to
+  3,600 s, at most 86,400 s; 0 configured means no limit. When it runs out
+  the whole process group is killed. A command silent for `idle_timeout`
+  (300 s) is reported, or killed with `idle_action="terminate"`.
+- Output: stdout, `STDERR:` + stderr; over `max_output_chars` (10,000) keeps
+  the start and the end plus `(N chars truncated from output)`. Terminal
+  escape codes are stripped. A non-zero exit code is **not** a tool error:
   failing tests or a failed `grep` are normal information for the model.
 - **Minimal environment:** commands only see `HOME`, `LANG`, `TERM` and
   `PYTHONUNBUFFERED` (bash supplies a default `PATH`). Your `NANOCLAW_API_KEY`
@@ -198,8 +209,8 @@ blocked and the slip-through cases are tested in `tests/test_shell_tool.py`.
 | "File unchanged since last read" | `file_state.py` | Saves tokens when the model rereads a file |
 | `edit_file` `line_hint`, `expected_replacements` | `filesystem.py` | Pick a match by line number; guard the number of replacements |
 | `apply_patch`, ripgrep `search` | `tools/apply_patch.py`, `tools/search.py` | Multi-file patches, fast code search |
-| Background shell sessions | `exec_session.py`, `yield_time_ms` | Long-running commands the model polls |
-| Shell choice, login shells, PATH config, Windows | `shell.py` | Platform support |
+| Background shell sessions | `exec_session.py`, `yield_time_ms` | Long-running commands the model polls (**done in layer 16**) |
+| Shell choice, login shells, PATH config, Windows | `shell.py` | Platform support (shell/login/PATH **done in layer 16**; Windows: task 16.4) |
 | Jina Reader, image fetching, proxies | `web.py` | Better extraction for JS-heavy pages |
 | Other search providers (Brave, Tavily, ...) | `web.py` | ~10 providers with API keys |
 | Tool auto-discovery and plugins | `tools/loader.py`, entry points | Third-party tools without code changes |

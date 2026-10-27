@@ -4,6 +4,7 @@ Tests marked ``requires_posix_shell`` really run a command and are skipped on
 Windows until it has shell support (docs/WINDOWS.md, cause A); the guard tests
 run everywhere."""
 
+import re
 import time
 
 import pytest
@@ -18,16 +19,21 @@ def tool(tmp_path):
     return ExecTool(working_dir=tmp_path)
 
 
+# Since layer 16 every command runs as an exec session and ends with the
+# session's elapsed time (nanobot exec_session.format_session_poll).
+ELAPSED = r"\nElapsed: \d+\.\ds"
+
+
 @requires_posix_shell
 async def test_stdout_and_exit_code(tool):
-    assert await tool.execute(command="echo hello") == "hello\n\n\nExit code: 0"
+    assert re.fullmatch("hello\n\nExit code: 0" + ELAPSED, await tool.execute(command="echo hello"))
 
 
 @requires_posix_shell
 async def test_stderr_and_nonzero_exit_is_not_a_tool_error(tool):
     out = await tool.execute(command="echo oops >&2; exit 3")
     assert not is_tool_error(out)
-    assert out == "STDERR:\noops\n\n\nExit code: 3"
+    assert re.fullmatch("STDERR:\noops\n\nExit code: 3" + ELAPSED, out)
 
 
 @requires_posix_shell
@@ -46,33 +52,57 @@ async def test_missing_working_dir_is_an_error(tool):
 async def test_timeout_kills_the_command_and_its_children(tool, tmp_path):
     marker = tmp_path / "late.txt"
     start = time.monotonic()
-    out = await tool.execute(command=f"(sleep 3; touch {marker}) & sleep 5", timeout=1)
-    assert out == "Error: Command timed out after 1 seconds"
+    out = await tool.execute(command=f"(sleep 3; touch {marker}) & sleep 5", timeout=1, yield_time_ms=3000)
+    assert is_tool_error(out)
+    assert re.fullmatch(
+        "Error: Command timed out; session was terminated. Reason: max_runtime.\nExit code: -9" + ELAPSED, out
+    )
     assert time.monotonic() - start < 3
     time.sleep(2.5)
     assert not marker.exists()  # the background child was killed too
 
 
 def test_timeout_resolution(tmp_path):
+    # nanobot shell.py _resolve_timeout: the model's request is used as given
+    # within 1..max_runtime_limit and rejected outside it, never silently capped.
+    assert ExecTool()._resolve_timeout(None) == 3600  # default max_runtime: 1 hour
     assert ExecTool(timeout=60)._resolve_timeout(None) == 60
     assert ExecTool(timeout=60)._resolve_timeout(5) == 5
-    assert ExecTool(timeout=60)._resolve_timeout(9999) == 600  # model's choice is capped
-    assert ExecTool(timeout=1200)._resolve_timeout(None) == 1200  # configured default may exceed the cap
-    assert ExecTool(timeout=0)._resolve_timeout(None) is None  # 0 = no limit
+    assert ExecTool(timeout=60)._resolve_timeout(9999) == 9999
+    assert ExecTool(max_runtime=0)._resolve_timeout(None) is None  # 0 = no limit
+    assert ExecTool(timeout=0)._resolve_timeout(None) is None
+    with pytest.raises(ValueError, match="between 1 and 86400 seconds"):
+        ExecTool()._resolve_timeout(86401)
+    with pytest.raises(ValueError, match="between 1 and 100 seconds"):
+        ExecTool(max_runtime_limit=100)._resolve_timeout(0)
+    with pytest.raises(ValueError, match="integer number of seconds"):
+        ExecTool()._resolve_timeout(True)
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        ExecTool(timeout=5, max_runtime=5)
+
+
+async def test_timeout_and_max_runtime_together_is_an_error(tool):
+    out = await tool.execute(command="echo hi", timeout=5, max_runtime=5)
+    assert is_tool_error(out) and out == "Error: timeout and max_runtime are mutually exclusive."
+
+
+async def test_runtime_over_the_limit_is_an_error(tool):
+    out = await tool.execute(command="echo hi", max_runtime=86401)
+    assert is_tool_error(out) and out == "Error: max_runtime must be between 1 and 86400 seconds"
 
 
 @requires_posix_shell
 async def test_zero_timeout_means_no_limit(tmp_path):
     out = await ExecTool(working_dir=tmp_path, timeout=0).execute(command="sleep 0.2; echo done")
-    assert out == "done\n\n\nExit code: 0"
+    assert re.fullmatch("done\n\nExit code: 0" + ELAPSED, out)
 
 
 @requires_posix_shell
 async def test_long_output_keeps_head_and_tail(tool):
     out = await tool.execute(command="python3 -c \"print('a' * 6000 + 'b' * 6000)\"")
-    assert out.startswith("a" * 5000)
-    assert "chars truncated) ..." in out
-    assert out.endswith("\n\nExit code: 0")
+    # nanobot: the first and last 5,000 characters, then a note of what was cut.
+    assert out.startswith("a" * 5000 + "b" * 4999 + "\n\n(2,001 chars truncated from output)\nExit code: 0")
+    assert re.search(ELAPSED + "$", out)
 
 
 @requires_posix_shell
@@ -138,7 +168,7 @@ async def test_extra_deny_patterns(tmp_path):
 
 
 async def test_missing_command(tool):
-    assert await tool.execute(command="") == "Error: Missing command. Provide command."
+    assert await tool.execute(command="") == "Error: Missing command. Provide command or cmd."
 
 
 @pytest.mark.parametrize(
