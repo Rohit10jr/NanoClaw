@@ -117,7 +117,7 @@ async def test_cancel_closes_an_open_stream(ws, tmp_path):
     """nanobot ``abort_stream``: the answer streamed and the turn then waits
     for its subagent; /stop ends the open stream segment."""
     gate, started = asyncio.Event(), asyncio.Event()
-    async with Rig(ws, tmp_path, [call("spawn", {"task": "slow"}), "Started."], spawn=True) as rig:
+    async with Rig(ws, tmp_path, [call("subagent", {"action": "create", "task": "slow"}), "Started."], subagent_tool=True) as rig:
         original = rig.provider.chat
 
         async def chat(messages, *args, **kwargs):

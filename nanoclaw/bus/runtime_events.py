@@ -4,10 +4,11 @@ A slim copy of nanobot/bus/runtime_events.py: the events a turn's delivery
 publishes with ``MessageBus.publish`` (never to channels) so local consumers,
 such as the terminal chat, know when a turn starts, runs and goes idle.
 
-Left out until something consumes them: ``UserInputAccepted``,
-``TurnRuntimeAdmitted``, ``SessionTurnPersisted``, goal and subagent task
-events, and the usage/runtime bookkeeping on ``TurnCompleted`` (nanobot
-records the runtime and every round's usage for its WebUI).
+Since layer 19 also ``SubagentTaskChanged`` (a subagent task's status
+changed; nanobot's WebUI task cards read it, nothing in NanoClaw consumes it
+yet). Left out until something consumes them: ``UserInputAccepted``,
+``TurnRuntimeAdmitted``, ``SessionTurnPersisted``, goal events, and the
+usage/runtime bookkeeping on ``TurnCompleted`` (nanobot records the runtime and every round's usage for its WebUI).
 """
 
 from __future__ import annotations
@@ -56,6 +57,14 @@ class TurnCompleted(AgentEvent):
     latency_ms: int | None = None
     outcome: str = "completed"
     failure_kind: str | None = None
+
+
+@dataclass(frozen=True)
+class SubagentTaskChanged(AgentEvent):
+    """A parent-owned task observation changed. (nanobot :95)"""
+
+    context: RuntimeEventContext
+    task_id: str
 
 
 class RuntimeEventPublisher:

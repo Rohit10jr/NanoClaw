@@ -168,7 +168,7 @@ def test_tool_hints():
     assert format_tool_hints([tc("web_fetch", {"url": "https://example.com/a/very/long/path/to/the/page.html"})]) == (
         "fetch example.com/…/path/to/the/page.html"
     )
-    assert format_tool_hints([tc("spawn", {"task": "summarize"})]) == 'spawn("summarize")'
+    assert format_tool_hints([tc("subagent", {"action": "create", "task": "summarize"})]) == 'subagent("create")'
     assert format_tool_hints([]) == ""
 
 
@@ -355,7 +355,7 @@ async def test_stop_cancels_the_waiting_turn_and_its_subagent(ws, tmp_path):
     cancels both while the turn waits. Before layer 14 the turn ended at once
     and /stop only found the subagent ("Stopped 1 task(s).")."""
     gate, child_started = asyncio.Event(), asyncio.Event()
-    chat, provider, out = make_chat(ws, tmp_path, [call("spawn", {"task": "slow job"}), "Started."], [], type_ahead=True)
+    chat, provider, out = make_chat(ws, tmp_path, [call("subagent", {"action": "create", "task": "slow job"}), "Started."], [], type_ahead=True)
     gate_children(provider, gate, child_started)
 
     async def stop_while_waiting():
@@ -386,7 +386,7 @@ async def test_background_result_is_injected_into_the_waiting_turn(ws, tmp_path)
     """Layer 14: the report arrives on the bus while the turn waits for it and
     is folded into the same turn (layer 8 difference #3 is gone)."""
     chat, provider, out = make_chat(
-        ws, tmp_path, [call("spawn", {"task": "check weather", "label": "Weather"}), "On it.", "It is sunny."], ["weather?"]
+        ws, tmp_path, [call("subagent", {"action": "create", "task": "check weather", "label": "Weather"}), "On it.", "It is sunny."], ["weather?"]
     )
     original = provider.chat
 
@@ -418,7 +418,7 @@ async def test_background_result_after_the_turn_is_printed_while_waiting_for_inp
     gate = asyncio.Event()
     printed = asyncio.Event()
     chat, provider, out = make_chat(
-        ws, tmp_path, [call("spawn", {"task": "check weather", "label": "Weather"}), "On it.", "It is sunny."], []
+        ws, tmp_path, [call("subagent", {"action": "create", "task": "check weather", "label": "Weather"}), "On it.", "It is sunny."], []
     )
     original_output = chat.output_above_prompt
 
@@ -605,7 +605,7 @@ async def test_new_and_status_with_a_running_subagent(ws, tmp_path):
     """Layer 14: the turn waits for its subagent, so the chat uses type-ahead
     and /status counts the waiting turn too (nanobot builtin.py:295-298)."""
     gate, child_started = asyncio.Event(), asyncio.Event()
-    chat, provider, out = make_chat(ws, tmp_path, [call("spawn", {"task": "slow job"}), "Started."], [], type_ahead=True)
+    chat, provider, out = make_chat(ws, tmp_path, [call("subagent", {"action": "create", "task": "slow job"}), "Started."], [], type_ahead=True)
     gate_children(provider, gate, child_started)
 
     async def status_while_waiting():

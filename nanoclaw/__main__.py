@@ -254,10 +254,11 @@ async def _ask(
 async def _deliver_subagent_results(loop: AgentLoop, config: Config | None = None) -> int:
     """Wait for background subagents and let the main agent report each result.
 
-    nanobot's one-shot ``agent -m`` cancels them at exit and loses their
-    results; its chat and server modes deliver them as they finish (as
-    ``nanoclaw chat`` does). ``ask`` waits instead, so a background spawn is
-    still useful in one-shot use.
+    Since layer 19 ``ask`` normally finds none: with no bus loop running, the
+    ``subagent`` tool runs every child inline (``wait`` or not) and its result
+    is the tool result, as in nanobot's one-shot ``agent -m`` (c4dac64). Kept
+    for reports that still reach the bus (e.g. a child started with
+    ``SubagentManager.spawn`` directly).
     """
     status = 0
     while (report := await loop.next_subagent_result()) is not None:

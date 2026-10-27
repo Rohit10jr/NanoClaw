@@ -26,10 +26,15 @@ model's context window, and the loop runs nanobot's ``/compact``, ``/new``
 every model request of the turn, inside the runner (context_governance.py);
 the loop passes the summarizer and commits the summary when it saves the turn.
 
-Since layer 8 the main agent has the ``spawn`` tool. A background subagent's
-report arrives on the bus (since layer 14): injected into a running turn of
-its session, or run as a follow-up turn (``process_subagent_result``): saved
-as an assistant message and shown to the model as new input.
+Since layer 8 the main agent can start subagents; since layer 19 with
+nanobot's ``subagent`` tool (create / send / cancel / check session-owned
+tasks, each with a private child session). A child created while no bus loop
+runs (``process_direct``, e.g. ``nanoclaw ask``) or from a temporary turn
+always runs inline, as in nanobot. A background subagent's report arrives on
+the bus (since layer 14): injected into a running turn of its session, or run
+as a follow-up turn (``process_subagent_result``): saved as an assistant
+message and shown to the model as new input. A report whose child session no
+longer belongs to the session is dropped (``accepts_result``).
 
 Since layer 13 each turn builds nanobot's hook chain (``build_agent_turn_hook``)
 over an :class:`EventSink`: progress, tool hints, reasoning, stream deltas and
@@ -77,10 +82,10 @@ from nanoclaw.agent.tools import ToolRegistry, build_default_tools
 from nanoclaw.agent.tools.exec_session import ExecSessionManager
 from nanoclaw.agent.tools.context import RequestContext, bind_request_context, reset_request_context
 from nanoclaw.agent.tools.file_state import FileStateStore, bind_file_states, reset_file_states
-from nanoclaw.agent.tools.spawn import SpawnTool
+from nanoclaw.agent.tools.subagent import SubagentTool
 from nanoclaw.agent.turn_delivery import TurnDelivery, TurnDeliveryFactory
 from nanoclaw.agent.turn_hooks import AgentTurnHookSpec, build_agent_turn_hook
-from nanoclaw.bus.events import InboundMessage, OutboundMessage
+from nanoclaw.bus.events import INBOUND_META_TURN_ID, InboundMessage, OutboundMessage
 from nanoclaw.bus.outbound_events import StreamDeltaEvent, StreamedResponseEvent, StreamEndEvent
 from nanoclaw.bus.queue import MessageBus
 from nanoclaw.command import CommandContext, CommandRouter, command_text, register_builtin_commands
@@ -169,6 +174,9 @@ class TurnContext:
     streamed_content: bool = False
     started_at: float = field(default_factory=time.time)
     latency_ms: int | None = None
+    # ``<session key>:<ns>``; a subagent task records it as its origin turn
+    # (nanobot ``TurnContext.turn_id``, loop.py:1910).
+    turn_id: str = ""
 
 
 class AgentLoop:
@@ -224,6 +232,9 @@ class AgentLoop:
         # (nanobot loop.py:397): /stop and /new end the session's ones,
         # ``aclose`` ends all.
         self._exec_session_manager = ExecSessionManager()
+        self.sessions = sessions if sessions is not None else SessionManager(workspace)
+        # Children keep private sessions (``subagent:<id>``) in the same store
+        # (nanobot loop.py:409, ``session_manager=self.sessions``).
         self.subagents = SubagentManager(
             workspace,
             max_tool_result_chars=max_tool_result_chars,
@@ -232,20 +243,20 @@ class AgentLoop:
             restrict_to_workspace=restrict_to_workspace,
             bus=self.bus,
             exec_config=self.exec_config,
+            session_manager=self.sessions,
         )
         if tools is None:
-            # The main agent's tools: the standard set plus spawn. Subagents and
-            # Dream build their own sets without it.
+            # The main agent's tools: the standard set plus ``subagent``.
+            # Subagents and Dream build their own sets without it.
             tools = build_default_tools(
                 workspace,
                 restrict_to_workspace=restrict_to_workspace,
                 exec_session_manager=self._exec_session_manager,
                 exec_config=self.exec_config,
             )
-            tools.register(SpawnTool(self.subagents))
+            tools.register(SubagentTool(self.subagents))
             logger.info("Registered {} tools: {}", len(tools.tool_names), tools.tool_names)
         self.tools = tools
-        self.sessions = sessions if sessions is not None else SessionManager(workspace)
         # One file-read/write tracker per session (nanobot loop.py:389). The
         # tool registry is shared by this loop, so tools resolve the active
         # state via contextvars; ``read_file`` uses it to answer a repeat read
@@ -368,7 +379,8 @@ class AgentLoop:
                 ),
                 streaming=streaming or on_stream is not None,
             )
-        assert ctx.result is not None
+        if ctx.result is None:  # dropped: the child no longer belongs to the session
+            return AgentRunResult(final_content=None, messages=[])
         return ctx.result
 
     async def next_subagent_result(self) -> SubagentResult | None:
@@ -402,6 +414,9 @@ class AgentLoop:
         self._running = True
         try:
             logger.info("Agent loop started")
+            # Tasks a previous process left running can't finish any more
+            # (nanobot runs this when the gateway starts, gateway_runtime.py:1029).
+            await self.subagents.recover_interrupted()
             while self._running:
                 try:
                     async with asyncio.timeout(1.0):
@@ -475,6 +490,8 @@ class AgentLoop:
     async def _enqueue_session_message(self, msg: InboundMessage) -> None:
         """Queue session work; start the session's worker if it has none. (nanobot loop.py:1564)"""
         key = msg.session_key
+        if not self.subagents.accepts_result(msg, key):
+            return
         pending = self._pending_queues.get(key)
         if pending is not None:
             pending.put_nowait(msg)
@@ -709,6 +726,10 @@ class AgentLoop:
             key = session_key or self._system_session_key(msg)
         else:
             key = session_key or msg.session_key
+        if not self.subagents.accepts_result(msg, key):
+            # The report's child session no longer belongs to this session
+            # (nanobot loop.py:1888). No turn runs.
+            return TurnContext(msg=msg, session_key=key, kind=kind, events=events, streaming=streaming)
         ctx = TurnContext(
             msg=msg,
             session_key=key,
@@ -721,6 +742,7 @@ class AgentLoop:
             hooks=list(hooks or []),
             delivery=delivery,
             workspace_scope=workspace_scope or self.workspace_scope,
+            turn_id=f"{key}:{time.time_ns()}",
         )
         if streaming:
             # Whether the last streamed segment had text, so the final answer
@@ -977,10 +999,20 @@ class AgentLoop:
                 return []
             return await _drain_pending(first_msg=msg)
 
-        # Tools such as spawn read the turn's session, chat and model settings.
+        # Tools such as subagent read the turn's session, chat and model
+        # settings (nanobot ``_request_context_for_turn``, loop.py:777).
         token = bind_request_context(
             RequestContext(
-                channel=ctx.msg.channel, session_key=session.key, runtime=self.runtime, chat_id=ctx.msg.chat_id
+                channel=ctx.msg.channel,
+                session_key=session.key,
+                runtime=self.runtime,
+                chat_id=ctx.msg.chat_id,
+                message_id=ctx.msg.metadata.get("message_id"),
+                # A transport's turn id wins (nanobot loop.py:781, ``route.turn_id``).
+                turn_id=ctx.msg.metadata.get(INBOUND_META_TURN_ID) or ctx.turn_id,
+                log_content=not ephemeral,
+                persist_session=not ephemeral,
+                can_receive_background_results=self._running,
             )
         )
         # nanobot loop.py:1310-1328: the progress hook first, then this

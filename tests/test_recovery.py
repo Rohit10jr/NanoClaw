@@ -400,6 +400,11 @@ async def test_a_subagent_report_after_a_crash_restores_first(ws, tmp_path):
 
     write_crashed_session(tmp_path, AWAITING)
     loop, fake = make_loop(ws, tmp_path, "Noted.")
+    # The report's child session still belongs to cli:direct (otherwise the
+    # report is dropped, as in nanobot: ``accepts_result``).
+    loop.sessions.save(
+        Session(key="subagent:t1", metadata={"session_type": "subagent", "parent_session_key": "cli:direct"})
+    )
     report = InboundMessage(
         channel="system",
         sender_id="subagent",

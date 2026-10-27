@@ -7,7 +7,7 @@ from typing import Any
 
 from nanoclaw.agent.loop import AgentLoop
 from nanoclaw.agent.tools import Tool, ToolRegistry
-from nanoclaw.agent.tools.spawn import SpawnTool
+from nanoclaw.agent.tools.subagent import SubagentTool
 from nanoclaw.bus import InboundMessage, OutboundMessage
 from nanoclaw.bus.outbound_events import StreamedResponseEvent
 from nanoclaw.bus.runtime_events import SessionTurnStarted, TurnCompleted, TurnRunStatusChanged
@@ -62,7 +62,7 @@ class SlowTool(Tool):
 class Rig:
     """``async with Rig(...) as rig``: the loop runs, outbound and lifecycle events are recorded."""
 
-    def __init__(self, ws, tmp_path, script=(), *, spawn: bool = False, sessions_root=None) -> None:
+    def __init__(self, ws, tmp_path, script=(), *, subagent_tool: bool = False, sessions_root=None) -> None:
         sync_workspace_templates(ws)
         self.provider = FakeProvider(list(script))
         self.slow = SlowTool()
@@ -75,8 +75,8 @@ class Rig:
             tools=tools,
             sessions=SessionManager(ws, sessions_root=sessions_root or tmp_path / "sessions"),
         )
-        if spawn:
-            tools.register(SpawnTool(self.loop.subagents))
+        if subagent_tool:
+            tools.register(SubagentTool(self.loop.subagents))
         self.outbound: list[OutboundMessage] = []
         self.lifecycle: list[Any] = []
         self._tasks: list[asyncio.Task[Any]] = []

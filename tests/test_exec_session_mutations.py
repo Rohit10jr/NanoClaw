@@ -427,17 +427,24 @@ def _runtime(provider) -> LLMRuntime:
 
 async def test_failed_child_cleanup_replaces_the_answer(tmp_path):
     sm = SubagentManager(tmp_path)
-    original_new = sm._new_exec_manager
+    original_run = sm._run_subagent
 
-    def new_manager(task_id):
-        manager = original_new(task_id)
-        manager.close_all = AsyncMock(side_effect=[RuntimeError("cleanup failed"), 0])
-        return manager
+    async def run_subagent(record):
+        record.exec_manager.close_all = AsyncMock(side_effect=[RuntimeError("cleanup failed"), 0])
+        return await original_run(record)
 
-    sm._new_exec_manager = new_manager
-    result = await sm.run_inline("t", runtime=_runtime(FakeProvider(["child done"])))
-    assert "Partial result" not in result and "child done" not in result
-    assert result.endswith("Error cleaning up task processes: cleanup failed")
+    sm._run_subagent = run_subagent
+    reply = await sm.spawn("t", runtime=_runtime(FakeProvider(["child done"])))
+    task_id = reply.split("(id: ")[1].split(")")[0]
+    report = await asyncio.wait_for(sm.bus.consume_inbound(), 5)
+    # Same as nanobot c4dac64: the error replaces the outcome, the child's
+    # last answer is kept as partial output.
+    status = sm.runtime_statuses()[task_id]
+    assert (status.state, status.result, status.partial) == ("error", "child done", True)
+    assert status.error == "Error cleaning up task processes: cleanup failed"
+    assert report.content.startswith("[Subagent 't' failed]")
+    assert "Error: Error cleaning up task processes: cleanup failed\n" in report.content
+    assert "This is partial output from an unfinished task." in report.content
     await sm.close()
 
 
@@ -455,11 +462,12 @@ async def test_child_cancelled_before_it_starts_releases_its_exec_manager(tmp_pa
     task.cancel()  # before its first step: _run_subagent never runs
     await asyncio.gather(task, return_exceptions=True)
     for _ in range(50):
-        if not sm._exec_managers:
+        if not sm._tasks:
             break
         await asyncio.sleep(0.01)
-    assert not sm._exec_managers
+    assert not sm._tasks
     assert not sm.has_pending_work
+    assert [s.state for s in sm.statuses_for_session("cli:direct").values()] == ["cancelled"]
 
 
 # -- Windows branches (mocked) ---------------------------------------------------------------
