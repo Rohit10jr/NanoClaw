@@ -62,6 +62,14 @@ Legend: ⏳ in progress · ✅ done and verified · ⛔ blocked
 | Docs | note 14, CODE_MAP, README, notes 08, UPSTREAM_BUGS | main session | — | ✅ |
 | PR | `p2/layer-14` → `main` | main session | PR #6 | ✅ |
 
+## Layer 15 — robustness (`p2/layer-15`) ⏳
+
+| Task | Scope (files) | Sub-agent | Verification | Status |
+|---|---|---|---|---|
+| 15.1 Crash recovery | `session/recovery.py`, loop restore stage | sub-agent (worktree) | | ⏳ |
+| 15.2 Context governance | `agent/context_governance.py`, runner call site, loop (replaces `_compact_if_needed`), memory, subagents | sub-agent (worktree) | | ⏳ |
+| Comparison, mutation checks, docs, PR | | | | |
+
 ## Blockers and open items
 
 | Item | Status |
