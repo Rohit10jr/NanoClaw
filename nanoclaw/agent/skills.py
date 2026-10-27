@@ -136,7 +136,7 @@ class SkillsLoader:
             content=f"[Active Skills — instructions for this user turn]\n{content}\n[/Active Skills]",
         )
 
-    def build_skills_summary(self, exclude: set[str] | None = None) -> str:
+    def build_skills_summary(self, exclude: set[str] | None = None, *, workspace: Path | None = None) -> str:
         """Name, description and path of each available skill, grouped by source.
 
         Skills whose required programs or environment variables are missing
@@ -146,13 +146,23 @@ class SkillsLoader:
         ``read_file``. The workspace folder is shown as ``skills``; the
         built-in one by its absolute path, because directory tools need the
         real path (only ``read_file`` maps ``skills/<name>/...`` to it).
+
+        ``workspace`` is the turn's project folder: when it is not the agent
+        workspace, relative paths would resolve against the project, so the
+        workspace folder is shown by its absolute path too (nanobot
+        skills.py:275-298).
         """
         all_skills = self.list_skills(filter_unavailable=True)
         if not all_skills:
             return ""
         sections: list[str] = []
+        agent_workspace = self.workspace.expanduser().resolve()
+        project_workspace = (workspace or self.workspace).expanduser().resolve()
+        workspace_root = (
+            Path("skills") if project_workspace == agent_workspace else self.workspace_skills.expanduser().resolve()
+        )
         groups = (
-            ("Workspace skills", "workspace", self.workspace_skills, Path("skills")),
+            ("Workspace skills", "workspace", self.workspace_skills, workspace_root),
             ("Built-in skills", "builtin", self.builtin_skills, self.builtin_skills.expanduser().resolve()),
         )
         for label, source, root, display_root in groups:

@@ -255,7 +255,7 @@ async def test_turn_saves_the_named_skill_with_the_message(ws, tmp_path):
     loop = AgentLoop(fake, ws, tools=ToolRegistry(), sessions=SessionManager(ws, sessions_root=tmp_path / "s"))
     await loop.process_direct("$weather in Paris?")
     user = loop.sessions.get_or_create("cli:direct").messages[0]
-    assert user["_runtime_context"]["sources"] == ["time", "explicit_skills"]
+    assert user["_runtime_context"]["sources"] == ["time", "workspace_access", "explicit_skills"]
     assert "### Skill: weather" in user["content"]
     sent = fake.calls[0].messages[-1]["content"]
     assert sent.count("[Active Skills") == 1 and sent.index("Current Time") < sent.index("[Active Skills")

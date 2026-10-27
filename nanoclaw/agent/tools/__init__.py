@@ -60,13 +60,13 @@ def build_default_tools(
     cfg = exec_config if exec_config is not None else ExecToolConfig()
     # A configured shell sandbox restricts the file tools too (nanobot
     # ``restrict = restrict_to_workspace or exec.sandbox``, filesystem.py:83).
-    fs_restrict = restrict_to_workspace or bool(cfg.sandbox)
+    fs = {"restrict_to_workspace": restrict_to_workspace, "sandbox_restricts_workspace": bool(cfg.sandbox)}
     tools: list[Tool] = [
-        ReadFileTool(workspace, restrict_to_workspace=fs_restrict, file_states=file_states),
-        WriteFileTool(workspace, restrict_to_workspace=fs_restrict, file_states=file_states),
-        EditFileTool(workspace, restrict_to_workspace=fs_restrict, file_states=file_states),
-        ApplyPatchTool(workspace, restrict_to_workspace=fs_restrict, file_states=file_states),
-        ListDirTool(workspace, restrict_to_workspace=fs_restrict, file_states=file_states),
+        ReadFileTool(workspace, **fs, file_states=file_states),
+        WriteFileTool(workspace, **fs, file_states=file_states),
+        EditFileTool(workspace, **fs, file_states=file_states),
+        ApplyPatchTool(workspace, **fs, file_states=file_states),
+        ListDirTool(workspace, **fs, file_states=file_states),
     ]
     if cfg.enable:
         # nanobot ExecTool.create (shell.py:173).

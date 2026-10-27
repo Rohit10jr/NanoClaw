@@ -65,6 +65,7 @@ from nanoclaw.agent.tools.exec_session import (
 from nanoclaw.agent.tools.sandbox import wrap_command
 from nanoclaw.agent.tools.schema import object_schema
 from nanoclaw.security.network import contains_internal_url
+from nanoclaw.security.workspace_access import current_tool_workspace
 from nanoclaw.security.workspace_policy import is_path_within
 
 _IS_WINDOWS = sys.platform == "win32"
@@ -402,11 +403,20 @@ class ExecTool(Tool):
         login: bool | None = None,
     ) -> _PreparedCommand | str:
         """Resolve cwd, run the guard, wrap in the sandbox, and build env and
-        shell (nanobot shell.py:380)."""
-        # A configured sandbox forces restricted mode (nanobot
-        # ``current_tool_workspace(..., sandbox_restricts_workspace=...)``).
-        restrict = self.restrict_to_workspace or bool(self.sandbox)
-        workspace_root = self.working_dir
+        shell (nanobot shell.py:380).
+
+        The default cwd, the restricted root and the sandbox root are the
+        turn's project (``current_tool_workspace``, nanobot shell.py:388);
+        without a bound scope, ``working_dir`` and the tool's own restriction.
+        A configured sandbox forces restricted mode (nanobot
+        ``sandbox_restricts_workspace``).
+        """
+        access = current_tool_workspace(
+            self.working_dir,
+            restrict_to_workspace=self.restrict_to_workspace,
+            sandbox_restricts_workspace=bool(self.sandbox),
+        )
+        workspace_root = str(access.project_path) if access.project_path is not None else self.working_dir
         if working_dir:
             requested_dir = Path(working_dir).expanduser()
             cwd = str(
@@ -419,7 +429,7 @@ class ExecTool(Tool):
         # Restricted mode: an LLM-supplied working_dir must not escape the
         # workspace, or absolute paths under it would pass the path check in
         # _guard_command, which is anchored on cwd (nanobot #2826).
-        if restrict and workspace_root:
+        if access.restrict_to_workspace and workspace_root:
             try:
                 requested = Path(cwd).expanduser().resolve()
                 resolved_root = Path(workspace_root).expanduser().resolve()
@@ -434,7 +444,7 @@ class ExecTool(Tool):
         guard_error = self._guard_command(
             shlex.join(command) if isinstance(command, list) else command,
             cwd,
-            restrict_to_workspace=restrict,
+            restrict_to_workspace=access.restrict_to_workspace,
             workspace_root=workspace_root,
         )
         if guard_error:

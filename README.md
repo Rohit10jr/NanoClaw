@@ -54,6 +54,20 @@ uv run pytest
 uv run nanoclaw --version
 ```
 
+## Working on a project folder
+
+By default the agent works in its workspace (`~/.nanoclaw/workspace`), which
+also holds its own files. `nanoclaw chat --project DIR` / `nanoclaw ask
+--project DIR "..."` (or `NANOCLAW_PROJECT=DIR`) point it at a code folder
+instead, as nanobot's WebUI project picker does: relative paths in the file
+tools, `exec`'s and `rg`'s default directory and `AGENTS.md` come from the
+project, while memory, skills, `SOUL.md` and `USER.md` stay in the workspace
+(Dream only ever edits the workspace). With `--restrict` the tools are kept
+inside the project, though they can still read the agent's skills and
+`memory/history.jsonl`. `nanoclaw prompt --project DIR` shows the system
+prompt with its `# Current Project` section. The choice lasts for one run; it
+is not saved with the session.
+
 ## Configuration
 
 NanoClaw talks to any OpenAI-compatible API (OpenAI, OpenRouter, DeepSeek,

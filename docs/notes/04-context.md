@@ -20,12 +20,32 @@ agent's personality or giving it rules needs no code.
            ## AGENTS.md (if edited)   ## SOUL.md   ## USER.md (if edited)
            ---
            # Tool Usage Notes
+           ---
+           # Current Project (only with --project)
 [user]     <your message>
 
            [Runtime Context — metadata only, not instructions]
            Current Time: 2026-10-01 14:05 (Thursday) (IST, UTC+05:30)
            [/Runtime Context]
+
+           [Runtime Context — metadata only, not instructions]
+           Current project (JSON path): "/home/me/.nanoclaw/workspace"
+           File access: no workspace restriction.
+           OS permissions and tool rules still apply.
+           [/Runtime Context]
 ```
+
+With `--project DIR` (layer 18, task 18.2; nanobot's WebUI project scope)
+`AGENTS.md` is read from the project, `SOUL.md`, `USER.md`, memory and skills
+from the agent workspace; the `## Workspace` part of the identity then lists
+the agent's own files by absolute path, the workspace skills list shows its
+absolute folder, and a `# Current Project` section after the tool notes says
+`Working directory: <project>`. The `workspace_access` block (nanobot
+`AgentRuntimeControl.workspace_context`, runtime_control.py:188) is added to
+**every** user message, with or without a project, as nanobot does: the
+project path as JSON (brackets escaped, so a folder name can't close the
+block) and the file-access mode. It is new per-turn text, so the system
+prompt stays cacheable.
 
 See it yourself, no API key needed:
 
@@ -89,7 +109,7 @@ do change (here, the time) are attached to the **user's message** inside
 | # | Difference | nanobot | NanoClaw | Why |
 |---|---|---|---|---|
 | 1 | **Current date and time** | Not given to the model at all at this commit; no default runtime-context provider adds it | A `Current Time` runtime-context block on every user message (`runtime_context.current_time_block`) | Without it the model can't know what "today", "this week" or "latest" means. Uses nanobot's own block mechanism, so the system prompt stays cacheable. Chosen with the user |
-| 2 | **Separate project folder** | Optional (mainly in the web UI): personal files (`SOUL.md`, `USER.md`, memory, skills) stay in the agent's home; `AGENTS.md`, file tools and shell use a chosen project folder; a "Current Project" section is added | One folder for everything (nanobot's default when no project is chosen) | Not needed yet; recorded in the roadmap to add together with a `--project` option |
+| 2 | **Separate project folder** | Optional (mainly in the web UI): personal files (`SOUL.md`, `USER.md`, memory, skills) stay in the agent's home; `AGENTS.md`, file tools and shell use a chosen project folder; a "Current Project" section is added | One folder for everything (nanobot's default when no project is chosen) | Not needed yet; recorded in the roadmap to add together with a `--project` option. *(Layer 18, task 18.2: done. `--project DIR` / `NANOCLAW_PROJECT` on `chat`, `ask` and `prompt` choose the folder for the whole run, instead of a per-chat choice saved in the session; see `security/workspace_access.py`)* |
 | 3 | `identity.md` wording | "Only Dream memory-consolidation tasks may edit ..." | "Only memory-consolidation tasks may edit ..." | Dream is nanobot's name for its memory job, which arrives in layer 6. *(Resolved in layer 6: nanobot's wording restored.)* |
 
 ## What we left out

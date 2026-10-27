@@ -219,10 +219,10 @@ Note: [`notes/04-context.md`](notes/04-context.md)
 
 | NanoClaw | nanobot | How it compares |
 |---|---|---|
-| [`ContextBuilder`](../nanoclaw/agent/context.py#L29) | [`agent/context.py:89`][nb-l4-cb] | Simplified: one workspace folder; skills since layer 7 |
+| [`ContextBuilder`](../nanoclaw/agent/context.py#L29) | [`agent/context.py:89`][nb-l4-cb] | Simplified; skills since layer 7; a separate project folder (`workspace=`) since layer 18 |
 | ↳ `BOOTSTRAP_FILES`, `_SKIPPABLE_DEFAULTS` | [`context.py:92`][nb-l4-boot] | Same |
 | ↳ [`build_system_prompt()`](../nanoclaw/agent/context.py#L45) | [`context.py:101`][nb-l4-bsp] | Same order and separator; memory and summary sections since layer 6, skills sections since layer 7 (whole prompt checked identical) |
-| ↳ [`_get_identity()`](../nanoclaw/agent/context.py#L78) | [`context.py:154`][nb-l4-id] | Same; agent and project path are the same folder |
+| ↳ [`_get_identity()`](../nanoclaw/agent/context.py#L78) | [`context.py:154`][nb-l4-id] | Same; the project differs from the agent workspace with `--project` (layer 18) |
 | ↳ [`_load_bootstrap_files()`](../nanoclaw/agent/context.py#L96) | [`context.py:194`][nb-l4-load] | Same rules, minus the legacy `SOUL.md` upgrade |
 | ↳ [`_is_template_content()`](../nanoclaw/agent/context.py#L111) | [`context.py:224`][nb-l4-istpl] | Same |
 | ↳ [`build_messages()`](../nanoclaw/agent/context.py#L140) | [`context.py:231`][nb-l4-bm] (+ `build_transcript`) | Simplified: merges a trailing user message (and its `_meta`); no media. Since layer 6: `current_message=None` and `session_summary` |
@@ -389,7 +389,7 @@ Note: [`notes/07-skills.md`](notes/07-skills.md)
 | ↳ [`list_skills()`](../nanoclaw/agent/skills.py#L84), [`_skill_entries_from_dir()`](../nanoclaw/agent/skills.py#L69) | [`:90`][nb-l7-list], [`:74`][nb-l7-entries] | Same order and precedence (workspace wins), unsorted as in nanobot |
 | ↳ [`load_skill()`](../nanoclaw/agent/skills.py#L99), [`load_skills_for_context()`](../nanoclaw/agent/skills.py#L104) | [`:132`][nb-l7-load], [`:148`][nb-l7-loadctx] | Same |
 | ↳ [`get_explicitly_invoked_skills()`](../nanoclaw/agent/skills.py#L113), [`build_explicit_skill_runtime_context()`](../nanoclaw/agent/skills.py#L125) | [`:165`][nb-l7-explicit], [`:182`][nb-l7-block] | Same (`$name`, word start, available only, always-on excluded) |
-| ↳ [`build_skills_summary()`](../nanoclaw/agent/skills.py#L139) | [`:204`][nb-l7-summary] | Same text; no plugin group or absolute roots for a separate project folder |
+| ↳ [`build_skills_summary()`](../nanoclaw/agent/skills.py#L139) | [`:204`][nb-l7-summary] | Same text; no plugin group. Absolute workspace root for a separate project folder since layer 18 |
 | ↳ [`_requirement_lists()`](../nanoclaw/agent/skills.py#L173), [`_get_missing_requirements()`](../nanoclaw/agent/skills.py#L184), [`_check_requirements()`](../nanoclaw/agent/skills.py#L190), [`get_skill_availability()`](../nanoclaw/agent/skills.py#L194) | [`:266`][nb-l7-reqs], [`:277`][nb-l7-missing], [`:338`][nb-l7-check], [`:285`][nb-l7-avail] | Same (no `get_skill_requirements`; not used) |
 | ↳ [`_parse_nanobot_metadata()`](../nanoclaw/agent/skills.py#L215) | [`:318`][nb-l7-meta] | Same, plus a `nanoclaw` key checked first (difference #2) |
 | ↳ [`get_always_skills()`](../nanoclaw/agent/skills.py#L239), [`get_skill_description()`](../nanoclaw/agent/skills.py#L202), [`_strip_frontmatter()`](../nanoclaw/agent/skills.py#L208), [`get_skill_metadata()`](../nanoclaw/agent/skills.py#L248) | [`:350`][nb-l7-always], [`:301`][nb-l7-desc], [`:309`][nb-l7-strip], [`:362`][nb-l7-getmeta] | Same |

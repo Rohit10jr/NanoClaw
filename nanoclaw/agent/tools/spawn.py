@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 from nanoclaw.agent.tools.base import Tool, ToolResult
 from nanoclaw.agent.tools.context import current_request_context
+from nanoclaw.security.workspace_access import current_workspace_scope
 from nanoclaw.agent.tools.schema import object_schema
 
 if TYPE_CHECKING:
@@ -80,4 +81,6 @@ class SpawnTool(Tool):
             origin_chat_id=request.chat_id,
             session_key=request.session_key,
             temperature=temperature,
+            # The child works on this turn's project (nanobot tools/subagent.py:144).
+            workspace_scope=current_workspace_scope(),
         )

@@ -536,3 +536,83 @@ class TestBwrapLive:
         tool = ExecTool(working_dir=str(ws), sandbox="bwrap")
         result = await tool.execute(command=["sh", "-c", "echo argv-$((1+1))"])
         assert "argv-2" in result
+
+
+# --- A configured sandbox under a bound project scope (layer 18 integration) ---
+
+
+def _bound_full_project(tmp_path):
+    from nanoclaw.security.workspace_access import bind_workspace_scope, project_workspace_scope
+
+    workspace = tmp_path / "ws"
+    project = tmp_path / "proj"
+    workspace.mkdir()
+    project.mkdir()
+    scope = project_workspace_scope(project, workspace=workspace, restrict_to_workspace=False)
+    return workspace, project, scope, bind_workspace_scope(scope)
+
+
+@pytest.mark.asyncio
+async def test_sandbox_restricts_file_tools_under_an_unrestricted_project_scope(tmp_path):
+    from nanoclaw.security.workspace_access import reset_workspace_scope
+
+    workspace, project, _scope, token = _bound_full_project(tmp_path)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret", encoding="utf-8")
+    try:
+        tools = build_default_tools(workspace, exec_config=ExecToolConfig(sandbox="bwrap"))
+        blocked = await tools.get("read_file").execute(path=str(outside))
+        assert "outside allowed directory" in blocked
+        await tools.get("write_file").execute(path="inside.txt", content="ok")
+        assert (project / "inside.txt").read_text(encoding="utf-8") == "ok"
+
+        # Without a sandbox the same full-access scope reads anywhere.
+        open_tools = build_default_tools(workspace, exec_config=ExecToolConfig())
+        assert "secret" in await open_tools.get("read_file").execute(path=str(outside))
+    finally:
+        reset_workspace_scope(token)
+
+
+def test_sandboxed_exec_under_a_project_scope_uses_the_project_as_root(tmp_path):
+    from nanoclaw.security.workspace_access import reset_workspace_scope
+
+    workspace, project, _scope, token = _bound_full_project(tmp_path)
+    try:
+        tool = ExecTool(working_dir=str(workspace), sandbox="bwrap")
+        prepared = tool._prepare_command("ls", None)
+        assert isinstance(prepared, _PreparedCommand)
+        assert prepared.cwd == str(project.resolve())
+        assert "--bind" in prepared.command and str(project.resolve()) in prepared.command
+        # The full-access scope is restricted by the sandbox: paths outside are refused.
+        blocked = tool._prepare_command("cat /etc/hostname", None)
+        assert isinstance(blocked, str) and "outside" in blocked
+    finally:
+        reset_workspace_scope(token)
+
+
+def test_runtime_block_names_the_configured_sandbox(tmp_path):
+    from nanoclaw.agent.loop import AgentLoop
+    from nanoclaw.providers import FakeProvider
+    from nanoclaw.session import SessionManager
+
+    line = "Shell sandbox configured; extra binds do not grant file-tool access."
+
+    def access_text(exec_config):
+        agent = tmp_path / "agent"
+        agent.mkdir(exist_ok=True)
+        loop = AgentLoop(
+            FakeProvider([]), agent,
+            sessions=SessionManager(agent, sessions_root=tmp_path / "s"),
+            exec_config=exec_config,
+        )
+        session = loop.sessions.get_or_create("cli:direct")
+        blocks = loop._runtime_blocks("hi", session, ephemeral=False)
+        return next(b.content for b in blocks if b.source == "workspace_access")
+
+    sandboxed = access_text(ExecToolConfig(sandbox="bwrap"))
+    assert line in sandboxed
+    # The sandbox forces the restriction.
+    assert "File access: project and tool-specific allowed paths only." in sandboxed
+    plain = access_text(ExecToolConfig())
+    assert line not in plain
+    assert "File access: no workspace restriction." in plain
