@@ -75,17 +75,37 @@ Windows shell (16.4).
 
 ## Tests
 
-Layer 16 adds 287 tests (1,309 → 1,596; 6 Windows-only tests skip on Linux):
+Layer 16 adds 325 tests (1,309 → 1,634; 6 Windows-only tests skip on Linux):
 `test_exec_session_tools.py`, `test_shell_execution_budgets.py`,
 `test_shell_reap.py`, `test_exec_session_startup.py`, `test_exec_env.py`,
 `test_shell_output.py`, `test_exec_allow_patterns.py`,
 `test_exec_session_isolation.py`, `test_exec_session_capacity.py`,
 `test_exec_session_timeout.py`, `test_exec_session_wiring.py`,
 `test_exec_config.py`, `test_violations_windows.py`, `test_exec_platform.py`,
+`test_exec_session_mutations.py`,
 adapted from nanobot's. The real-process tests no longer read `/proc`, and
 most shell tests now have PowerShell variants instead of Windows skips (list
 in [`WINDOWS.md`](../WINDOWS.md)).
 
 ### Mutation checks
 
-MUTATION_RESULTS
+193 rules were broken on purpose:
+
+| Area | Rules | Caught at once | Gaps closed with tests | Equivalent | Result |
+|---|---|---|---|---|---|
+| Exec sessions, output filter | 83 | 54 | 29 | 0 | 83 caught |
+| `exec` session path | 34 | 30 | 3 | 1 | 33 caught |
+| Wiring, settings, violation check | 42 | 39 | 3 | 0 | 42 caught |
+| Windows branches | 34 | 20 | 14 | 0 | 34 caught |
+
+38 new tests (`test_exec_session_mutations.py`) close the gaps, for example:
+the output buffer's tail trimming and its reset after a read; the 30-second
+cap on one poll and the 10-minute `until_exit` default; idle termination with
+no hard limit; the stdin error messages; sessions still starting count toward
+the limit; a `wait_for` string split across two reads; a failed child cleanup
+reported instead of the child's answer; PowerShell command normalization and
+shell resolution on Windows.
+
+Equivalent: `_split_shell_segments` without its `||` check gives the same
+segments (the single `|` split leaves an empty segment, which is dropped).
+

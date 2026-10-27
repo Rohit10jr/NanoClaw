@@ -73,7 +73,7 @@ Legend: ⏳ in progress · ✅ done and verified · ⛔ blocked
 | Docs | note 15, CODE_MAP, README, ROADMAP | main session | — | ✅ |
 | PR | `p2/layer-15` → `main` | main session | PR #7 | ✅ |
 
-## Layer 16 — shell: exec sessions, Windows PowerShell (`p2/layer-16`) ⏳
+## Layer 16 — shell: exec sessions, Windows PowerShell (`p2/layer-16`) ✅
 
 | Task | Scope (files) | Sub-agent | Verification | Status |
 |---|---|---|---|---|
@@ -82,9 +82,9 @@ Legend: ⏳ in progress · ✅ done and verified · ⛔ blocked
 | 16.3 Wiring | loop (`/new`, shutdown, pending work), subagents, config → tools, tool hints, chat | sub-agent (worktree), phase B | 21 loop-level checks through both `AgentLoop`s with real processes: identical; `ask` leaves no process behind | ✅ |
 | 16.4 Windows shell | PowerShell/cmd, Windows environment, Job Object + `taskkill` tree kill | sub-agent (worktree), phase C | 486 Windows cases identical (monkeypatched); not yet run on Windows | ✅ |
 | Integration | merges | main session | No conflicts; 1,596 passed, 6 Windows-only skipped | ✅ |
-| Mutation checks | ~90 rules | sub-agent (worktree) | | ⏳ |
+| Mutation checks | 193 rules | sub-agent (worktree) | 192 caught, 1 equivalent (38 tests added); 1,634 passed | ✅ |
 | Docs | note 16, CODE_MAP, README, ROADMAP, WINDOWS, notes 03/08 | main session | — | ✅ |
-| PR | `p2/layer-16` → `main` | main session | | ⏳ |
+| PR | `p2/layer-16` → `main` | main session | PR #8 | ✅ |
 
 ## Blockers and open items
 
