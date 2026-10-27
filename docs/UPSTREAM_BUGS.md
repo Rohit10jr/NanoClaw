@@ -25,7 +25,7 @@ the original project NanoClaw is based on.
 | 3 | A saved oversized tool result can point the model to stale content when a tool-call ID repeats in a session | Mechanism confirmed; real-world trigger not yet confirmed | Low–medium | Fixed with the suggested fix (content-hash file names) |
 | 4 | Compaction usually falls back to a raw dump: the model is only asked for a summary when the request overflows by less than ~600 tokens | Confirmed | Medium | Same as nanobot by default; an opt-in fix (`NANOCLAW_COMPACTION=fixed`) is being A/B tested |
 | 5 | When a **repeated** subagent report triggers compaction, the summary marker is placed one message too early, so an already-summarized message is replayed again | Confirmed (only for a report delivered twice) | Low | Correct in NanoClaw (layer 8, difference #8) |
-| 6 | Terminal progress lines are printed as rich markup: a shell command containing `[/x]` **aborts the turn** in `nanobot agent -m`; `[red]`, `[a-z]` etc. silently disappear from the displayed line | Confirmed | Medium | Fixed in NanoClaw (text escaped; layer 10) |
+| 6 | Terminal progress lines are printed as rich markup: a shell command containing `[/x]` **aborts the turn** in `nanobot agent -m`; `[red]`, `[a-z]` etc. silently disappear from the displayed line | Confirmed | Medium | Fixed in NanoClaw (text escaped; layer 10); the reasoning lines have the same problem (layer 13, also escaped) |
 
 ---
 
@@ -520,6 +520,14 @@ in `tests/test_chat.py` (removing the escape makes it fail). Not checked: the
 same pattern in nanobot's interactive classic chat, where the line is printed
 from the outbound-consumer task; that task only catches `TimeoutError` and
 `CancelledError`, so the error would likely end it, but this wasn't run.
+
+
+**Same problem in reasoning lines (found in layer 13, `c4dac64`).**
+`_print_cli_reasoning` (`cli/terminal.py:321-334`) prints the model's
+reasoning as `f"[dim italic]✻ {text}[/dim italic]"`, unescaped. Reasoning
+containing `[bold]x[/bold]` is shown as "use x here.", and `[/x]` raises
+`MarkupError`. Checked by driving nanobot's renderer and NanoClaw's with the
+same calls (layer 13 task 13.3). NanoClaw escapes these lines too.
 
 ---
 
