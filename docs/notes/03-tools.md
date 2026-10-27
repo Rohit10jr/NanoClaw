@@ -28,6 +28,7 @@ model: Changed the port to 9090.
 |---|---|---|
 | `agent/tools/schema.py` | `object_schema`, `validate_json_schema_value`, `validate_params`, `cast_params` | `agent/tools/base.py` (Schema, `cast_params`), `agent/tools/schema.py` |
 | `agent/tools/filesystem.py` | `read_file`, `write_file`, `edit_file`, `list_dir` | `agent/tools/filesystem.py` |
+| `agent/tools/apply_patch.py` *(layer 17)* | `apply_patch` | `agent/tools/apply_patch.py` |
 | `agent/tools/shell.py` | `exec` | `agent/tools/shell.py` |
 | `agent/tools/web.py` | `web_fetch`, `web_search` | `agent/tools/web.py` |
 | `agent/tools/__init__.py` | `build_default_tools(workspace)` | `agent/tools/loader.py` (auto-discovery) |
@@ -78,7 +79,7 @@ of `path` is reported instead of silently ignored.
 ### `write_file(path, content)`
 Creates parent folders; overwrites; replies `Successfully wrote N characters to <path>`.
 
-### `edit_file(path, old_text, new_text, replace_all=false, occurrence=null)`
+### `edit_file(path, old_text, new_text, replace_all=false, occurrence=null, line_hint=null, expected_replacements=null)`
 The most model-friendly tool, because models rarely copy text perfectly:
 - **Matching gets looser step by step:** exact → each line trimmed of
   indentation → also treating curly and straight quotes as equal.
@@ -93,10 +94,30 @@ The most model-friendly tool, because models rarely copy text perfectly:
   (`letter case differs`, `whitespace differs`, ...). The comparison is by
   whole lines, so this helps when most lines of a multi-line `old_text`
   are right; a single line with a typo gets "No similar text found" (same in nanobot).
+- *(Layer 17)* **Choosing a match:** `occurrence` (1-based) or `line_hint`
+  (a line number from `read_file`; the chosen match must cover that line,
+  and exactly one may) picks one of several matches; `replace_all=true`
+  takes all. The three are mutually exclusive. `expected_replacements`
+  refuses the edit unless exactly that many replacements would be made
+  (`Error: expected 1 replacements but would make 2.`).
 - `old_text=""` creates a new file. CRLF files stay CRLF. Deleting whole
   lines also removes their line breaks. Trailing spaces in `new_text` are
   removed except in Markdown (where two spaces mean a line break).
 - Replies `Patch applied:\n- update app.py (+1/-1)`.
+
+### `apply_patch(edits, dry_run=false)` *(layer 17)*
+nanobot's default tool for code edits. `edits` is a list of 1-20
+`{path, action, old_text, new_text}` objects, applied in order (a later edit
+sees the earlier ones): `replace` swaps one exact, unique match (CRLF
+normalized, no fuzzy matching); `add` creates a file or appends to an
+existing one, on a new line. Results end with a newline; CRLF files stay CRLF.
+All or nothing: any bad edit (missing anchor, ambiguous match, missing file,
+outside the workspace when restricted, ...) changes nothing, and a failed
+write rolls back the files already written. `dry_run=true` returns the
+summary without writing. Replies
+`Patch applied:\n- update a.py (+1/-1)\n- add b.py (+3/-0)`; errors are
+`Error applying patch: ...` (or `Error: Path ... is outside allowed directory ...`).
+Dream gets it too, with its own write scope checked for each edit.
 
 ### `list_dir(path, recursive=false, max_entries=200)`
 `📁 src` / `📄 README.md`; skips `.git`, `node_modules`, `__pycache__`,
@@ -207,8 +228,8 @@ blocked and the slip-through cases are tested in `tests/test_shell_tool.py`.
 | Private-network (SSRF) blocking | `security/network.py`, `_validate_url_safe` | Stop `web_fetch` reaching `localhost` or cloud metadata (**done in layer 9**) |
 | Sandbox (bubblewrap / macOS seatbelt) | `tools/sandbox.py` | OS-level isolation for `exec` (**phase 2**, decided in layer 9) |
 | "File unchanged since last read" | `file_state.py` | Saves tokens when the model rereads a file |
-| `edit_file` `line_hint`, `expected_replacements` | `filesystem.py` | Pick a match by line number; guard the number of replacements |
-| `apply_patch`, ripgrep `search` | `tools/apply_patch.py`, `tools/search.py` | Multi-file patches, fast code search |
+| `edit_file` `line_hint`, `expected_replacements` | `filesystem.py` | Pick a match by line number; guard the number of replacements (**done in layer 17**) |
+| `apply_patch` (**done in layer 17**), ripgrep `search` | `tools/apply_patch.py`, `tools/search.py` | Multi-file patches, fast code search |
 | Background shell sessions | `exec_session.py`, `yield_time_ms` | Long-running commands the model polls (**done in layer 16**) |
 | Shell choice, login shells, PATH config, Windows | `shell.py`, `_windows_job.py` | Platform support (**done in layer 16**: shell/login/PATH; Windows in task 16.4: PowerShell or cmd, a Job object or `taskkill /T /F` for the process tree, the Windows environment; not yet run on Windows, see `docs/WINDOWS.md`) |
 | Jina Reader, image fetching, proxies | `web.py` | Better extraction for JS-heavy pages |
@@ -221,6 +242,10 @@ blocked and the slip-through cases are tested in `tests/test_shell_tool.py`.
   parameters, `{"arguments": ...}` unwrapping.
 - `tests/test_filesystem_tools.py`: real files in a temp folder; paging,
   caps, every edit strategy and error, CRLF, best-match diff, list_dir rules.
+- *(Layer 17)* `tests/test_apply_patch_tool.py` (nanobot's apply_patch tests,
+  rollback, the 20-edit limit, tool descriptions) and
+  `tests/test_edit_file_line_hint.py` (`occurrence`, `line_hint`,
+  `expected_replacements`).
 - `tests/test_shell_tool.py`: real bash (PowerShell variants on Windows); output format, exit codes, timeout
   killing child processes, secrets not visible, deny list (blocked,
   allowed, and slip-through cases; since the end of layer 6 also writes to

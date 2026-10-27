@@ -54,7 +54,7 @@ def test_cli_ask_gives_the_model_the_default_tools_in_the_workspace(capsys, tmp_
 
     names = sorted(d["function"]["name"] for d in fake.calls[0].tools)
     assert names == [
-        "edit_file", "exec", "exec_session", "list_dir", "list_exec_sessions",
+        "apply_patch", "edit_file", "exec", "exec_session", "list_dir", "list_exec_sessions",
         "read_file", "spawn", "web_fetch", "web_search", "write_file",
     ]
     assert (workspace / "note.txt").read_text(encoding="utf-8") == "hi"  # relative path landed in the workspace

@@ -28,7 +28,7 @@ from nanoclaw.utils.templates import sync_workspace_templates
 from toy_tools import EchoTool
 
 DEFAULT_TOOLS = [
-    "edit_file", "exec", "exec_session", "list_dir", "list_exec_sessions",
+    "apply_patch", "edit_file", "exec", "exec_session", "list_dir", "list_exec_sessions",
     "read_file", "web_fetch", "web_search", "write_file",
 ]
 

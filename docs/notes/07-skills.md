@@ -112,7 +112,7 @@ uv run nanoclaw ask 'What is the $weather in Paris?'   # load a skill for this t
 |---|---|---|---|---|---|
 | 1 | Built-in skills | 11 | 6 (see above) | The other 5 need features we don't have. Chosen with the user | Some with later layers / phase 2 |
 | 2 | Metadata key | Reads `nanobot`, else `openclaw` | Also reads `nanoclaw` first | Lets NanoClaw-specific skills say so; nanobot skills work unchanged | — |
-| 3 | Dream's tools | Also `apply_patch` | No `apply_patch` | Not ported in layer 3 | — |
+| 3 | Dream's tools | Also `apply_patch` | ~~No `apply_patch`~~ **Gone in layer 17**: Dream has `apply_patch`, with the same write scope | Not ported in layer 3 | Done in layer 17 |
 | 4 | Two lines in the bundled skills | `skill-creator` recommends nanobot's `grep` tool (`output_mode`, `head_limit`); `tmux` says "prefer exec background mode" | `skill-creator` suggests shell `grep -l` / `-c` / `-F` and `read_file` paging; `tmux` says "prefer plain exec" | NanoClaw has neither the `grep` tool nor background `exec` (layer 3); same approach as the templates in layer 4. Found in the second review | Phase 2 if those tools are added |
 
 Everything else matches nanobot exactly, including the order of skills (the
@@ -175,7 +175,7 @@ skills folder so the logic is compared rather than the skill choice:
 | Current message with `$skill` (content and marker) | Identical |
 | `read_file` of `skills/...` paths (built-in, workspace, escape, script, missing) | Identical |
 | A turn with `$skill`: request, system prompt skills sections, saved session | Identical |
-| Dream: prompt; writing a new skill; refused writes; built-in and outside reads; writing `MEMORY.md` | Identical (including error texts); tool set differs only by `apply_patch` |
+| Dream: prompt; writing a new skill; refused writes; built-in and outside reads; writing `MEMORY.md` | Identical (including error texts); tool set differs only by `apply_patch` *(added in layer 17)* |
 | Skill listing (`/skill` vs `nanoclaw skills`) | Identical |
 
 The earlier layers' comparisons were re-run with the skills sections included:
