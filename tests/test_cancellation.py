@@ -15,7 +15,7 @@ from bus_rig import Rig, call
 from nanoclaw.bus.outbound_events import StreamDeltaEvent, StreamEndEvent
 from nanoclaw.bus.runtime_events import TurnRunStatusChanged
 from nanoclaw.providers import LLMResponse
-from nanoclaw.session import Session
+from nanoclaw.session import Session, SessionManager
 from nanoclaw.session.recovery import (
     INTERRUPTED_TOOL_MESSAGE,
     PENDING_USER_TURN_KEY,
@@ -241,3 +241,16 @@ async def test_checkpoints_are_kept_while_the_turn_runs(ws, tmp_path):
         rig.slow.gate("g").set()
         await rig.settle(1)
     assert RUNTIME_CHECKPOINT_KEY not in rig.session().metadata
+
+
+async def test_the_cancelled_turn_is_written_to_disk(ws, tmp_path):
+    """The restored checkpoint is saved, not only kept in the cached session."""
+    async with Rig(ws, tmp_path, [call("slow", {"text": "g"}, content="Let me wait.")]) as rig:
+        await rig.send("go")
+        await rig.slow.running("g").wait()
+        await rig.send("/stop")
+        await rig.settle(1)
+        on_disk = SessionManager(ws, sessions_root=tmp_path / "sessions").get_or_create("cli:a")
+    assert [m["role"] for m in on_disk.messages] == ["user", "assistant", "tool"]
+    assert on_disk.messages[2]["content"] == INTERRUPTED_TOOL_MESSAGE
+    assert RUNTIME_CHECKPOINT_KEY not in on_disk.metadata and PENDING_USER_TURN_KEY not in on_disk.metadata

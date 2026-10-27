@@ -496,6 +496,29 @@ def make_reader(items):
     return read
 
 
+async def test_typed_lines_carry_the_chat_session_key(ws, tmp_path):
+    """The chat's own session key travels as the override: ``--session work``
+    is not the ``cli:work`` a channel/chat pair would give."""
+    chat, _, _ = make_chat(ws, tmp_path, [], [])
+    chat = Chat(chat.loop, session_key="work", console=chat.console, read_input=chat.read_input)
+    await chat.send("hello")
+    msg = chat.bus.inbound.get_nowait()
+    assert (msg.channel, msg.chat_id, msg.session_key) == ("cli", "work", "work")
+    assert msg.metadata["_wants_stream"] is True
+
+
+async def test_text_typed_while_busy_keeps_the_turn_output(ws, tmp_path):
+    """With type-ahead, text typed during a turn is injected into it, so the
+    turn's renderer stays; only an idle chat starts a new output."""
+    chat, _, _ = make_chat(ws, tmp_path, [], [], type_ahead=True)
+    await chat.send("first")
+    output = chat._output
+    assert output is not None and chat.busy
+    await chat.send("more")
+    assert chat._output is output
+    await chat._end_output()
+
+
 def test_exit_word_check():
     assert is_exit_command("/QUIT") and is_exit_command(":q") and not is_exit_command("exit now")
 

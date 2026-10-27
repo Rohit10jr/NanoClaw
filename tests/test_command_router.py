@@ -258,3 +258,33 @@ async def test_dream_replies_then_follows_up_on_the_bus(router, loop):
     assert followup.content == DREAM_NO_INPUT_MESSAGE
     assert followup.metadata == {"render_as": "text"}
     assert (followup.channel, followup.chat_id) == ("cli", "direct")
+
+
+async def test_status_counts_only_unfinished_session_tasks(router, loop):
+    """nanobot builtin.py:295: a finished task still in the set is not active."""
+    finished = asyncio.create_task(asyncio.sleep(0))
+    await finished
+    running = asyncio.create_task(asyncio.Event().wait())
+    loop._active_tasks["cli:direct"] = {finished, running}
+    try:
+        reply = await router.dispatch_priority(make_ctx("/status", loop))
+    finally:
+        running.cancel()
+    assert "⚡ Tasks: 1 active" in reply.content
+
+
+async def test_new_from_the_bus_loop_waits_for_the_session_lock(router, loop):
+    """Outside the session's worker (no ``ctx.session``) /new takes the session
+    lock itself (research D6), so it cannot clear a session mid-turn."""
+    session = loop.sessions.get_or_create("cli:direct")
+    session.add_message("user", "hello")
+    loop.sessions.save(session)
+    lock = loop._get_session_lock("cli:direct")
+    await lock.acquire()
+    reset = asyncio.create_task(router.dispatch(make_ctx("/new", loop)))
+    await asyncio.sleep(0.05)
+    assert not reset.done()
+    assert [m["content"] for m in loop.sessions.get_or_create("cli:direct").messages] == ["hello"]
+    lock.release()
+    assert (await asyncio.wait_for(reset, 5)).content == "New session started."
+    assert loop.sessions.get_or_create("cli:direct").messages == []
