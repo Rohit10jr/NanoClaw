@@ -64,7 +64,7 @@ changes that need a bus and session workers (layer 14).
 ## Upstream bugs
 
 Bug 1 (`list_dir` under a `build` folder) is fixed upstream in `8052c3a`.
-Bugs 2–6 were re-checked against `c4dac64`; see `UPSTREAM_BUGS.md`.
+Bugs 2–6 were re-checked against `c4dac64` by running each reproduction again: all still present (bug 5 needed a rewritten reproduction, since nanobot now drops hand-built subagent reports). See `UPSTREAM_BUGS.md`.
 
 ## Tests
 

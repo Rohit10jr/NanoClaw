@@ -5,6 +5,7 @@ recorded so we can open issues or pull requests there later. "Upstream" means
 the original project NanoClaw is based on.
 
 - nanobot commit checked: `d3d70f2` (2026-10-01, the latest `main` at the time).
+- Re-checked at `c4dac64` (2026-10-27): bug 1 is fixed upstream; bugs 2–6 are still present (each reproduction run again).
 - Each bug was **reproduced by running nanobot's own code** (installed from that
   commit in a separate virtual environment), not only by reading it.
 
@@ -91,6 +92,8 @@ test `test_list_dir_ignore_rules_apply_below_the_listed_dir_only` in
 
 ## 2. Timezone setting has no effect; the model never gets the current date/time
 
+**Re-checked at `c4dac64` (2026-10-27): still present.** A `[Runtime Context]` block now reaches the user message, but it holds only the project folder and file-access mode, no date or time. `timezone` is passed only to the tool loader (cron defaults); `docs/configuration.md` still promises runtime time strings. Same reproduction (also checking the tool definitions): `2026 False`, `Current Time False`.
+
 **What the docs say:** `docs/configuration.md` line 2324 and 2336:
 
 > By default, nanobot uses `UTC` for runtime time context. If you want the agent
@@ -163,6 +166,8 @@ timezone; it has no timezone setting yet.
 
 ## 3. Saved tool result can be stale when a tool-call ID repeats
 
+**Re-checked at `c4dac64` (2026-10-27): still present.** `maybe_persist_tool_result` is unchanged (now `utils/helpers.py:576`); the original reproduction prints `NEW-bbbb` / `OLD-aaaa` again.
+
 **Where:** `nanobot/utils/helpers.py`, `maybe_persist_tool_result`, line 646:
 
 ```python
@@ -216,6 +221,8 @@ the upstream fix for the PR.
 ---
 
 ## 4. Compaction usually falls back to a raw dump
+
+**Re-checked at `c4dac64` (2026-10-27): still present, identical numbers** (overflow 1/300/600 → summary, 900/2000 → raw dump). `MemoryArchiver.archive` is unchanged (input check now `memory.py:889`).
 
 **Where:** `nanobot/agent/memory.py`, `MemoryArchiver.archive` (input check
 around line 896), reached from `Consolidator.summarize_transcript` (line 1118)
@@ -350,6 +357,8 @@ default and this bug is marked fixed in NanoClaw.
 
 ## 5. Summary marker one message too early on a repeated subagent report
 
+**Re-checked at `c4dac64` (2026-10-27): still present.** Same pattern at `loop.py:2249` (`input_persisted_early = True` for every subagent turn) and `loop.py:2529` (`insert_at`). The reproduction had to be rewritten, because nanobot now drops hand-built reports: a real background child is spawned and its announced report delivered twice (adapted script below). Duplicate case: the marker lands before `first-reply` (`last_archived` 5, expected 6), so `first-reply` is replayed next to the summary; a new report places it correctly.
+
 **Where:** `nanobot/agent/loop.py`:
 
 ```python
@@ -402,9 +411,69 @@ len(session.messages)` before saving the report and inserts the marker there.
 Regression test: `test_compacting_on_a_duplicate_report_keeps_the_summary_boundary_right`
 in `tests/test_subagents.py` (using nanobot's formula makes it fail).
 
+
+Adapted reproduction for `c4dac64` (sessions and subagents changed upstream):
+
+```python
+import asyncio, tempfile
+from pathlib import Path
+from nanobot.bus.queue import MessageBus
+from nanobot.agent.loop import AgentLoop
+from nanobot.agent.tools.registry import ToolRegistry
+from nanobot.session.manager import SessionManager
+from nanobot.session.summary import is_summary_checkpoint
+from nanobot.providers.base import LLMProvider, LLMResponse, GenerationSettings
+from nanobot.utils.helpers import estimate_prompt_tokens_chain
+from nanobot.utils.llm_runtime import LLMRuntime
+from nanobot.utils import token_encoding
+
+BIGT = "word " * 2000
+class P(LLMProvider):
+    def __init__(self, replies):
+        super().__init__(provider_name="p"); self.r = list(replies); self.calls = []
+        self.generation = GenerationSettings(max_tokens=100, temperature=0.1)
+    def get_default_model(self): return "m"
+    async def chat(self, messages, **kw):
+        self.calls.append((messages, kw.get("tools"))); return LLMResponse(content=self.r.pop(0), finish_reason="stop")
+    async def chat_stream(self, messages, **kw): return await self.chat(messages, **kw)
+
+def make(ws, replies, window=10_000_000):
+    sm = SessionManager(ws, sessions_root=ws.parent / "sessions")
+    return AgentLoop(bus=MessageBus(), provider=P(replies), workspace=ws, model="m",
+                     tool_registry=ToolRegistry(), context_window_tokens=window, session_manager=sm)
+
+async def build():
+    ws = Path(tempfile.mkdtemp()) / "ws"; ws.mkdir()
+    l1 = make(ws, ["ok1", "ok2", "child-result " + "r " * 300, "first-reply"])
+    await l1.process_direct("first " + BIGT, session_key="cli:direct")
+    await l1.process_direct("second " + BIGT, session_key="cli:direct")
+    await l1.subagents.spawn("t", label="x", session_key="cli:direct",
+                             runtime=LLMRuntime.capture(l1.provider, "m", context_window_tokens=10_000_000))
+    report = await asyncio.wait_for(l1.bus.consume_inbound(), 30)   # the real announced report
+    await l1._process_message(report, session_key="cli:direct")    # delivered once -> "first-reply"
+    await l1.aclose()
+    return ws, report
+
+async def main():
+    token_encoding.warmup_token_encoding(); token_encoding._warmup_thread.join()
+    ws, report = await build()
+    pws, preport = await build()                                    # identical replay to size the window
+    lp = make(pws, ["Fine."]); await lp._process_message(preport, session_key="cli:direct")
+    full, _ = estimate_prompt_tokens_chain(lp.provider, "m", *lp.provider.calls[0])
+    l2 = make(ws, ["- SUMMARY", "Fine."], window=full - 200 + 100 + 1024)   # overflow by ~200
+    await l2._process_message(report, session_key="cli:direct")    # SAME report again
+    s = l2.sessions.get_or_create("cli:direct")
+    print([("<summary marker>" if is_summary_checkpoint(m) else str(m["content"])[:12]) for m in s.messages], s.last_archived)
+asyncio.run(main())
+```
+
+Output at `c4dac64`: the marker comes before `first-reply` and `last_archived` is 5 (should be 6).
+
 ---
 
 ## 6. Progress lines are printed as rich markup
+
+**Re-checked at `c4dac64` (2026-10-27): still present.** `cli/terminal.py` has no commits since `d3d70f2`; the unescaped `f"  [dim]↳ {text}[/dim]"` is at `terminal.py:289` (also 248, 358). The original reproduction still raises `MarkupError … '[/x]'` and aborts the turn.
 
 **Where:** `nanobot/cli/terminal.py`, `_print_cli_progress_line` (line 276) and
 `_print_interactive_line`:
