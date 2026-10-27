@@ -13,6 +13,7 @@ from urllib.parse import urljoin, urlparse
 import httpx
 from ddgs.exceptions import DDGSException
 from ddgs.exceptions import TimeoutException as DDGSTimeoutException
+from loguru import logger
 
 from nanoclaw.agent.tools.base import Tool, ToolResult
 from nanoclaw.agent.tools.schema import object_schema
@@ -48,6 +49,28 @@ def _normalize(text: str) -> str:
 def _validate_url_safe(url: str) -> tuple[bool, str]:
     """Scheme, domain and resolved-address check: private/internal addresses are blocked."""
     return validate_url_target(url)
+
+
+def _redact_url_for_log(url: str) -> str:
+    """Only a URL's origin, without user info, path, query or fragment (nanobot web.py:181).
+
+    nanobot also hides it entirely for private sessions; NanoClaw has none.
+    """
+    try:
+        parsed = urlparse(url)
+        hostname = parsed.hostname
+        if not parsed.scheme or hostname is None:
+            return "<redacted URL>"
+        if ":" in hostname:
+            hostname = f"[{hostname}]"
+        try:
+            port = parsed.port
+        except ValueError:
+            port = None
+        authority = f"{hostname}:{port}" if port is not None else hostname
+        return f"{parsed.scheme}://{authority}"
+    except ValueError:
+        return "<redacted URL>"
 
 
 def _fetch_client_kwargs(timeout: float, inner: httpx.AsyncBaseTransport | None) -> dict[str, Any]:
@@ -118,7 +141,12 @@ class WebFetchTool(Tool):
             elif "text/html" in ctype or r.text[:256].lower().startswith(("<!doctype", "<html")):
                 try:
                     text, extractor = self._extract_readable_html(r.text, extractMode), "readability"
-                except Exception:
+                except Exception as e:
+                    logger.warning(
+                        "Readability failed for {}, using raw HTML fallback ({})",
+                        _redact_url_for_log(url),
+                        type(e).__name__,
+                    )
                     text, extractor = _normalize(_strip_tags(r.text)), "html"
             else:
                 text, extractor = r.text, "raw"
@@ -141,6 +169,7 @@ class WebFetchTool(Tool):
                 ensure_ascii=False,
             )
         except Exception as e:
+            logger.warning("WebFetch error for {} ({})", _redact_url_for_log(url), type(e).__name__)
             return _error_json(str(e), url)
 
     async def _get_with_redirects(
@@ -289,5 +318,6 @@ class WebSearchTool(Tool):
             # ddgs is synchronous; run it in a thread so the event loop stays free.
             items = await asyncio.wait_for(asyncio.to_thread(self._search_fn, query, n), timeout=self.timeout)
         except Exception as e:
+            logger.warning("DuckDuckGo search failed: {}", e)
             return _search_error(e)
         return _format_results(query, items, n)

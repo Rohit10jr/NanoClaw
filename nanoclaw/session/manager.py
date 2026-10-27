@@ -25,6 +25,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+
 from nanoclaw.runtime_context import public_history_message
 from nanoclaw.session.summary import HIDDEN_HISTORY_META, SUMMARY_CONTINUATION_TEXT, is_summary_checkpoint
 from nanoclaw.utils.tokens import estimate_message_tokens
@@ -317,6 +319,7 @@ class SessionManager:
             return None
         messages: list[dict[str, Any]] = []
         header: dict[str, Any] = {}
+        skipped = 0
         with open(path, encoding="utf-8") as handle:
             for line in handle:
                 line = line.strip()
@@ -325,13 +328,17 @@ class SessionManager:
                 try:
                     data = json.loads(line)
                 except json.JSONDecodeError:
+                    skipped += 1
                     continue
                 if not isinstance(data, dict):
+                    skipped += 1
                     continue
                 if data.get("_type") == "metadata":
                     header = data
                 else:
                     messages.append(data)
+        if skipped:
+            logger.warning("Skipped {} corrupt lines in session {}", skipped, key)
         return Session(
             key=key,
             messages=messages,
