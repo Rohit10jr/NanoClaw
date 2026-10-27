@@ -196,6 +196,8 @@ class Session:
         self.last_archived = 0
         self.updated_at = datetime.now()
         self.metadata.pop("_last_summary", None)
+        # A fresh conversation has no cut-off turn to mention (nanobot session/manager.py:355).
+        self.metadata.pop("_stopped_at_iteration_limit", None)
 
 
 class SessionManager:

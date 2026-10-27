@@ -39,6 +39,10 @@ from nanoclaw.utils.templates import render_template
 DEFAULT_MAX_CONCURRENT_SUBAGENTS = 4
 NO_FINAL_RESPONSE_MESSAGE = "Task completed but no final response was generated."
 EXECUTION_FAILED_MESSAGE = "Error: subagent execution failed."
+# The child's last message when its iterations run out (nanobot subagent.py:848),
+# and the result if even that is missing (nanobot subagent.py:881).
+ITERATION_LIMIT_MESSAGE = "Task stopped at its iteration limit before producing a final response."
+ITERATION_LIMIT_RESULT = "Iteration limit reached."
 SUBAGENT_RESULT_EVENT = "subagent_result"
 
 
@@ -51,10 +55,13 @@ class SubagentStatus:
     label: str
     task_description: str
     started_at: float  # time.monotonic()
-    # queued | initializing | done | error
+    # queued | initializing | done | incomplete | error  (nanobot outcome states,
+    # without "cancelled": a cancelled child here never reports)
     phase: str = "initializing"
     stop_reason: str | None = None
     error: str | None = None
+    # The result is the child's last progress text from an unfinished run.
+    partial: bool = False
 
 
 @dataclass(frozen=True)
@@ -68,7 +75,7 @@ class SubagentResult:
     task_id: str
     label: str
     content: str
-    status: str  # "ok" | "error"
+    status: str  # "ok" | "incomplete" | "error"
     session_key: str | None
     channel: str
 
@@ -168,8 +175,12 @@ class SubagentManager:
         self._register(task_id, session_key, inline_task)
         try:
             result = await inline_task
-            if status.phase == "error" or status.stop_reason == "error":
-                return ToolResult.error(result)
+            # nanobot subagent.py:678-682
+            if status.phase == "error":
+                error = status.error or result
+                return ToolResult.error(error + (f"\nPartial result:\n{result}" if error != result else ""))
+            if status.phase == "incomplete":
+                return ToolResult.error(f"Task incomplete ({status.stop_reason}).\n{result}")
             return result
         finally:
             self._forget(task_id, session_key)
@@ -228,32 +239,56 @@ class SubagentManager:
                         temperature=runtime.temperature,
                         session_key=session_key,
                         # Out of iterations: no extra summary request, just this message.
-                        max_iterations_message=NO_FINAL_RESPONSE_MESSAGE,
+                        max_iterations_message=ITERATION_LIMIT_MESSAGE,
                         finalize_on_max_iterations=False,
                     )
                 )
             finally:
                 reset_request_context(token)
-            status.phase = "done"
-            status.stop_reason = result.stop_reason
 
-            if result.stop_reason == "error":
-                final_result = result.error or EXECUTION_FAILED_MESSAGE
-                final_status = "error"
+            # The run's outcome (nanobot subagent.py:877-883).
+            error: str | None = result.error
+            if result.stop_reason in {"error", "empty_final_response"}:
+                phase, final_result = "error", result.error or EXECUTION_FAILED_MESSAGE
+            elif result.stop_reason == "max_iterations":
+                phase, final_result, error = "incomplete", result.final_content or ITERATION_LIMIT_RESULT, None
             else:
-                final_result = result.final_content or NO_FINAL_RESPONSE_MESSAGE
-                final_status = "ok"
-            if announce:
-                await self._announce_result(task_id, label, task, final_result, channel, session_key, final_status)
-            return final_result
+                phase, final_result = "done", result.final_content or NO_FINAL_RESPONSE_MESSAGE
+            # An unfinished run reports the child's last progress text instead
+            # (nanobot subagent.py:129-136, from what _SubagentHook remembered).
+            partial = None if phase == "done" else self._last_progress_text(result.messages[len(messages):])
+            if partial is not None:
+                final_result = partial
+            status.phase = phase
+            status.stop_reason = result.stop_reason
+            status.error = error[: self.max_tool_result_chars] if error else None
+            status.partial = partial is not None
 
         except Exception as e:
+            # nanobot subagent.py:740
             status.phase = "error"
-            status.error = str(e)
+            status.stop_reason = "error"
+            status.error = str(e)[: self.max_tool_result_chars]
             final_result = f"Error: {e}"
-            if announce:
-                await self._announce_result(task_id, label, task, final_result, channel, session_key, "error")
-            return final_result
+        if announce:
+            await self._announce_result(task_id, label, task, final_result, channel, session_key, status)
+        return final_result
+
+    def _last_progress_text(self, run_messages: list[dict[str, Any]]) -> str | None:
+        """The last text the child wrote alongside tool calls, cut to the result limit.
+
+        nanobot's ``_SubagentHook._remember_output`` (subagent.py:170) records
+        each model reply's text as it arrives. Replies without tool calls
+        either end the run as ``completed`` or were added by the runner (the
+        iteration-limit, error and empty-answer messages), so only replies
+        with tool calls count here.
+        """
+        for message in reversed(run_messages):
+            content = message.get("content")
+            if message.get("role") == "assistant" and message.get("tool_calls") and isinstance(content, str):
+                if content.strip():
+                    return content[: self.max_tool_result_chars]
+        return None
 
     async def _announce_result(
         self,
@@ -263,19 +298,33 @@ class SubagentManager:
         result: str,
         channel: str,
         session_key: str | None,
-        status: str,
+        status: SubagentStatus,
     ) -> None:
-        """Hand the report to the main agent (nanobot: publish on the message bus)."""
-        status_text = "completed successfully" if status == "ok" else "failed"
+        """Hand the report to the main agent (nanobot: publish on the message bus).
+
+        Mirrors nanobot subagent.py:885 ``_announce_result``.
+        """
+        report_status = "ok" if status.phase == "done" else status.phase
+        status_text = {
+            "ok": "completed successfully",
+            "incomplete": "stopped before completing the task",
+        }.get(report_status, "failed")
         content = render_template(
-            "agent/subagent_announce.md", label=label, status_text=status_text, task=task, result=result
+            "agent/subagent_announce.md",
+            label=label,
+            status_text=status_text,
+            task=task,
+            result=result,
+            stop_reason=status.stop_reason,
+            error=status.error,
+            partial_result=status.partial,
         )
         await self.results.put(
             SubagentResult(
                 task_id=task_id,
                 label=label,
                 content=content,
-                status=status,
+                status=report_status,
                 session_key=session_key,
                 channel=channel,
             )
