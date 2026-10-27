@@ -304,15 +304,18 @@ async def test_wait_for_matches_text_split_across_polls(tmp_path):
     manager = ExecSessionManager()
     tool = ExecTool(working_dir=str(tmp_path), exec_session_manager=manager)
     try:
+        # The first chunk comes after a delay so that exec's own (immediate)
+        # read can't consume "ab" under load: both halves must reach the wait.
         initial = await tool.execute(
-            command="printf 'ab'; sleep 0.8; printf 'cd'; sleep 30", yield_time_ms=0,
+            command="sleep 1; printf 'ab'; sleep 0.8; printf 'cd'; sleep 30", yield_time_ms=0,
         )
+        assert "ab" not in initial
         started = time.monotonic()
         result = await ExecSessionTool(manager=manager).execute(
-            session_id=_session_id(initial), wait_for="bc", timeout_ms=5000,
+            session_id=_session_id(initial), wait_for="bc", timeout_ms=6000,
         )
         assert "Wait target not observed" not in result
-        assert time.monotonic() - started < 4
+        assert time.monotonic() - started < 5
     finally:
         await manager.close_all()
 
