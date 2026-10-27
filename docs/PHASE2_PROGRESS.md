@@ -38,17 +38,17 @@ Legend: ⏳ in progress · ✅ done and verified · ⛔ blocked
 | Docs | note 12, CODE_MAP, README, ROADMAP | main session | — | ✅ |
 | PR | `p2/layer-12` → `main` | main session | PR #4 | ✅ |
 
-## Layer 13 — hooks, events, streaming (`p2/layer-13`) ⏳
-
-Phase A (parallel, standalone pieces using nanobot's names), then phase B (wiring).
+## Layer 13 — hooks, events, streaming (`p2/layer-13`) ✅
 
 | Task | Scope (files) | Sub-agent | Verification | Status |
 |---|---|---|---|---|
-| 13.1 Provider streaming | `providers/base.py` (`chat_stream`, `chat_stream_with_retry`), `openai_compat.py` (SSE, `_parse_chunks`), `fake.py` | sub-agent (worktree) | | ⏳ |
-| 13.2 Hooks and events | new `agent/hook.py`, `events.py`, `bus/outbound_events.py`, `agent/progress_hook.py`, `agent/turn_hooks.py`, think extractor | sub-agent (worktree) | | ⏳ |
-| 13.3 Terminal stream renderer | new `cli/stream.py` | sub-agent (worktree) | | ⏳ |
-| 13.4 Wiring | runner (hooks, streaming), loop (turn hook, events), chat/ask (renderer), retry and compaction events | after A | | |
-| Comparison, mutation checks, docs, PR | | main session | | |
+| 13.1 Provider streaming | `providers/base.py`, `openai_compat.py`, `fake.py` | sub-agent (worktree), phase A | 20 chunk sequences: 19 identical to nanobot, 1 deliberate; retry rule read against nanobot | ✅ |
+| 13.2 Hooks and events | `agent/hook.py`, `events.py`, `bus/outbound_events.py`, `agent/progress_hook.py`, `agent/turn_hooks.py`, think extraction | sub-agent (worktree), phase A | Byte-identical events for the same callback sequences | ✅ |
+| 13.3 Terminal stream renderer | `cli/stream.py` | sub-agent (worktree), phase A | 44/56 outputs identical, 12 differ only by escaping (re-run by main session) | ✅ |
+| 13.4 Wiring | runner, loop, memory, chat, ask, channel settings | sub-agent (worktree), phase B | Identical event sequences for scripted turns; identical chat-turn output; real terminal run | ✅ |
+| Mutation checks | 83 rules | sub-agent (worktree) | 81 caught, 2 equivalent (8 tests added for 10 gaps) | ✅ |
+| Docs | note 13, CODE_MAP, README, notes 02/10, UPSTREAM_BUGS (bug 6 in reasoning lines) | main session | — | ✅ |
+| PR | `p2/layer-13` → `main` | main session | — | ⏳ |
 
 ## Blockers and open items
 

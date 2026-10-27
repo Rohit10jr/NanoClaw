@@ -79,7 +79,19 @@ B (13.4) wired them into the runner, loop, chat and ask.
 
 ## Tests
 
-Layer 13 adds about 180 tests (923 → ~1,100): `test_streaming_provider.py`,
+Layer 13 adds 188 tests (923 → 1,111): `test_streaming_provider.py`,
 `test_hooks.py`, `test_events.py`, `test_stream_renderer.py`,
 `test_streaming_turn.py`, adapted from nanobot's streaming, hook, renderer and
 CLI tests.
+
+### Mutation checks
+
+83 rules across the providers, hooks, progress hook, runner, loop, memory,
+renderer, chat, `ask` and the channel settings were broken on purpose. 71 were
+caught at once. Of the 12 survivors, 10 were real test gaps, closed with 8 new
+tests (e.g. a recovered stream segment that showed nothing can still be
+retried; an error after partly streamed text is printed and the text not
+repeated; `showReasoning` off hides finished sentences). 2 are equivalent: a
+shortcut in the think extractor that returns the same result, and a
+`renderer.close()` that always comes after the final stream end, so it does
+nothing. Result: 81 of 83 caught, 2 equivalent.
