@@ -158,7 +158,7 @@ configured fetch proxy, Web UI loopback access, MCP SSRF checks.
 input with saved history, rich Markdown replies, a "thinking" spinner, `↳`
 progress lines with tool hints) and the slash commands NanoClaw has (`/new`,
 `/compact`, `/stop`, `/status`, `/history`, `/dream`, `/skill`, `/help`, with
-nanobot's unknown-command suggestions). Background subagent results appear as
+nanobot's unknown-command suggestions; since layer 11 unknown slash text goes to the model, as in nanobot `c4dac64`). Background subagent results appear as
 they finish. `nanoclaw ask` stays for one-shot use and now shows progress lines
 on stderr. See `notes/10-terminal-chat.md`.
 **Decisions:** prompt_toolkit + rich; Ctrl+C during a turn ends the chat (as

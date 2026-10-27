@@ -53,14 +53,13 @@ The following skills extend your capabilities. Each group lists one root and rel
 ### Workspace skills (`skills`)
 - **release** — How we release.  `release/SKILL.md`
 
-### Built-in skills (`skills`)
-- **weather** — Get current weather and forecasts (no API key required).  `weather/SKILL.md`
-- **summarize** — Summarize or extract text/transcripts ... (unavailable: CLI: summarize)  `summarize/SKILL.md`
+### Built-in skills (`/…/nanoclaw/skills`)
+- **weather** — Get current weather and forecasts.  `weather/SKILL.md`
 ```
 
 | Feature | How | nanobot |
 |---|---|---|
-| **Requirements** | `metadata.nanobot.requires.bins` (programs) and `.env` (environment variables). A skill with something missing is still listed, marked `(unavailable: CLI: gh, ENV: TOKEN)` | `skills.py:266–345` |
+| **Requirements** | `metadata.nanobot.requires.bins` (programs) and `.env` (environment variables). A skill with something missing is left out of the prompt (since layer 11, as nanobot `c4dac64`); `nanoclaw skills` still lists it, marked `(unavailable: CLI: gh, ENV: TOKEN)` | `skills.py:266–345` |
 | **Always-on skills** | `always: true` (top level or in `metadata`) puts the whole skill in every prompt under `# Active Skills`; it is not listed again under `# Skills` | `skills.py:350`, `context.py:132` |
 | **`$skill-name` in a message** | Writing `$weather` loads that skill's full text for this turn, appended to your message as runtime context (`[Active Skills — instructions for this user turn]`). It is saved with the message, like the time block | `skills.py:165, 182`, `context.py:323`, `loop.py:762` |
 

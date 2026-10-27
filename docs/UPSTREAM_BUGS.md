@@ -19,7 +19,7 @@ the original project NanoClaw is based on.
 
 | # | Bug | Confidence | Severity | Status in NanoClaw |
 |---|---|---|---|---|
-| 1 | `list_dir(recursive=true)` reports an empty directory when the workspace is inside a folder named `build`, `dist`, `venv`, ... | Confirmed | Medium | Fixed (layer 3) |
+| 1 | `list_dir(recursive=true)` reports an empty directory when the workspace is inside a folder named `build`, `dist`, `venv`, ... | Confirmed | Medium | Fixed (layer 3); **fixed upstream** in `8052c3a` (checked at `c4dac64`) |
 | 2 | The configured timezone has no effect: no current date/time reaches the model, although the docs say it does | Confirmed | Medium | Added a current-time block (layer 4) |
 | 3 | A saved oversized tool result can point the model to stale content when a tool-call ID repeats in a session | Mechanism confirmed; real-world trigger not yet confirmed | Low–medium | Fixed with the suggested fix (content-hash file names) |
 | 4 | Compaction usually falls back to a raw dump: the model is only asked for a summary when the request overflows by less than ~600 tokens | Confirmed | Medium | Same as nanobot by default; an opt-in fix (`NANOCLAW_COMPACTION=fixed`) is being A/B tested |
@@ -29,6 +29,8 @@ the original project NanoClaw is based on.
 ---
 
 ## 1. `list_dir` recursive listing is empty under a `build`/`dist`/`venv` folder
+
+**Status (2026-10-27):** fixed upstream in commit `8052c3a` ("recursive ignores only below the listed root"); checked at `c4dac64`. NanoClaw had already fixed it the same way in layer 3.
 
 **Where:** `nanobot/agent/tools/filesystem.py`, `ListDirTool.execute`, line 1161:
 

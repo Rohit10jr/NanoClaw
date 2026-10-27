@@ -76,7 +76,9 @@ the call, then the runner runs the tool itself and catches any exception.
 | Tool returned `ToolResult.error(...)` | its own message |
 
 Each one ends with nanobot's hint
-`[Analyze the error above and try a different approach.]` (added once). In
+`[Consider this result in the context of the user's goal and decide whether and how to proceed.]`
+(added once; nanobot `c4dac64` text since layer 11, it was `[Analyze the error above and try a
+different approach.]`). In
 practice models usually fix their call on the next iteration.
 
 **Tool calls without a name are dropped, never run or saved.** Some models

@@ -106,7 +106,7 @@ Note: [`notes/02-runner.md`](notes/02-runner.md)
 | ↳ [`_suggest_name()`](../nanoclaw/agent/tools/registry.py#L55) | [`:58`][nb-l2-suggest] | Same: "Did you mean ...?" for case/punctuation differences, never auto-runs |
 | ↳ [`prepare_call()`](../nanoclaw/agent/tools/registry.py#L66) | [`:110`][nb-l2-prepare] | Simplified: unknown tool, non-object arguments, missing required keys. Same messages. No argument unwrapping, casting or full schema validation |
 | ↳ [`execute()`](../nanoclaw/agent/tools/registry.py#L119) | [`:187`][nb-l2-execute] | Same: never raises; errors get the retry hint. (The runner uses `prepare_call` + its own execution, like nanobot's runner) |
-| [`RETRY_HINT`](../nanoclaw/agent/tools/registry.py#L11), [`with_retry_hint`](../nanoclaw/agent/tools/registry.py#L14) | [`agent/tools/execution.py:23`][nb-l2-hint], `:50` `_with_retry_hint` | Same text; added once |
+| [`RETRY_HINT`](../nanoclaw/agent/tools/registry.py#L11), [`with_retry_hint`](../nanoclaw/agent/tools/registry.py#L14) | [`agent/tools/execution.py:23`][nb-l2-hint], `:50` `_with_retry_hint` | Same text (since layer 11: nanobot `c4dac64` `registry.py:14` `_ERROR_HINT`); added once |
 
 ### Runner — `nanoclaw/agent/runner.py`
 
@@ -406,7 +406,7 @@ Note: [`notes/07-skills.md`](notes/07-skills.md)
 | [`MemoryStore.default_dream_prompt()`](../nanoclaw/agent/memory.py#L287) | [`agent/memory.py:503`][nb-l7-dreamprompt] | Same (no `prompts/dream.md` override) |
 | `templates/agent/skills_section.md`, `templates/agent/dream.md` | same files | Same text |
 | `nanoclaw/skills/` (6 skills + README) | `nanobot/skills/` (11) | Same text with the name changed, except two lines adapted to NanoClaw's tools (difference #4); 5 left out (difference #1) |
-| [`nanoclaw skills`](../nanoclaw/__main__.py#L170) | [`command/builtin.py:954`][nb-l7-cmdskill] `/skill` | Same output (checked) |
+| [`nanoclaw skills`](../nanoclaw/__main__.py#L170) | [`command/builtin.py:954`][nb-l7-cmdskill] `/skill` | Same list (checked); since layer 11 it also marks unavailable skills, which the prompt no longer lists |
 | `sync_workspace_templates` creates `skills/` | [`utils/helpers.py:983`][nb-l7-syncskills] | Same |
 
 ## Layer 8 — Subagents
