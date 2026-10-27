@@ -231,7 +231,7 @@ async def test_usage_includes_malformed_retries():
         ]
     )
     result = await run(fake)
-    assert result.usage == LLMUsage(12, 3)
+    assert (result.usage.input_tokens, result.usage.output_tokens) == (12, 3)
 
 
 # --- inline reasoning --------------------------------------------------------
@@ -397,12 +397,60 @@ async def test_usage_is_summed_across_calls():
         ]
     )
     result = await run(fake)
-    assert result.usage == LLMUsage(25, 5)
+    assert (result.usage.input_tokens, result.usage.output_tokens, result.usage.total_tokens) == (25, 5, 30)
 
 
-async def test_usage_is_none_when_provider_reports_none():
-    result = await run(FakeProvider(["hi"]))
-    assert result.usage is None
+async def test_usage_is_summed_with_request_count_and_cache():
+    fake = FakeProvider(
+        [
+            wants_tools(call("echo", {"text": "x"}), usage=LLMUsage.reported(input_tokens=10, output_tokens=2, cache_read_tokens=4)),
+            LLMResponse(content="done", usage=LLMUsage.reported(input_tokens=15, output_tokens=3, cache_read_tokens=8)),
+        ]
+    )
+    result = await run(fake)
+    assert result.usage.request_count == 2
+    assert result.usage.cache_read_tokens == 12
+    assert result.usage.context_tokens == 15  # the latest request's prompt
+    assert result.usage.source == "reported"
+
+
+async def test_usage_is_estimated_when_provider_reports_none():
+    """nanobot runner.py:1297 _usage_or_estimate: count the sent request and the reply."""
+    from nanoclaw.utils.tokens import estimate_message_tokens, estimate_prompt_tokens
+
+    result = await run(FakeProvider(["hi"]), EchoTool())
+    tools = make_spec(FakeProvider(), EchoTool()).tools.get_definitions()
+    expected_in, _ = estimate_prompt_tokens([USER], tools)
+    expected_out = estimate_message_tokens({"role": "assistant", "content": "hi"})
+    assert result.usage == LLMUsage.estimated(input_tokens=expected_in, output_tokens=expected_out)
+    assert result.usage.source == "estimated"
+
+
+async def test_failed_request_counts_as_an_empty_request():
+    result = await run(FakeProvider([LLMResponse(content="Error calling LLM: nope", finish_reason="error")]))
+    assert result.usage == LLMUsage.empty_request()
+
+
+async def test_spec_retry_mode_reaches_the_provider():
+    fake = FakeProvider(["hi"])
+    await run(fake)
+    assert fake.last_retry_mode == "standard"
+    await run(fake := FakeProvider(["hi"]), provider_retry_mode="persistent")
+    assert fake.last_retry_mode == "persistent"
+
+
+async def test_transient_model_error_is_retried_inside_the_turn(monkeypatch):
+    delays = []
+
+    async def fake_sleep(delay):
+        delays.append(delay)
+
+    monkeypatch.setattr("nanoclaw.providers.base.asyncio.sleep", fake_sleep)
+    fake = FakeProvider([LLMResponse(content="Error calling LLM: HTTP 503: busy", finish_reason="error"), "Hello!"], retries=True)
+    result = await run(fake)
+    assert result.stop_reason == "completed" and result.final_content == "Hello!"
+    assert delays == [1] and len(fake.calls) == 2
+    assert result.usage.request_count == 1  # one logical request, however many attempts
 
 
 async def test_initial_messages_are_not_modified():

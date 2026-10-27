@@ -69,6 +69,9 @@ class AgentRunSpec:
     max_iterations_message: str | None = None
     # Progress reports while the run works (nanobot ``on_progress``); see ProgressCallback.
     on_progress: ProgressCallback | None = None
+    # "standard" or "persistent" (nanobot ``provider_retry_mode``); see
+    # LLMProvider.chat_with_retry.
+    provider_retry_mode: str = "standard"
 
 
 @dataclass
@@ -88,14 +91,12 @@ class AgentRunResult:
 
 
 def _add_usage(total: LLMUsage | None, new: LLMUsage | None) -> LLMUsage | None:
+    """Sum a turn's usage across requests. (nanobot runner.py:1364 ``_merge_usage``)"""
     if new is None:
         return total
     if total is None:
         return new
-    return LLMUsage(
-        input_tokens=total.input_tokens + new.input_tokens,
-        output_tokens=total.output_tokens + new.output_tokens,
-    )
+    return total + new
 
 
 class AgentRunner:
@@ -207,18 +208,36 @@ class AgentRunner:
         *,
         with_tools: bool,
     ) -> LLMResponse:
-        """One provider call. Inline <think> blocks are removed from the answer."""
+        """One provider call, retried on transient errors.
+
+        Inline <think> blocks are removed from the answer, and ``usage`` is
+        always set: estimated if the provider sent none (before <think> is
+        stripped, since those tokens were generated too).
+        """
         tools = spec.tools.get_definitions() if with_tools else []
-        response = await spec.provider.safe_chat(
-            messages=merge_adjacent_user_messages_for_model(messages),
-            tools=tools or None,
-            model=spec.model,
-            max_tokens=spec.max_tokens,
-            temperature=spec.temperature,
-        )
+        kwargs: dict[str, Any] = {
+            "messages": merge_adjacent_user_messages_for_model(messages),
+            "tools": tools or None,
+            "model": spec.model,
+            "max_tokens": spec.max_tokens,
+            "temperature": spec.temperature,
+        }
+        response = await spec.provider.chat_with_retry(**kwargs, retry_mode=spec.provider_retry_mode)
+        response.usage = self._usage_or_estimate(spec.provider, response, kwargs)
         if response.content and not response.is_error:
             response.content = strip_think(response.content)
         return response
+
+    @staticmethod
+    def _usage_or_estimate(provider: LLMProvider, response: LLMResponse, kwargs: dict[str, Any]) -> LLMUsage:
+        """The request's usage; estimated if missing, empty for a failed request.
+
+        (nanobot runner.py:1297)
+        """
+        usage = response.usage
+        if response.is_error:
+            return usage if usage is not None and usage.total_tokens > 0 else LLMUsage.empty_request()
+        return provider.usage_for_call(response, kwargs) or LLMUsage.empty_request()
 
     async def _request_model(
         self,

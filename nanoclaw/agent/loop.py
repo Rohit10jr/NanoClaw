@@ -103,8 +103,12 @@ class AgentLoop:
         context_window_tokens: int = DEFAULT_CONTEXT_WINDOW_TOKENS,
         restrict_to_workspace: bool = False,
         compaction: str = COMPACTION_NANOBOT,
+        provider_retry_mode: str = "standard",
     ) -> None:
         self.provider = provider
+        # For the main agent's model calls only; subagents and memory archiving
+        # retry in standard mode, as in nanobot (loop.py:367, :1346).
+        self.provider_retry_mode = provider_retry_mode
         self.restrict_to_workspace = restrict_to_workspace
         self.workspace = workspace
         self.model = model
@@ -278,6 +282,7 @@ class AgentLoop:
                         temperature=self.temperature,
                         session_key=session.key,
                         on_progress=on_progress,
+                        provider_retry_mode=self.provider_retry_mode,
                     )
                 )
             finally:
@@ -291,11 +296,7 @@ class AgentLoop:
                 skip = len(messages) if persisted_early else len(messages) - 1
                 # Token use of the last turn, for /status (nanobot ``_last_usage``).
                 if result.usage is not None:
-                    session.metadata[LAST_USAGE_KEY] = {
-                        "input_tokens": result.usage.input_tokens,
-                        "output_tokens": result.usage.output_tokens,
-                        "total_tokens": result.usage.total_tokens,
-                    }
+                    session.metadata[LAST_USAGE_KEY] = result.usage.to_dict()  # nanobot loop.py:2384
                 # Only user turns set or clear the iteration-limit flag; a
                 # subagent follow-up leaves it alone (nanobot loop.py:2385).
                 if subagent is None:

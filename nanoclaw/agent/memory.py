@@ -597,7 +597,8 @@ class MemoryArchiver:
         """One archive request (retried once if the model wants tools). ``None`` if it gave no usable summary."""
         response = None
         for attempt in range(2):
-            response = await runtime.provider.safe_chat(
+            # Retried like any model call, in standard mode (nanobot memory.py:902).
+            response = await runtime.provider.chat_with_retry(
                 messages=request_messages,
                 tools=request_tools or None,
                 model=runtime.model,
