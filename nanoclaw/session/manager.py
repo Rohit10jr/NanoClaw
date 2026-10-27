@@ -85,6 +85,20 @@ def find_legal_message_start(messages: list[dict[str, Any]]) -> int:
     return start
 
 
+@dataclass(frozen=True)
+class SessionPolicy:
+    """Whether a session is saved and whether its content may be logged.
+
+    A slim copy of nanobot's ``SessionPolicy`` (session/manager.py), without
+    ``disabled_tools``. NanoClaw's sessions don't carry one yet; subagents
+    use it for their private child sessions (layer 19): a child started from
+    a temporary turn keeps its transcript in memory only.
+    """
+
+    persist: bool = True
+    log_content: bool = True
+
+
 @dataclass
 class Session:
     """A conversation session."""
@@ -276,6 +290,51 @@ class SessionManager:
             session = self._load(key) or Session(key=key)
         self._remember(session)
         return session
+
+    def get_cached(self, key: str) -> Session | None:
+        """The cached session, without loading or creating one."""
+        return self._cache.get(key)
+
+    def get_existing(self, key: str) -> Session | None:
+        """The cached or saved session; ``None`` if it was never saved.
+        (nanobot ``SessionManager.get_existing``)"""
+        session = self._cache.get(key)
+        if session is None:
+            session = self._load(key)
+            if session is not None:
+                self._remember(session)
+        return session
+
+    def read_session_metadata(self, key: str) -> dict[str, Any] | None:
+        """The metadata line of a saved session file, without its messages.
+        (nanobot ``read_session_metadata``)"""
+        return self._read_header(self.get_session_path(key))
+
+    def list_session_headers(self) -> list[dict[str, Any]]:
+        """The metadata line of every saved session (each has ``key`` and ``metadata``)."""
+        headers = []
+        for path in sorted(self.sessions_dir.glob("*.jsonl")):
+            header = self._read_header(path)
+            if header is not None and isinstance(header.get("key"), str):
+                headers.append(header)
+        return headers
+
+    @staticmethod
+    def _read_header(path: Path) -> dict[str, Any] | None:
+        try:
+            with open(path, encoding="utf-8") as handle:
+                first = handle.readline()
+        except OSError:
+            return None
+        try:
+            data = json.loads(first)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(data, dict) or data.get("_type") != "metadata":
+            return None
+        if not isinstance(data.get("metadata"), dict):
+            data["metadata"] = {}
+        return data
 
     def invalidate(self, key: str) -> None:
         """Drop a session from the cache; the next ``get_or_create`` reloads it."""

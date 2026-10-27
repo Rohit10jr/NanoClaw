@@ -323,7 +323,7 @@ async def test_dream_with_nothing_to_process_is_logged(tmp_path, ws, logs):
     loop = AgentLoop(FakeProvider([]), ws, sessions=SessionManager(ws, sessions_root=tmp_path / "sessions"))
     await loop.run_dream()
     info = messages(logs, "INFO")
-    assert info[0].startswith("Registered ") and "'spawn'" in info[0]
+    assert info[0].startswith("Registered ") and "'subagent'" in info[0]
     assert info[1:] == ["Dream: nothing to process"]
 
 

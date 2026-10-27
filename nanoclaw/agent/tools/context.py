@@ -2,7 +2,7 @@
 
 Mirrors the request part of nanobot/agent/tools/context.py (``RequestContext``,
 ``bind_request_context``, ``current_request_context``). The loop binds it
-around a run, so a tool such as ``spawn`` can start work for the same
+around a run, so a tool such as ``subagent`` can start work for the same
 conversation with the same model, without that being passed through every
 call. Since layer 14 it also carries the chat id, so a background subagent's
 report can be addressed to the chat on the message bus. nanobot's context
@@ -22,10 +22,27 @@ from nanoclaw.utils.llm_runtime import LLMRuntime
 
 @dataclass(frozen=True)
 class RequestContext:
+    """Per-request context for tools. (nanobot context.py:30)
+
+    Field order is NanoClaw's (``channel, session_key, runtime, chat_id``).
+    Since layer 19 it also carries what the ``subagent`` tool reads:
+    ``message_id`` / ``turn_id`` (the task's origin), ``log_content``,
+    ``persist_session`` (False in a temporary turn: a child then runs inline
+    and saves nothing) and ``can_receive_background_results`` (False when no
+    bus loop is running, e.g. ``nanoclaw ask``: a child then always runs
+    inline, as in nanobot, whose loop sets it to ``self._running``).
+    """
+
     channel: str
-    session_key: str | None
+    session_key: str | None = None
     runtime: LLMRuntime | None = None
     chat_id: str = "direct"
+    message_id: str | None = None
+    turn_id: str | None = None
+    log_content: bool = True
+    # The host can consume completion messages after this request returns.
+    can_receive_background_results: bool = True
+    persist_session: bool = True
 
 
 _current: ContextVar[RequestContext | None] = ContextVar("nanoclaw_request_context", default=None)

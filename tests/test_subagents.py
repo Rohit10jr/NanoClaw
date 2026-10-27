@@ -1,9 +1,11 @@
-"""Subagents (layer 8): the spawn tool, SubagentManager, and result follow-up turns."""
+"""Subagents (layer 8, rewritten for layer 19's ``subagent`` tool): SubagentManager,
+the tool's create action, inline and background results, follow-up turns."""
 
 import asyncio
 import copy
 import json
 import shutil
+import uuid
 
 import pytest
 
@@ -19,11 +21,11 @@ from nanoclaw.agent.subagent import (
 )
 from nanoclaw.agent.tools import ToolRegistry, is_tool_error
 from nanoclaw.agent.tools.context import RequestContext, bind_request_context, reset_request_context
-from nanoclaw.agent.tools.spawn import SpawnTool
+from nanoclaw.agent.tools.subagent import SubagentTool
 from nanoclaw.providers import FakeProvider, LLMResponse, ToolCallRequest
 from nanoclaw.providers.fake import RecordedCall
 from nanoclaw.runtime_context import RUNTIME_CONTEXT_TAG
-from nanoclaw.session import SessionManager
+from nanoclaw.session import Session, SessionManager
 from nanoclaw.utils.llm_runtime import LLMRuntime
 from nanoclaw.utils.templates import sync_workspace_templates
 from toy_tools import EchoTool
@@ -82,74 +84,112 @@ def make_loop(ws, tmp_path, main_script, child_script=(), **kwargs):
     return AgentLoop(provider, ws, sessions=sessions, **kwargs), provider
 
 
+def own_child(loop, task_id, owner="cli:direct"):
+    """A saved child session for a hand-made report: a report whose child
+    doesn't belong to the session is dropped (``accepts_result``)."""
+    loop.sessions.save(Session(key=f"subagent:{task_id}", metadata={"session_type": "subagent", "parent_session_key": owner}))
+
+
 def runtime(provider, temperature=0.3):
     return LLMRuntime(provider=provider, model="m", max_tokens=100, temperature=temperature, context_window_tokens=0)
 
 
-# --- the spawn tool ---------------------------------------------------------
+# --- the subagent tool ------------------------------------------------------
 
 
-def test_spawn_tool_schema_matches_nanobot(ws):
-    schema = SpawnTool(SubagentManager(ws)).to_schema()
+def test_subagent_tool_schema_matches_nanobot(ws):
+    """The schema nanobot c4dac64 sends for its ``subagent`` tool."""
+    schema = SubagentTool(SubagentManager(ws)).to_schema()
     assert schema == {
         "type": "function",
         "function": {
-            "name": "spawn",
+            "name": "subagent",
             "description": (
-                "Spawn a subagent to handle a task in the background. Use this for complex or time-consuming "
-                "tasks that can run independently. Set wait=true for a consultation whose result must inform "
-                "the current turn. The subagent will complete the task and report back when done. For "
-                "deliverables or existing projects, inspect the workspace first and use a dedicated "
-                "subdirectory when helpful."
+                "Manage the current session's private subagent tasks. Background results arrive automatically; "
+                "avoid repeated polling. Check with a known task_id to read older results. Partial results or "
+                "iteration limits do not mean completion."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "task": {"type": "string", "description": "The task for the subagent to complete"},
-                    "label": {"type": "string", "description": "Optional short label for the task (for display)"},
+                    "action": {
+                        "type": "string",
+                        "description": (
+                            "create starts a task; send queues a message; cancel requests an idempotent stop; "
+                            "check returns task status, receipts, and results."
+                        ),
+                        "enum": ["create", "send", "cancel", "check"],
+                    },
+                    "task": {
+                        "type": "string",
+                        "description": "Required for create: the task for the subagent to complete.",
+                        "minLength": 1,
+                    },
+                    "label": {"type": "string", "description": "Display label for create."},
                     "temperature": {
                         "type": "number",
-                        "description": (
-                            "Optional sampling temperature for the subagent (0.0 = deterministic, higher = more "
-                            "creative). Defaults to the provider's configured temperature."
-                        ),
+                        "description": "Sampling temperature for create; inherits the parent's runtime if omitted.",
                         "minimum": 0.0,
                         "maximum": 2.0,
                     },
                     "wait": {
                         "type": "boolean",
                         "description": (
-                            "Wait for the subagent and return its result directly. Use this for a blocking "
-                            "consultation that must inform the current turn. Defaults to false for background "
-                            "execution."
+                            "For create: true waits for the result; false runs in background with a completion "
+                            "notification. Temporary sessions and hosts unable to receive background results "
+                            "always wait."
                         ),
                         "default": False,
                     },
+                    "task_id": {
+                        "type": "string",
+                        "description": (
+                            "Full task ID returned by create. Required for send/cancel; optional for check. "
+                            "Omit for check to list the current session's active and recently finished tasks."
+                        ),
+                        "minLength": 1,
+                    },
+                    "message": {
+                        "type": "string",
+                        "description": (
+                            "Required for send: text, at most 8192 UTF-8 bytes. Accepted means queued, not "
+                            "delivered. Delivery receipts mean injected into the task transcript, not that the "
+                            "task acted on the message."
+                        ),
+                        "maxLength": 8192,
+                    },
                 },
-                "required": ["task"],
+                "required": ["action"],
                 "additionalProperties": False,
             },
         },
     }
 
 
-async def test_spawn_outside_a_turn_is_an_error(ws):
-    result = await SpawnTool(SubagentManager(ws)).execute(task="x")
+async def test_create_outside_a_turn_is_an_error(ws):
+    tool = SubagentTool(SubagentManager(ws))
+    result = await tool.execute(action="create", task="x")
     assert is_tool_error(result)
-    assert result == "Error: spawn requires an active model runtime"
+    assert result == "Error: create requires an active model runtime"
     token = bind_request_context(RequestContext(channel="cli", session_key="cli:direct", runtime=None))
     try:
-        result = await SpawnTool(SubagentManager(ws)).execute(task="x")
+        assert await tool.execute(action="create", task="x") == "Error: create requires an active model runtime"
+        assert await tool.execute(action="create", task="  ") == "Error: create requires a non-empty task"
+        assert await tool.execute(action="send") == "Error: send requires task_id"
+        assert await tool.execute(action="cancel") == "Error: cancel requires task_id"
+        assert await tool.execute(action="other") == "Error: unknown subagent action"
+        assert await tool.execute(action="check", task_id="missing") == "Error: task unavailable"
+        assert json.loads(await tool.execute(action="check")) == {"tasks": []}
     finally:
         reset_request_context(token)
-    assert result == "Error: spawn requires an active model runtime"
+    assert await tool.execute(action="check") == "Error: task unavailable"  # no session
 
 
-async def test_main_agent_has_spawn_but_subagents_and_dream_do_not(ws, tmp_path):
+async def test_main_agent_has_subagent_but_subagents_and_dream_do_not(ws, tmp_path):
     loop, _ = make_loop(ws, tmp_path, [])
-    assert "spawn" in loop.tools.tool_names
+    assert "subagent" in loop.tools.tool_names and "spawn" not in loop.tools.tool_names
     assert sorted(loop.subagents._build_tools().tool_names) == DEFAULT_TOOLS
-    assert "spawn" not in loop.memory.build_dream_tools().tool_names
+    assert "subagent" not in loop.memory.build_dream_tools().tool_names
 
 
 async def test_custom_tools_are_used_as_given(ws, tmp_path):
@@ -159,7 +199,7 @@ async def test_custom_tools_are_used_as_given(ws, tmp_path):
     assert loop.tools.tool_names == ["echo"]
 
 
-# --- wait=true --------------------------------------------------------------
+# --- inline (wait=true, or no bus loop running) ------------------------------
 
 
 async def test_wait_true_returns_the_childs_answer_in_the_same_turn(ws, tmp_path):
@@ -167,13 +207,13 @@ async def test_wait_true_returns_the_childs_answer_in_the_same_turn(ws, tmp_path
     loop, provider = make_loop(
         ws,
         tmp_path,
-        [call("spawn", {"task": "Count the files", "wait": True}), "There are 3 files."],
+        [call("subagent", {"action": "create", "task": "Count the files", "wait": True}), "There are 3 files."],
         ["Three files."],
         temperature=0.4,
     )
     result = await loop.process_direct("how many files?")
     assert result.final_content == "There are 3 files."
-    assert result.tools_used == ["spawn"]
+    assert result.tools_used == ["subagent"]
 
     child = provider.child_calls[0]
     assert [m["role"] for m in child.messages] == ["system", "user"]
@@ -184,12 +224,42 @@ async def test_wait_true_returns_the_childs_answer_in_the_same_turn(ws, tmp_path
     tool_message = provider.main_calls[1].messages[-1]
     assert tool_message["role"] == "tool" and tool_message["content"] == "Three files."
     assert loop.subagents.get_running_count() == 0  # forgotten once done
-    assert await loop.next_subagent_result() is None  # wait=true never sends a report
+    assert await loop.next_subagent_result() is None  # inline never sends a report
+    (status,) = loop.subagents.statuses_for_session("cli:direct").values()
+    assert (status.state, status.result) == ("done", "Three files.")
+
+
+async def test_without_a_bus_loop_create_waits_even_without_wait(ws, tmp_path):
+    """nanobot test_direct_turn_waits_for_child_without_a_background_consumer:
+    ``process_direct`` (``nanoclaw ask``) can't receive background reports."""
+    loop, provider = make_loop(
+        ws, tmp_path, [call("subagent", {"action": "create", "task": "Inspect the configuration"}), "Parent conclusion"],
+        ["Verified child findings"],
+    )
+    result = await loop.process_direct("Delegate this inspection")
+    assert result.final_content == "Parent conclusion"
+    assert provider.main_calls[1].messages[-1] == {
+        "role": "tool", "tool_call_id": "c1", "name": "subagent", "content": "Verified child findings",
+    }
+    assert loop.bus.inbound_size == 0 and loop.subagents.get_running_count() == 0
+    assert [s.state for s in loop.subagents.statuses_for_session("cli:direct").values()] == ["done"]
+
+
+async def test_a_temporary_turn_runs_its_child_inline_and_saves_nothing(ws, tmp_path):
+    loop, provider = make_loop(
+        ws, tmp_path, [call("subagent", {"action": "create", "task": "secret task"}), "Parent done"], ["Child done"],
+    )
+    result = await loop.process_direct("go", session_key="cli:temp", ephemeral=True)
+    assert result.final_content == "Parent done"
+    assert provider.main_calls[1].messages[-1]["content"] == "Child done"
+    assert list((tmp_path / "sessions").rglob("*.jsonl")) == []  # neither parent nor child saved
+    (status,) = loop.subagents.statuses_for_session("cli:temp").values()
+    assert status.state == "done"
 
 
 async def test_wait_true_temperature_override(ws, tmp_path):
     loop, provider = make_loop(
-        ws, tmp_path, [call("spawn", {"task": "t", "wait": True, "temperature": 1.5}), "ok"], ["done"]
+        ws, tmp_path, [call("subagent", {"action": "create", "task": "t", "wait": True, "temperature": 1.5}), "ok"], ["done"]
     )
     await loop.process_direct("go")
     assert provider.child_calls[0].temperature == 1.5
@@ -199,7 +269,7 @@ async def test_wait_true_child_error_is_a_tool_error(ws, tmp_path):
     loop, provider = make_loop(
         ws,
         tmp_path,
-        [call("spawn", {"task": "t", "wait": True}), "it failed"],
+        [call("subagent", {"action": "create", "task": "t", "wait": True}), "it failed"],
         [LLMResponse(content=None, finish_reason="error")],
     )
     await loop.process_direct("go")
@@ -229,7 +299,7 @@ async def test_child_hitting_max_iterations_gets_no_summary_request(ws, tmp_path
     loop, provider = make_loop(
         ws,
         tmp_path,
-        [call("spawn", {"task": "loop forever", "wait": True}), "gave up"],
+        [call("subagent", {"action": "create", "task": "loop forever", "wait": True}), "gave up"],
         [call("list_dir", {"path": "."}, f"c{i}") for i in range(5)],
         max_iterations=3,
     )
@@ -266,7 +336,7 @@ async def test_run_inline_outcomes_match_nanobot(ws):
     assert is_tool_error(result) and result == "Rate limited"
 
 
-# --- background spawn -------------------------------------------------------
+# --- background -------------------------------------------------------------
 
 
 async def test_background_spawn_reply_and_label(ws, tmp_path):
@@ -275,7 +345,7 @@ async def test_background_spawn_reply_and_label(ws, tmp_path):
     reply = await manager.spawn("Summarize the quarterly report for the team", runtime=runtime(provider))
     task_id = reply.split("(id: ")[1].split(")")[0]
     assert reply == f"Subagent [Summarize the quarterly report...] started (id: {task_id}). I'll notify you when it completes."
-    assert len(task_id) == 8
+    assert str(uuid.UUID(task_id)) == task_id  # the full UUID since layer 19 (nanobot c4dac64)
     reply = await manager.spawn("short", label="Report", runtime=runtime(provider))
     assert reply.startswith("Subagent [Report] started (id: ")
     await manager.close()
@@ -283,16 +353,11 @@ async def test_background_spawn_reply_and_label(ws, tmp_path):
 
 async def test_background_result_becomes_a_follow_up_turn(ws, tmp_path):
     sync_workspace_templates(ws)
-    loop, provider = make_loop(
-        ws,
-        tmp_path,
-        [call("spawn", {"task": "Check the weather", "label": "Weather"}), "I've started that.", "It is sunny."],
-        ["Sunny, 20°C."],
+    loop, provider = make_loop(ws, tmp_path, ["It is sunny."], ["Sunny, 20°C."])
+    reply = await loop.subagents.spawn(
+        "Check the weather", label="Weather", session_key="cli:direct", runtime=loop.runtime
     )
-    result = await loop.process_direct("what's the weather?")
-    assert result.final_content == "I've started that."
-    started = provider.main_calls[1].messages[-1]["content"]
-    assert started.startswith("Subagent [Weather] started (id: ")
+    assert reply.startswith("Subagent [Weather] started (id: ")
 
     report = await loop.next_subagent_result()
     assert report.label == "Weather" and report.status == "ok" and report.session_key == "cli:direct"
@@ -308,34 +373,45 @@ async def test_background_result_becomes_a_follow_up_turn(ws, tmp_path):
 
     follow_up = await loop.process_subagent_result(report)
     assert follow_up.final_content == "It is sunny."
-    request = provider.main_calls[2].messages
+    request = provider.main_calls[0].messages
     assert request[-1] == {"role": "user", "content": report.content}  # fresh input, no time block
     assert RUNTIME_CONTEXT_TAG not in request[-1]["content"]
-    assert request[-2]["role"] == "assistant" and request[-2]["content"] == "I've started that."
 
     saved = loop.sessions.get_or_create("cli:direct").messages
-    announce, reply = saved[-2], saved[-1]
+    announce, answer = saved[-2], saved[-1]
     assert announce["role"] == "assistant" and announce["content"] == report.content
     assert announce["injected_event"] == "subagent_result"
     assert announce["subagent_task_id"] == report.task_id
     assert announce["sender_id"] == "subagent"
-    assert reply["role"] == "assistant" and reply["content"] == "It is sunny."
+    assert answer["role"] == "assistant" and answer["content"] == "It is sunny."
     assert "pending_user_turn" not in loop.sessions.get_or_create("cli:direct").metadata
 
 
 async def test_saved_report_is_replayed_in_later_turns(ws, tmp_path):
-    loop, provider = make_loop(ws, tmp_path, [call("spawn", {"task": "t"}), "started", "done!", "next"], ["r"])
+    loop, provider = make_loop(ws, tmp_path, ["hi", "done!", "next"], ["r"])
     await loop.process_direct("go")
+    await loop.subagents.spawn("t", session_key="cli:direct", runtime=loop.runtime)
     await loop.process_subagent_result(await loop.next_subagent_result())
     await loop.process_direct("and now?")
     roles = [m["role"] for m in provider.main_calls[-1].messages]
-    assert roles == ["system", "user", "assistant", "tool", "assistant", "assistant", "assistant", "user"]
-    assert provider.main_calls[-1].messages[5]["content"].startswith("[Subagent 't' completed successfully]")
+    assert roles == ["system", "user", "assistant", "assistant", "assistant", "user"]
+    assert provider.main_calls[-1].messages[3]["content"].startswith("[Subagent 't' completed successfully]")
+
+
+async def test_a_report_whose_child_is_not_owned_is_dropped(ws, tmp_path):
+    """nanobot loop.py:1888 (``accepts_result``): no turn runs, nothing is saved."""
+    loop, provider = make_loop(ws, tmp_path, ["never"])
+    report = SubagentResult("abcd1234", "x", "[Subagent 'x' completed successfully]", "ok", "cli:direct", "cli")
+    own_child(loop, "abcd1234", owner="cli:other")
+    result = await loop.process_subagent_result(report)
+    assert result.final_content is None and provider.main_calls == []
+    assert loop.sessions.get_or_create("cli:direct").messages == []
 
 
 async def test_a_report_is_saved_only_once(ws, tmp_path):
     loop, provider = make_loop(ws, tmp_path, ["first", "second"])
     report = SubagentResult("abcd1234", "x", "[Subagent 'x' completed successfully]", "ok", "cli:direct", "cli")
+    own_child(loop, "abcd1234")
     await loop.process_subagent_result(report)
     await loop.process_subagent_result(report)
     saved = loop.sessions.get_or_create("cli:direct").messages
@@ -391,6 +467,7 @@ async def test_child_exception_is_reported(ws, monkeypatch):
     await manager.spawn("t", runtime=runtime(FakeProvider([])))
     report = await next_report(manager)
     assert report.status == "error" and "Result:\nError: boom\nExit reason: error\nError: boom\n" in report.content
+    await manager.close()
 
 
 async def test_empty_child_answer_uses_the_fallback_message(ws):
@@ -420,8 +497,10 @@ async def test_at_most_four_run_at_once(ws):
     for i in range(6):
         await manager.spawn(f"task {i}", runtime=runtime(SlowProvider([])))
     await asyncio.sleep(0.05)
-    phases = sorted(s.phase for s in manager._task_statuses.values())
+    phases = sorted(s.phase for s in manager.runtime_statuses().values())
     assert phases == ["initializing"] * 4 + ["queued"] * 2
+    states = sorted(s.state for s in manager.runtime_statuses().values())
+    assert states == ["queued"] * 2 + ["running"] * 4
     gate.set()
     for _ in range(6):
         await next_report(manager)
@@ -450,11 +529,12 @@ async def test_cancel_by_session_and_close(ws):
     await manager.close()
     assert manager.get_running_count() == 0
     assert manager.bus.inbound.empty()  # cancelled children never report
+    assert [s.state for s in manager.statuses_for_session("s1").values()] == ["cancelled", "cancelled"]
 
 
 async def test_next_subagent_result_waits_for_running_children(ws, tmp_path):
     gate = asyncio.Event()
-    loop, provider = make_loop(ws, tmp_path, [call("spawn", {"task": "slow"}), "started"])
+    loop, provider = make_loop(ws, tmp_path, [])
     original = provider.chat
 
     async def chat(messages, *args, **kwargs):
@@ -464,7 +544,7 @@ async def test_next_subagent_result_waits_for_running_children(ws, tmp_path):
 
     provider.chat = chat
     provider.child_script.append(LLMResponse(content="finished"))
-    await loop.process_direct("go")
+    await loop.subagents.spawn("slow", session_key="cli:direct", runtime=loop.runtime)
     waiter = asyncio.create_task(loop.next_subagent_result())
     await asyncio.sleep(0.02)
     assert not waiter.done()
@@ -504,41 +584,37 @@ async def test_runner_max_iterations_options():
 # --- CLI --------------------------------------------------------------------
 
 
-def test_cli_ask_waits_for_background_subagents(capsys, tmp_path):
+def test_cli_ask_runs_children_inline(capsys, tmp_path):
+    """``ask`` runs no bus loop, so even a background create waits for the
+    child (nanobot c4dac64's one-shot ``agent -m``); the child keeps a saved
+    session of its own."""
     workspace = tmp_path / "ws"
     provider = RoutingProvider(
-        [call("spawn", {"task": "Find the answer", "label": "Answer"}), "Working on it.", "The answer is 42."],
+        [call("subagent", {"action": "create", "task": "Find the answer", "label": "Answer"}), "The answer is 42."],
         ["42"],
     )
     assert main(["ask", "what is the answer?", "-w", str(workspace)], provider=provider) == 0
     out = capsys.readouterr()
-    assert out.out == "Working on it.\nThe answer is 42.\n"
-    assert "[subagent 'Answer' finished]" in out.err
+    assert out.out == "The answer is 42.\n"
+    assert "[subagent" not in out.err
 
     sessions = SessionManager(workspace.resolve())
     saved = sessions.get_or_create("cli:direct").messages
-    assert [m["role"] for m in saved] == ["user", "assistant", "tool", "assistant", "assistant", "assistant"]
-    assert saved[-2]["injected_event"] == "subagent_result"
+    assert [m["role"] for m in saved] == ["user", "assistant", "tool", "assistant"]
+    assert saved[2]["content"] == "42"
+    children = [h for h in sessions.list_session_headers() if h["key"].startswith("subagent:")]
+    assert len(children) == 1
+    meta = children[0]["metadata"]
+    assert meta["session_type"] == "subagent" and meta["parent_session_key"] == "cli:direct"
+    assert meta["subagent_task"]["state"] == "done" and meta["subagent_task"]["label"] == "Answer"
     assert json.loads(json.dumps(saved))  # saved as plain JSON
-
-
-def test_cli_ask_reports_subagents_even_after_an_error(capsys, tmp_path):
-    workspace = tmp_path / "ws"
-    provider = RoutingProvider(
-        [call("spawn", {"task": "t"}), LLMResponse(content="API down", finish_reason="error"), "Report ready."],
-        ["r"],
-    )
-    assert main(["ask", "go", "-w", str(workspace)], provider=provider) == 1
-    out = capsys.readouterr()
-    assert "API down" in out.err
-    assert out.out == "Report ready.\n"
 
 
 async def test_children_follow_the_loops_current_iteration_limit(ws, tmp_path):
     loop, provider = make_loop(
         ws,
         tmp_path,
-        [call("spawn", {"task": "loop forever", "wait": True}), "gave up"],
+        [call("subagent", {"action": "create", "task": "loop forever", "wait": True}), "gave up"],
         [call("list_dir", {"path": "."}, f"c{i}") for i in range(5)],
     )
     loop.max_iterations = 2  # changed after the loop was created
@@ -554,6 +630,7 @@ async def test_compacting_on_a_duplicate_report_keeps_the_summary_boundary_right
 
     report = SubagentResult("abcd1234", "x", "[Subagent 'x' completed successfully]\n\nResult:\n" + "r " * 300, "ok", "cli:direct", "cli")
     loop, _ = make_loop(ws, tmp_path, ["ok1", "first-reply"])
+    own_child(loop, "abcd1234")
     await loop.process_direct("first " + "word " * 2000)
     await loop.process_subagent_result(report)
     session = loop.sessions.get_or_create("cli:direct")
