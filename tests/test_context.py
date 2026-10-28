@@ -3,6 +3,8 @@
 import platform
 from datetime import datetime, timedelta, timezone
 
+from pathlib import Path
+
 import pytest
 
 from nanoclaw.__main__ import main
@@ -148,6 +150,17 @@ def test_edited_files_are_included_and_whitespace_only_edits_dont_count(ws):
     prompt = ContextBuilder(ws).build_system_prompt()
     assert "## USER.md" not in prompt
     assert "- Always run tests." in prompt
+
+
+def test_an_earlier_bundled_agents_md_still_counts_as_unedited(ws):
+    # Workspaces created before layer 21 hold the shorter AGENTS.md (no cron
+    # or heartbeat sections); it must not start appearing in the prompt.
+    old = (Path(__file__).parent / "fixtures" / "agents_md_layer4.md").read_text(encoding="utf-8")
+    assert old.strip() != load_bundled_template("AGENTS.md").strip()
+    (ws / "AGENTS.md").write_text(old, encoding="utf-8")
+    assert "## AGENTS.md" not in ContextBuilder(ws).build_system_prompt()
+    (ws / "AGENTS.md").write_text(old + "\n- Always run tests.\n", encoding="utf-8")
+    assert "- Always run tests." in ContextBuilder(ws).build_system_prompt()
 
 
 def test_empty_and_missing_files_are_skipped(tmp_path):
