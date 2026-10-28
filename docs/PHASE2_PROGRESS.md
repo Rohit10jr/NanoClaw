@@ -146,11 +146,19 @@ Legend: ⏳ in progress · ✅ done and verified · ⛔ blocked
 | Docs | note 21, CODE_MAP, README, ROADMAP, notes 04/06/11/14 | main session | — | ✅ |
 | PR | `p2/layer-21` → `main` | main session | PR #13 | ✅ |
 
+## Layer 22 — session storage: per-chat event log for the web UI history (`p2/layer-22`) ⏳
+
+| Task | Scope (files) | Sub-agent | Verification | Status |
+|---|---|---|---|---|
+| 22.1 Wire projection | bus events → nanobot's web UI wire events (`message`, `delta`, `stream_end`, `reasoning_*`, `turn_end`, `context_compaction`, `error`, ...) | sub-agent (worktree), parallel | | ⏳ |
+| 22.2 Transcript and thread history | per-chat event log (JSONL), `webui-thread` projection, backfill from session files, session list index (title, preview) | sub-agent (worktree), parallel | | ⏳ |
+| Integration, mutation checks, docs, PR | | | | |
+
 ## Blockers and open items
 
 | Item | Status |
 |---|---|
 | Real-model tests need API keys as environment secrets | Open; FakeProvider only until then |
 | Windows shell (16.4) not yet run on Windows | Needs a run of `uv run pytest` on Windows by the user |
-| PRs #2–#4 merged; #5–#12 (layers 13–20) open; later layers stacked on them | — |
+| PRs #2–#4 merged; #5–#13 (layers 13–21) open; later layers stacked on them | — |
 | Rewrite earlier commits to the user's author | After phase 2 (user decision) |
