@@ -216,6 +216,7 @@ def test_help_text():
             "/evaluator-prompt [init] — Customize the heartbeat notification gate prompt for this workspace.",
             "/skill — List all enabled skills available to the agent.",
             "/help — List available slash commands.",
+            "/pairing [list|approve <code>|deny <code>|revoke <user_id>] — List, approve, deny or revoke pairing requests.",
         ]
     )
 

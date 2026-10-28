@@ -158,6 +158,9 @@ def test_specs_match_nanobot():
         "/evaluator-prompt": ("Heartbeat evaluator", "file-text", "[init]", "side_channel", True),
         "/skill": ("List skills", "wrench", "", "side_channel", False),
         "/help": ("Show help", "circle-help", "", "side_channel", False),
+        "/pairing": (
+            "Manage pairing", "shield", "[list|approve <code>|deny <code>|revoke <user_id>]", "side_channel", True,
+        ),
     }
 
 

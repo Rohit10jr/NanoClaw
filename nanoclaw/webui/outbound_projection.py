@@ -63,6 +63,7 @@ from nanoclaw.bus.runtime_events import (
     TurnRuntimeAdmitted,
 )
 from nanoclaw.events import AgentEvent
+from nanoclaw.pairing.events import PairingChanged
 from nanoclaw.webui.metadata import (
     WEBSOCKET_TURN_OWNER_METADATA_KEY,
     WEBUI_SYSTEM_COMMAND_TURN_PREFIX,
@@ -232,6 +233,9 @@ class WebUIOutboundProjector:
     def project(self, msg: OutboundMessage) -> list[WireFrame]:
         """The frames one bus message becomes; ``[]`` when nanobot sends nothing."""
         event = msg.event
+        if isinstance(event, PairingChanged):
+            # nanobot outbound_projection.py:144 ``send_pairing_changed``.
+            return [WireFrame({"event": "pairing_changed"}, audience="webui")]
         progress_event = event if isinstance(event, ProgressEvent) else None
         # Dispatcher filters (nanobot manager.py:931-958).
         if progress_event and (
