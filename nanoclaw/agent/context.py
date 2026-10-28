@@ -39,10 +39,10 @@ class ContextBuilder:
     # because the default personality is meant to be used.
     _SKIPPABLE_DEFAULTS = {"AGENTS.md", "USER.md"}
 
-    def __init__(self, workspace: Path) -> None:
+    def __init__(self, workspace: Path, disabled_skills: list[str] | None = None) -> None:
         self.workspace = workspace
         self.memory = MemoryStore(workspace)
-        self.skills = SkillsLoader(workspace)
+        self.skills = SkillsLoader(workspace, disabled_skills=set(disabled_skills) if disabled_skills else None)
         # The tool contract's ``## Scheduling`` section; the loop turns it on
         # when it registers the ``cron`` tool (nanobot: always in the prompt,
         # where the main agent always has the tool).
@@ -85,12 +85,14 @@ class ContextBuilder:
             # extra heading (nanobot/agent/context.py:113-116).
             if memory and not self._is_template_content(memory, "memory/MEMORY.md"):
                 parts.append(memory)
-        active_skills = self.skills.get_always_skills()
-        if active_skills:
-            active_content = self.skills.load_skills_for_context(active_skills)
-            if active_content:
-                parts.append(f"# Active Skills\n\n{active_content}")
-        skills_summary = self.skills.build_skills_summary(exclude=set(active_skills), workspace=root)
+        # One skills snapshot for the build (nanobot context.py:118).
+        with self.skills.snapshot():
+            active_skills = self.skills.get_always_skills()
+            if active_skills:
+                active_content = self.skills.load_skills_for_context(active_skills)
+                if active_content:
+                    parts.append(f"# Active Skills\n\n{active_content}")
+            skills_summary = self.skills.build_skills_summary(exclude=set(active_skills), workspace=root)
         if skills_summary:
             parts.append(render_template("agent/skills_section.md", skills_summary=skills_summary))
         if session_summary and session_summary["text"] != "(nothing)":
@@ -193,18 +195,21 @@ class ContextBuilder:
         merged into it so two user messages are never sent in a row. With
         ``current_message=None`` (used when archiving) there is no new message.
         """
-        messages: list[dict[str, Any]] = [
-            {
-                "role": "system",
-                "content": self.build_system_prompt(
-                    channel=channel, session_summary=session_summary, workspace=workspace
-                ),
-            },
-            *history,
-        ]
-        if current_message is None:
-            return messages
-        current = self.build_current_message(current_message, runtime_context_blocks=runtime_context_blocks)
+        # The system prompt and the ``$skill`` block share one skills
+        # snapshot (nanobot context.py:273).
+        with self.skills.snapshot():
+            messages: list[dict[str, Any]] = [
+                {
+                    "role": "system",
+                    "content": self.build_system_prompt(
+                        channel=channel, session_summary=session_summary, workspace=workspace
+                    ),
+                },
+                *history,
+            ]
+            if current_message is None:
+                return messages
+            current = self.build_current_message(current_message, runtime_context_blocks=runtime_context_blocks)
         if messages[-1].get("role") == "user":
             merged = dict(messages[-1])
             merged["content"] = self._merge_message_content(merged.get("content"), current["content"])

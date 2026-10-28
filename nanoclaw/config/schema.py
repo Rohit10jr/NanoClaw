@@ -206,6 +206,9 @@ class AgentDefaults(Base):
     # Stored for the time block; NanoClaw's time block still uses the host clock.
     timezone: str = "UTC"
     timezone_mode: Literal["auto", "manual"] = "auto"
+    # Skill names to leave out of the prompt, ``$name`` and ``load_skill``
+    # (schema.py:198, e.g. ["summarize", "skill-creator"]).
+    disabled_skills: list[str] = Field(default_factory=list)
     # NanoClaw only (not in nanobot): "nanobot" (default, like upstream) or
     # "fixed" (docs/UPSTREAM_BUGS.md, bug 4). nanobot ignores the key.
     compaction: CompactionMode = "nanobot"

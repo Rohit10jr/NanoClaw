@@ -248,6 +248,8 @@ class AgentLoop:
         session_ttl_minutes: int = 0,
         idle_compact_check_interval_seconds: int = 0,
         my_config: MyToolConfig | None = None,
+        # ``agents.defaults.disabledSkills`` (nanobot loop.py:304).
+        disabled_skills: list[str] | None = None,
     ) -> None:
         # ``model_presets`` include "default" (nanobot ``configured_model_presets``);
         # without one, "default" is these constructor settings.
@@ -292,7 +294,7 @@ class AgentLoop:
         self.max_iterations = max_iterations
         self.max_tool_result_chars = max_tool_result_chars
         self.bus = bus if bus is not None else MessageBus()
-        self.context = ContextBuilder(workspace)
+        self.context = ContextBuilder(workspace, disabled_skills=disabled_skills)
         self.memory: MemoryStore = self.context.memory
         # ``config.tools.exec`` (nanobot ``self.exec_config``, loop.py:375).
         self.exec_config = exec_config if exec_config is not None else ExecToolConfig()
@@ -312,6 +314,7 @@ class AgentLoop:
             bus=self.bus,
             exec_config=self.exec_config,
             session_manager=self.sessions,
+            disabled_skills=disabled_skills,
         )
         build_tools = tools is None
         if tools is None:

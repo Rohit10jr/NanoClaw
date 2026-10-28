@@ -346,8 +346,10 @@ class SubagentManager:
         consolidator: Consolidator | None = None,
         exec_config: ExecToolConfig | None = None,
         session_manager: SessionManager | None = None,
+        disabled_skills: list[str] | None = None,
     ) -> None:
         self.workspace = workspace
+        self.disabled_skills = set(disabled_skills or [])
         self.bus = bus if bus is not None else MessageBus()
         self.exec_config = exec_config
         self.max_tool_result_chars = max_tool_result_chars
@@ -1020,7 +1022,10 @@ class SubagentManager:
         """
         agent_workspace = self.workspace.expanduser().resolve()
         project_workspace = workspace.expanduser().resolve() if workspace else agent_workspace
-        skills_summary = SkillsLoader(self.workspace).build_skills_summary(workspace=project_workspace)
+        skills_summary = SkillsLoader(
+            self.workspace,
+            disabled_skills=self.disabled_skills,
+        ).build_skills_summary(workspace=project_workspace)
         history_log = (
             str(agent_workspace / "memory" / "history.jsonl")
             if agent_workspace != project_workspace
