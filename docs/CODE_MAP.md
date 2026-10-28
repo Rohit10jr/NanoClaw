@@ -754,6 +754,22 @@ Note: [`notes/20-providers.md`](notes/20-providers.md). Links point at nanobot `
 | `LLMResponse.thinking_blocks`, `build_assistant_message(thinking_blocks=)` | [`providers/base.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/providers/base.py), [`agent/runner.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/runner.py) | Same |
 | `nanoclaw/providers/fallback_provider.py` `FallbackProvider`; `on_retry_exhausted`; `TurnModelUpdatedEvent` line | [`providers/fallback_provider.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/providers/fallback_provider.py) | 72 scenarios identical |
 
+## Layer 21 — Runtime: gateway, cron, heartbeat, scheduled Dream, memory history
+
+Note: [`notes/21-runtime.md`](notes/21-runtime.md). Links point at nanobot `c4dac64`.
+
+| NanoClaw | nanobot (`c4dac64`) | How it compares |
+|---|---|---|
+| `nanoclaw/cron/` `CronService`, types, `bound_runner`, `session_turns`, `binding` | [`cron/`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/cron) | 104 cases identical; no runtime admission or web UI branches |
+| `nanoclaw/agent/tools/cron.py` `CronTool` | [`agent/tools/cron.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/tools/cron.py) | Same |
+| `nanoclaw/agent/cron_turns.py` `CronTurnCoordinator`, `automation_turns.py`; `AgentLoop.submit_cron_turn` | [`agent/cron_turns.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/cron_turns.py), [`agent/loop.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/loop.py) | Same |
+| `nanoclaw/cli/gateway.py` `Gateway`, `run_gateway`, health server, shutdown handlers | [`cli/gateway_runtime.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/cli/gateway_runtime.py), [`cli/gateway.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/cli/gateway.py) | Foreground subset; `/health` 4/4 identical |
+| `nanoclaw/agent/autocompact.py` `AutoCompact`; `AgentLoop._check_expired_sessions_if_due` | [`agent/autocompact.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/autocompact.py) | 27/27 identical |
+| `nanoclaw/utils/gitstore.py` `GitStore`; `commit_dream_changes`, `dream_content_diff` (`agent/memory.py`) | [`utils/gitstore.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/utils/gitstore.py) | Same; product name |
+| `nanoclaw/utils/workspace_prompts.py`; `/dream-log`, `/dream-restore`, `/dream-prompt`, `/evaluator-prompt` | [`utils/workspace_prompts.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/utils/workspace_prompts.py), [`command/builtin.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/command/builtin.py) | Same |
+| Heartbeat (`cli/gateway.py`), `nanoclaw/utils/evaluator.py`, `templates/HEARTBEAT.md`, `templates/agent/evaluator.md`; `session/keys.py` | [`cli/gateway_runtime.py:244-800`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/cli/gateway_runtime.py#L244), [`utils/evaluator.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/utils/evaluator.py) | 1,061 checks identical |
+| `DreamConfig`, `GatewayConfig`, `HeartbeatConfig` (`config/schema.py`) | [`config/schema.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/config/schema.py) | Same names and defaults |
+
 [nb-pta]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/providers/base.py#L118
 [nb-tcr]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/providers/base.py#L72
 [nb-tcr-hvn]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/providers/base.py#L81

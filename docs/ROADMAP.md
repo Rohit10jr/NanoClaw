@@ -195,7 +195,7 @@ be used unchanged on top of it. Progress: [`PHASE2_PROGRESS.md`](PHASE2_PROGRESS
 | 18 | Isolation | bubblewrap sandbox, separate project folder | `sandbox.py`, `security/workspace_access.py` | ~350 | ✅ done |
 | 19 | Subagents v2 | `spawn` → `subagent` tool, child sessions | `agent/subagent*.py`, `agent/tools/subagent.py` | ~400 | ✅ done |
 | 20 | Providers | Registry, presets, fallback, Anthropic, `/model` | `providers/registry.py`, `agent/model_presets.py`, `fallback_provider.py`, `anthropic_provider.py` | ~1,100 | ✅ done |
-| 21 | Gateway and schedules | `nanoclaw gateway`, cron, heartbeat, scheduled Dream, idle compaction, memory git history, prompt overrides | `cli/gateway_runtime.py`, `cron/`, `agent/autocompact.py`, `utils/gitstore.py` | ~1,300 | |
+| 21 | Gateway and schedules | `nanoclaw gateway`, cron, heartbeat, scheduled Dream, idle compaction, memory git history, prompt overrides | `cli/gateway_runtime.py`, `cron/`, `agent/autocompact.py`, `utils/gitstore.py` | ~1,300 | ✅ done |
 | 22 | Session storage | JSONL + per-chat event log for the web UI history | `session/` | ~300 | |
 | 23 | Web UI backend | WebSocket channel and minimal web UI backend (`webui.core.v1`) | `channels/websocket/`, `webui/` | ~1,200 | |
 | 24 | Telegram | First chat app | `channels/telegram/` | ~500 | |

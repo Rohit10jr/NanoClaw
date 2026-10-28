@@ -140,8 +140,11 @@ Legend: ⏳ in progress · ✅ done and verified · ⛔ blocked
 | 21.1 Cron | `cron/` (types, service, bound runner), cron tool, `cron_reminder.md`, the Scheduling prompt section, `croniter` | sub-agent (worktree), phase A | 104 cases identical (next runs incl. DST, resume rule, tool, store, execution, bound runner, prompt) | ✅ |
 | 21.2 Gateway, idle compaction | `nanoclaw gateway` (foreground, signals, `/health`), `gateway` config, `agent/autocompact.py` in `AgentLoop.run()` | sub-agent (worktree), phase A | Idle compaction 27/27 identical, `/health` 4/4; real gateway subprocess with SIGTERM/SIGINT | ✅ |
 | 21.3 Memory history, prompt overrides | `utils/gitstore.py` (dulwich), Dream commits, `/dream-log`, `/dream-restore`, `/dream-prompt` and workspace prompt overrides | sub-agent (worktree), phase A | 280 checks: 208 identical, 72 expected (product name, shorter prompts README) | ✅ |
-| 21.4 System jobs | Dream every 2 h, heartbeat (`HEARTBEAT.md`, evaluator) in the gateway | sub-agent (worktree), phase B | | ⏳ |
-| Integration, mutation checks, docs, PR | | | | |
+| 21.4 System jobs | Dream every 2 h, heartbeat (`HEARTBEAT.md`, evaluator) in the gateway | sub-agent (worktree), phase B | 1,061 checks identical, 5 expected (product name) | ✅ |
+| Integration | 3 conflicts (keep both), `uv.lock` regenerated, earlier `AGENTS.md` template still unedited | main session | 3,150 passed, 6 skipped | ✅ |
+| Mutation checks | ~200 rules | sub-agent (worktree) | | ⏳ |
+| Docs | note 21, CODE_MAP, README, ROADMAP, notes 04/06/11/14 | main session | — | ✅ |
+| PR | `p2/layer-21` → `main` | main session | | ⏳ |
 
 ## Blockers and open items
 
