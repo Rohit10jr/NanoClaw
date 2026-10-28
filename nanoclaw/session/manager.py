@@ -319,6 +319,32 @@ class SessionManager:
                 headers.append(header)
         return headers
 
+    def list_sessions(self) -> list[dict[str, Any]]:
+        """Every saved session as ``{"key", "created_at", "updated_at"}``, the
+        cached copy's times when it is newer. (nanobot ``list_sessions``; the
+        idle-compaction scan reads it.)"""
+        out = []
+        for header in self.list_session_headers():
+            key = header["key"]
+            cached = self._cache.get(key)
+            if cached is not None:
+                out.append(
+                    {"key": key, "created_at": cached.created_at.isoformat(), "updated_at": cached.updated_at.isoformat()}
+                )
+            else:
+                out.append({"key": key, "created_at": header.get("created_at"), "updated_at": header.get("updated_at")})
+        return out
+
+    def has_unarchived_messages(self, key: str) -> bool:
+        """Whether the session has messages after ``last_archived`` that are not
+        command records or the summary marker. (nanobot sqlite_store.py:271)"""
+        session = self.get_existing(key)
+        if session is None:
+            return False
+        return any(
+            not m.get("_command") and not is_summary_checkpoint(m) for m in session.messages[session.last_archived:]
+        )
+
     @staticmethod
     def _read_header(path: Path) -> dict[str, Any] | None:
         try:

@@ -99,6 +99,12 @@ Crash recovery and "Continue" after a restart (layer 15), idle
 auto-compaction (layer 21; the loop's idle tick is in place), a global
 concurrency limit, goals and cron turns.
 
+Status (layer 21): idle auto-compaction is done (task 21.2,
+`nanoclaw/agent/autocompact.py`; the idle tick calls
+`_check_expired_sessions_if_due`), and `nanoclaw gateway` runs `AgentLoop.run`
+as a long-running process. Cron turns come with tasks 21.1/21.4; the global
+concurrency limit and goals are still open.
+
 ## Tests and mutation checks
 
 Layer 14 adds 114 tests (1,111 → 1,225): `test_bus.py`,

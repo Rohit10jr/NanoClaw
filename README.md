@@ -213,6 +213,19 @@ where you can change how Dream organizes memory; delete or empty the file to
 go back to the default. A workspace that is already inside a git repository
 gets no memory repository.
 
+The gateway, as in nanobot: `nanoclaw gateway` keeps the agent running in the
+foreground until Ctrl+C or SIGTERM. It answers `GET /health` on
+`gateway.host`:`gateway.port` (default `127.0.0.1:18790`, `--port` to change)
+and summarizes conversations idle for `agents.defaults.idleCompactAfterMinutes`
+(default 15, 0 = off) in the background; `nanoclaw chat` does that too while
+it runs. No channels exist yet, so nothing reaches it from outside; scheduled
+jobs, Telegram and the web UI build on it.
+
+```bash
+uv run nanoclaw gateway            # logs on stderr (--no-logs to hide, -v for debug)
+curl http://127.0.0.1:18790/health
+```
+
 Subagents, as in nanobot: the agent can hand a task to a child agent with the
 `subagent` tool (`action=create`). With `wait=true` it waits for the answer;
 otherwise the child works in the background (up to 4 at once) and its report

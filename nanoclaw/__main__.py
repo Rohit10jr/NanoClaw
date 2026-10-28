@@ -1,4 +1,5 @@
-"""Command-line entry point: ``nanoclaw chat`` (interactive), ``nanoclaw ask`` (one message), and the rest."""
+"""Command-line entry point: ``nanoclaw chat`` (interactive), ``nanoclaw ask`` (one message),
+``nanoclaw gateway`` (long-running), and the rest."""
 
 from __future__ import annotations
 
@@ -164,6 +165,9 @@ def _make_loop(
         preset_runtime_loader=preset_loader,
         cron_service=CronService(workspace / "cron" / "jobs.json"),
         timezone=defaults.timezone,
+        # Idle auto-compaction on the bus loop's idle tick (nanobot from_config, loop.py:524).
+        session_ttl_minutes=defaults.session_ttl_minutes,
+        idle_compact_check_interval_seconds=defaults.idle_compact_check_interval_seconds,
     )
 
 
@@ -439,6 +443,26 @@ async def _dream(
     return 0
 
 
+def _gateway(
+    provider: LLMProvider,
+    workspace: Path,
+    config: Config,
+    *,
+    port: int | None = None,
+    preset_loader: PresetRuntimeLoader | None = None,
+) -> int:
+    """``nanoclaw gateway``: the agent loop, MCP and ``/health`` in the
+    foreground until SIGINT/SIGTERM (nanoclaw/cli/gateway.py)."""
+    from nanoclaw.cli.gateway import run_gateway
+    from nanoclaw.cli.terminal import make_console
+
+    def make_agent() -> tuple[AgentLoop, MCPProvider]:
+        loop = _make_loop(provider, workspace, config=config, preset_loader=preset_loader)
+        return loop, _mcp_provider(loop, config)
+
+    return run_gateway(config, make_agent, port=port, config_path=get_config_path(), console=make_console())
+
+
 def _config_command(action: str | None) -> int:
     """``nanoclaw config path|show|init``.
 
@@ -546,6 +570,21 @@ def main(argv: list[str] | None = None, provider: LLMProvider | None = None) -> 
         help="update long-term memory (memory/MEMORY.md, USER.md, SOUL.md) from the history journal",
     )
     dream.add_argument("-w", "--workspace", type=Path, default=None, help=workspace_help)
+    gateway = commands.add_parser(
+        "gateway",
+        parents=[common],
+        help="run the agent as a long-running process (idle compaction, /health endpoint) until Ctrl+C or SIGTERM",
+    )
+    gateway.add_argument("-p", "--port", type=int, default=None, help="health endpoint port (default: gateway.port, 18790)")
+    gateway.add_argument("-w", "--workspace", type=Path, default=None, help=workspace_help)
+    # nanobot's gateway keeps its INFO log sink on; -v switches it to DEBUG.
+    gateway.add_argument(
+        "--logs",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="show nanoclaw runtime logs on stderr (default: on)",
+    )
+    gateway.add_argument("-v", "--verbose", action="store_true", help="verbose output (DEBUG logs)")
     skills = commands.add_parser("skills", parents=[common], help="list the skills the agent can use (no API key needed)")
     skills.add_argument("-w", "--workspace", type=Path, default=None, help=workspace_help)
     show = commands.add_parser(
@@ -568,9 +607,11 @@ def main(argv: list[str] | None = None, provider: LLMProvider | None = None) -> 
         parser.print_help()
         return 0
     set_config_path(args.config)
-    if getattr(args, "logs", False):
-        configure_console_logging(sys.stderr)  # INFO and above, like nanobot's CLI sink
-    set_nanoclaw_logs(getattr(args, "logs", False))
+    verbose = getattr(args, "verbose", False)
+    if getattr(args, "logs", False) or verbose:
+        # INFO and above, like nanobot's CLI sink; DEBUG with gateway -v.
+        configure_console_logging(sys.stderr, level="DEBUG" if verbose else "INFO")
+    set_nanoclaw_logs(getattr(args, "logs", False) or verbose)
     if args.command == "config":
         return _config_command(args.config_action)
 
@@ -622,6 +663,8 @@ def main(argv: list[str] | None = None, provider: LLMProvider | None = None) -> 
         )
     if args.command == "compact":
         return asyncio.run(_compact(get_provider(), workspace, args.session, config, preset_loader=loader))
+    if args.command == "gateway":
+        return _gateway(get_provider(), workspace, config, port=args.port, preset_loader=loader)
     if args.command == "dream":
         return asyncio.run(_dream(get_provider(), workspace, config, preset_loader=loader))
     if args.command == "skills":
