@@ -87,6 +87,15 @@ process runs; `nanoclaw chat` and `ask` only edit them. When a job is due, its
 message runs as a normal turn of its session, and the reply goes back to that
 chat.
 
+## Agent Plugins
+
+A folder in `<workspace>/plugins/` with an Agent Plugins v1 `plugin.json` can
+bring skills and local (stdio) MCP servers. It is ignored until you review and
+enable it with `nanoclaw plugins enable NAME`; any later change to the package
+disables it again. `nanoclaw plugins list` shows what is installed. See
+[docs/notes/25-agent-plugins.md](docs/notes/25-agent-plugins.md) for the
+layout and the trust model.
+
 ## Configuration
 
 NanoClaw talks to any OpenAI-compatible API (OpenAI, OpenRouter, DeepSeek,

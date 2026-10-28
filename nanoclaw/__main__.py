@@ -12,10 +12,11 @@ from pathlib import Path
 
 from nanoclaw import __version__
 from nanoclaw.cli.log_control import configure_console_logging, set_nanoclaw_logs
+from nanoclaw.cli.plugins import add_plugins_parser, plugins_command
 from nanoclaw.agent.context import ContextBuilder
 from nanoclaw.agent.loop import AgentLoop, ContextWindowExceededError
 from nanoclaw.agent.runner import AgentRunResult
-from nanoclaw.agent.tools.mcp import MCPProvider
+from nanoclaw.agent.tools.mcp import MCPProvider, configured_servers
 from nanoclaw.bus.outbound_events import ProgressEvent, StreamDeltaEvent, StreamEndEvent
 from nanoclaw.config import (
     ChannelsConfig,
@@ -178,9 +179,10 @@ def _mcp_provider(loop: AgentLoop, config: Config | None = None) -> MCPProvider:
     """The configured MCP servers (``tools.mcpServers``), registering their
     tools into the loop's registry. As in nanobot (cli/agent.py), the caller
     connects before the first turn and closes it after the loop. Subagents
-    build their own registries and get no MCP tools, as in nanobot."""
+    build their own registries and get no MCP tools, as in nanobot. Enabled
+    Agent Plugins add their stdio servers (layer 25)."""
     config = config or _runtime_config()
-    return MCPProvider(config.tools.mcp_servers, loop.tools)
+    return MCPProvider(configured_servers(config, loop.workspace), loop.tools)
 
 
 class _AskOutput:
@@ -622,6 +624,7 @@ def main(argv: list[str] | None = None, provider: LLMProvider | None = None) -> 
     gateway.add_argument("-v", "--verbose", action="store_true", help="verbose output (DEBUG logs)")
     skills = commands.add_parser("skills", parents=[common], help="list the skills the agent can use (no API key needed)")
     skills.add_argument("-w", "--workspace", type=Path, default=None, help=workspace_help)
+    add_plugins_parser(commands, common, workspace_help)
     show = commands.add_parser(
         "prompt", parents=[common], help="print the system prompt the model receives (no API key needed)"
     )
@@ -714,6 +717,8 @@ def main(argv: list[str] | None = None, provider: LLMProvider | None = None) -> 
         return asyncio.run(_dream(get_provider(), workspace, config, preset_loader=loader))
     if args.command == "skills":
         return _skills(workspace, config.agents.defaults.disabled_skills)
+    if args.command == "plugins":
+        return plugins_command(args, workspace)
     if args.command == "prompt":
         builder = ContextBuilder(workspace, disabled_skills=config.agents.defaults.disabled_skills)
         builder.include_scheduling = True  # chat and ask have the cron tool
