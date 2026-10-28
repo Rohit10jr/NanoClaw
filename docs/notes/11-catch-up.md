@@ -47,7 +47,7 @@ test still expected the old error hint) and was fixed by using the shared
 
 | # | Difference | nanobot | NanoClaw | Why |
 |---|---|---|---|---|
-| 1 | `## Scheduling` in the tool contract | Always in the prompt | Left out | No cron yet (layer 21) |
+| 1 | `## Scheduling` in the tool contract | Always in the prompt | ~~Left out~~ Resolved in layer 21: in the prompt whenever the `cron` tool is registered (always for `chat`, `ask` and `nanoclaw prompt`) | No cron until layer 21 |
 | 2 | `nanoclaw skills` | `/skill` lists available skills | Lists all skills, marking unavailable ones with the reason | The prompt no longer says why a skill is missing |
 | 3 | OpenAI reasoning settings | GPT-6 keeps temperature with effort `none`; Responses API for reasoning models on OpenAI; per-provider specs | No effort setting (GPT-6 never gets a temperature); Chat Completions only; base-URL check instead of specs | Effort and provider specs arrive with layer 20; the Responses API is skipped |
 | 4 | Partial subagent result after an exception | Kept by the subagent hook | None | The subagent hook arrives with layer 19 |

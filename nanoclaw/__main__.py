@@ -130,7 +130,14 @@ def _make_loop(
     Model settings come from the active preset (``agents.defaults.modelPreset``,
     else agents.defaults). ``preset_loader`` builds a provider for each
     preset ``/model`` picks; without it (a provider handed in, as in tests)
-    presets reuse ``provider``."""
+    presets reuse ``provider``.
+
+    As in nanobot's ``agent`` command (cli/agent.py:177), the loop gets a
+    ``CronService`` on ``<workspace>/cron/jobs.json`` for the ``cron`` tool,
+    but the service is not started: jobs created here go to the store's
+    action log and fire only while the gateway runs."""
+    from nanoclaw.cron.service import CronService
+
     config = config or _runtime_config()
     defaults = config.agents.defaults
     preset = config.resolve_preset()
@@ -155,6 +162,8 @@ def _make_loop(
         model_preset=defaults.model_preset,
         dream_model_preset=defaults.dream.model_override,
         preset_runtime_loader=preset_loader,
+        cron_service=CronService(workspace / "cron" / "jobs.json"),
+        timezone=defaults.timezone,
     )
 
 
@@ -618,7 +627,9 @@ def main(argv: list[str] | None = None, provider: LLMProvider | None = None) -> 
     if args.command == "skills":
         return _skills(workspace)
     if args.command == "prompt":
-        print(ContextBuilder(workspace).build_system_prompt(channel=CHANNEL, workspace=project))
+        builder = ContextBuilder(workspace)
+        builder.include_scheduling = True  # chat and ask have the cron tool
+        print(builder.build_system_prompt(channel=CHANNEL, workspace=project))
         return 0
     parser.print_help()
     return 0

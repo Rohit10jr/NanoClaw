@@ -257,7 +257,10 @@ def test_cli_prompt_command_prints_system_prompt_and_creates_files(capsys, tmp_p
     ws = tmp_path / "ws"
     assert main(["prompt", "-w", str(ws)]) == 0
     captured = capsys.readouterr()
-    assert captured.out.strip() == ContextBuilder(ws).build_system_prompt(channel="cli").strip()
+    builder = ContextBuilder(ws)
+    builder.include_scheduling = True  # chat and ask have the cron tool (layer 21)
+    assert captured.out.strip() == builder.build_system_prompt(channel="cli").strip()
+    assert "## Scheduling" in captured.out
     assert f"[created {ws / 'SOUL.md'}]" in captured.err
     assert sorted(p.name for p in ws.iterdir()) == ["AGENTS.md", "SOUL.md", "USER.md", "memory", "skills"]
 

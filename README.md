@@ -71,6 +71,18 @@ inside the project, though they can still read the agent's skills and
 prompt with its `# Current Project` section. The choice lasts for one run; it
 is not saved with the session.
 
+## Scheduled tasks
+
+Since layer 21 the agent has nanobot's `cron` tool: "remind me every day at
+8am" becomes a job in `~/.nanoclaw/workspace/cron/jobs.json`, bound to the chat
+session it was created in (`every_seconds`, a cron expression with an IANA
+timezone, defaulting to `agents.defaults.timezone`, or a one-time `at`). The
+tool also lists, updates, enables, disables and removes jobs and shows their
+run history. As in nanobot, jobs fire only while the long-running gateway
+process runs; `nanoclaw chat` and `ask` only edit them. When a job is due, its
+message runs as a normal turn of its session, and the reply goes back to that
+chat.
+
 ## Configuration
 
 NanoClaw talks to any OpenAI-compatible API (OpenAI, OpenRouter, DeepSeek,
