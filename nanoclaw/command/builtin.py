@@ -1,12 +1,12 @@
 """Built-in slash commands: their specs and handlers.
 
 Mirrors nanobot/command/builtin.py for the commands NanoClaw has (/new,
-/compact, /stop, /status, /model, /history, /dream, /skill, /help), with
-nanobot's spec fields and texts. Handlers return an :class:`OutboundMessage` instead of
+/compact, /stop, /status, /model, /history, /dream, /dream-log,
+/dream-restore, /dream-prompt, /skill, /help), with nanobot's spec fields and
+texts. Handlers return an :class:`OutboundMessage` instead of
 printing, so any channel can show them. nanobot's other commands (/restart,
-/goal, /trigger, /dream-log, /dream-restore, /dream-prompt,
-/evaluator-prompt, /pairing, the ``!`` shell) need features NanoClaw does not
-have yet.
+/goal, /trigger, /evaluator-prompt, /pairing, the ``!`` shell) need features
+NanoClaw does not have yet.
 """
 
 from __future__ import annotations
@@ -23,10 +23,12 @@ from nanoclaw import __version__
 from nanoclaw.bus.events import META_RENDER_AS, OutboundMessage
 from nanoclaw.command.router import CommandContext, CommandRouter, normalize_command_text
 from nanoclaw.session.summary import is_hidden_history_message
+from nanoclaw.utils.workspace_prompts import initialize_workspace_prompt
 
 if TYPE_CHECKING:
     from nanoclaw.agent.loop import AgentLoop
     from nanoclaw.session import Session
+    from nanoclaw.utils.gitstore import CommitInfo
 
 # How a slash command takes part in turn state (nanobot builtin.py:31-43):
 # - side_channel: control text, no agent turn started or ended.
@@ -45,6 +47,8 @@ CommandLifecycle = Literal[
 # nanobot writes "🐈 nanobot" in its help and status texts; NanoClaw's
 # terminal name is plain "nanoclaw" (cli/stream.py BOT_NAME).
 BOT_LABEL = "nanoclaw"
+# Where nanobot's texts say "nanobot's default" (/dream-prompt).
+PRODUCT_NAME = "nanoclaw"
 
 _HISTORY_DEFAULT_COUNT = 10
 _HISTORY_MAX_COUNT = 50
@@ -125,6 +129,28 @@ BUILTIN_COMMAND_SPECS: tuple[BuiltinCommandSpec, ...] = (
         "Run Dream",
         "Manually trigger memory consolidation.",
         "sparkles",
+    ),
+    BuiltinCommandSpec(
+        "/dream-log",
+        "Show Dream log",
+        "Show what the last Dream consolidation changed.",
+        "book-open",
+        accepts_args=True,
+    ),
+    BuiltinCommandSpec(
+        "/dream-restore",
+        "Restore memory",
+        "Revert memory to a previous Dream snapshot.",
+        "undo-2",
+        accepts_args=True,
+    ),
+    BuiltinCommandSpec(
+        "/dream-prompt",
+        "Dream memory",
+        "Tell Dream how to organize this workspace's memory.",
+        "file-text",
+        "[init]",
+        accepts_args=True,
     ),
     BuiltinCommandSpec(
         "/skill",
@@ -308,8 +334,9 @@ async def cmd_dream(ctx: CommandContext) -> OutboundMessage:
     """Start a Dream run in the background; its result follows on the bus.
     (nanobot builtin.py:452)
 
-    The run is added to ``ctx.tasks`` so a caller can wait for it. nanobot's
-    git commit of the memory change is not here (no git store yet).
+    The run is added to ``ctx.tasks`` so a caller can wait for it. The git
+    commit of the memory change (`` (commit <sha>)`` in the reply) happens in
+    ``AgentLoop.run_dream``.
     """
     from nanoclaw.agent.loop import DREAM_NO_INPUT_MESSAGE  # see cmd_status
 
@@ -323,6 +350,255 @@ async def cmd_dream(ctx: CommandContext) -> OutboundMessage:
 
     ctx.tasks.append(asyncio.create_task(_run_dream()))
     return OutboundMessage(channel=ctx.msg.channel, chat_id=ctx.msg.chat_id, content="Dreaming...")
+
+
+async def cmd_dream_prompt(ctx: CommandContext) -> OutboundMessage:
+    """Show or set up the workspace Dream memory instructions. (nanobot builtin.py:530)
+
+    nanobot's texts, with "nanoclaw's default" for "nanobot's default".
+    """
+    store = ctx.loop.context.memory
+    path = store.dream_prompt_file
+    display_path = path.relative_to(store.workspace).as_posix()
+    args = ctx.args.strip().lower()
+
+    if args == "init":
+        if not initialize_workspace_prompt(path, store.default_dream_prompt()):
+            content = (
+                f"Dream memory instructions already exist at `{display_path}`.\n\n"
+                f"Edit that file, or delete/empty it to return to {PRODUCT_NAME}'s default."
+            )
+        else:
+            content = (
+                f"Created Dream memory instructions at `{display_path}`.\n\n"
+                "Edit that file to teach Dream how to organize memory. "
+                f"This fully replaces {PRODUCT_NAME}'s default Dream guide for this workspace. "
+                f"Delete or empty it to return to {PRODUCT_NAME}'s default."
+            )
+    elif args:
+        content = "Usage: /dream-prompt [init]"
+    elif store.has_dream_prompt_override():
+        content = (
+            "Dream memory instructions: custom for this workspace\n\n"
+            f"- Path: `{display_path}`\n"
+            f"- Delete or empty this file to return to {PRODUCT_NAME}'s default."
+        )
+    else:
+        content = (
+            f"Dream memory instructions: {PRODUCT_NAME} default\n\n"
+            f"- Editable file: `{display_path}`\n"
+            "- Run `/dream-prompt init` to create an editable copy."
+        )
+
+    return OutboundMessage(
+        channel=ctx.msg.channel,
+        chat_id=ctx.msg.chat_id,
+        content=content,
+        metadata={**dict(ctx.msg.metadata or {}), META_RENDER_AS: "text"},
+    )
+
+
+def _extract_changed_files(diff: str) -> list[str]:
+    """Extract changed file paths from a unified diff. (nanobot builtin.py:643)"""
+    files: list[str] = []
+    seen: set[str] = set()
+    for line in diff.splitlines():
+        if not line.startswith("diff --git "):
+            continue
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        path = parts[3]
+        if path.startswith("b/"):
+            path = path[2:]
+        if path in seen:
+            continue
+        seen.add(path)
+        files.append(path)
+    return files
+
+
+def _format_changed_files(diff: str) -> str:
+    files = _extract_changed_files(diff)
+    if not files:
+        return "No tracked memory files changed."
+    return ", ".join(f"`{path}`" for path in files)
+
+
+_DREAM_COMMIT_PREFIX = "dream:"
+
+
+def _format_dream_log_content(
+    commit: CommitInfo,
+    diff: str,
+    *,
+    requested_sha: str | None = None,
+) -> str:
+    """(nanobot builtin.py:672)"""
+    files_line = _format_changed_files(diff)
+    lines = [
+        "## Dream Update",
+        "",
+        "Here is the selected Dream memory change." if requested_sha else "Here is the latest Dream memory change.",
+        "",
+        f"- Commit: `{commit.sha}`",
+        f"- Time: {commit.timestamp}",
+        f"- Changed files: {files_line}",
+    ]
+    if diff:
+        lines.extend([
+            "",
+            f"Use `/dream-restore {commit.sha}` to undo this change.",
+            "",
+            "```diff",
+            diff.rstrip(),
+            "```",
+        ])
+    else:
+        lines.extend([
+            "",
+            "Dream recorded this version, but there is no file diff to display.",
+        ])
+    return "\n".join(lines)
+
+
+def _format_dream_restore_list(commits: list[CommitInfo]) -> str:
+    """(nanobot builtin.py:706)"""
+    lines = [
+        "## Dream Restore",
+        "",
+        "Choose a Dream memory version to restore. Latest first:",
+        "",
+    ]
+    for c in commits:
+        lines.append(f"- `{c.sha}` {c.timestamp} - {c.subject()}")
+    lines.extend([
+        "",
+        "Preview a version with `/dream-log <sha>` before restoring it.",
+        "Restore a version with `/dream-restore <sha>`.",
+    ])
+    return "\n".join(lines)
+
+
+async def cmd_dream_log(ctx: CommandContext) -> OutboundMessage:
+    """Show what the last Dream changed. (nanobot builtin.py:723)
+
+    Default: diff of the latest Dream commit versus its parent.
+    With /dream-log <sha>: diff of that specific commit.
+    """
+    store = ctx.loop.consolidator.store
+    git = store.git
+
+    if not git.is_initialized():
+        if store.get_last_dream_cursor() == 0:
+            msg = (
+                "Dream has not run yet. Run `/dream`, or wait for the next scheduled Dream cycle.\n\n"
+                "Use `/dream-prompt` to see or change how Dream organizes memory."
+            )
+        else:
+            msg = "Dream history is not available because memory versioning is not initialized."
+        return OutboundMessage(
+            channel=ctx.msg.channel, chat_id=ctx.msg.chat_id,
+            content=msg, metadata={META_RENDER_AS: "text"},
+        )
+
+    args = ctx.args.strip()
+
+    if args:
+        # Show diff of a specific commit
+        sha = args.split()[0]
+        result = git.show_commit_diff(sha)
+        if not result:
+            content = (
+                f"Couldn't find Dream change `{sha}`.\n\n"
+                "Use `/dream-restore` to list recent versions, "
+                "or `/dream-log` to inspect the latest one."
+            )
+        else:
+            commit, diff = result
+            content = _format_dream_log_content(commit, diff, requested_sha=sha)
+    else:
+        # Default: show the latest Dream commit's diff
+        commits = git.log(max_entries=1, message_prefix=_DREAM_COMMIT_PREFIX)
+        result = (
+            git.show_commit_diff(
+                commits[0].sha,
+                max_entries=1,
+                message_prefix=_DREAM_COMMIT_PREFIX,
+            )
+            if commits else None
+        )
+        if result:
+            commit, diff = result
+            content = _format_dream_log_content(commit, diff)
+        else:
+            content = (
+                "Dream memory has no saved versions yet.\n\n"
+                "Use `/dream-prompt` to see or change how Dream organizes memory."
+            )
+
+    return OutboundMessage(
+        channel=ctx.msg.channel, chat_id=ctx.msg.chat_id,
+        content=content, metadata={META_RENDER_AS: "text"},
+    )
+
+
+async def cmd_dream_restore(ctx: CommandContext) -> OutboundMessage:
+    """Restore memory files from a previous dream commit. (nanobot builtin.py:786)
+
+    Usage:
+        /dream-restore          — list recent commits
+        /dream-restore <sha>    — revert a specific commit
+
+    As in nanobot there is no separate confirmation step: the bare command
+    lists the versions (and points to ``/dream-log <sha>`` for a preview);
+    ``/dream-restore <sha>`` restores at once and records a new commit, so a
+    restore can itself be undone.
+    """
+    store = ctx.loop.consolidator.store
+    git = store.git
+    if not git.is_initialized():
+        return OutboundMessage(
+            channel=ctx.msg.channel, chat_id=ctx.msg.chat_id,
+            content="Dream history is not available because memory versioning is not initialized.",
+        )
+
+    args = ctx.args.strip()
+    if not args:
+        # Show recent Dream commits for the user to pick
+        commits = git.log(max_entries=10, message_prefix=_DREAM_COMMIT_PREFIX)
+        if not commits:
+            content = "Dream memory has no saved versions to restore yet."
+        else:
+            content = _format_dream_restore_list(commits)
+    else:
+        sha = args.split()[0]
+        result = git.show_commit_diff(sha, message_prefix=_DREAM_COMMIT_PREFIX)
+        if not result:
+            content = (
+                f"Couldn't restore Dream change `{sha}`.\n\n"
+                "Only Dream memory versions can be restored. "
+                "Use `/dream-restore` to list recent versions."
+            )
+        else:
+            changed_files = _format_changed_files(result[1])
+            new_sha = git.revert(sha, message_prefix=_DREAM_COMMIT_PREFIX)
+            if new_sha:
+                content = (
+                    f"Restored Dream memory to the state before `{sha}`.\n\n"
+                    f"- New safety commit: `{new_sha}`\n"
+                    f"- Restored files: {changed_files}\n\n"
+                    f"Use `/dream-log {new_sha}` to inspect the restore diff."
+                )
+            else:
+                content = (
+                    f"Couldn't restore Dream change `{sha}`.\n\n"
+                    "It may be the first saved version with no earlier state to restore."
+                )
+    return OutboundMessage(
+        channel=ctx.msg.channel, chat_id=ctx.msg.chat_id,
+        content=content, metadata={META_RENDER_AS: "text"},
+    )
 
 
 def _format_history_message(msg: dict[str, Any]) -> str | None:
@@ -479,5 +755,11 @@ def register_builtin_commands(router: CommandRouter) -> None:
     router.exact("/history", cmd_history)
     router.prefix("/history ", cmd_history)
     router.exact("/dream", cmd_dream)
+    router.exact("/dream-log", cmd_dream_log)
+    router.prefix("/dream-log ", cmd_dream_log)
+    router.exact("/dream-restore", cmd_dream_restore)
+    router.prefix("/dream-restore ", cmd_dream_restore)
+    router.exact("/dream-prompt", cmd_dream_prompt)
+    router.prefix("/dream-prompt ", cmd_dream_prompt)
     router.exact("/skill", cmd_skill)
     router.exact("/help", cmd_help)

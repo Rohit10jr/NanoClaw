@@ -174,7 +174,7 @@ Replies stream word by word, with the model's reasoning shown as dim `✻` lines
 
 In the chat, slash commands: `/new` (start over), `/compact`, `/stop` (cancel
 the running turn and background subagents; finished work is kept), `/status`,
-`/model [preset]`, `/history [n]`, `/dream`, `/skill`, `/help`. While the agent works you see what
+`/model [preset]`, `/history [n]`, `/dream`, `/dream-log`, `/dream-restore`, `/dream-prompt`, `/skill`, `/help`. While the agent works you see what
 it does (`↳ $ ls`, `↳ read notes.txt`), and you can keep typing: a new message
 is folded into the running turn, as in nanobot.
 
@@ -201,6 +201,17 @@ uv run nanoclaw ask 'What is the $weather in Paris?'     # use a skill now
 Summaries are kept in a journal, `memory/history.jsonl` in the workspace;
 `nanoclaw dream` reads the new entries and updates the memory files, which the
 agent sees in every system prompt.
+
+Memory history, as in nanobot: the workspace is a small git repository
+(dulwich, no `git` program needed) that tracks only `SOUL.md`, `USER.md` and
+`memory/MEMORY.md`. Every Dream run (`/dream`, `nanoclaw dream`) commits what
+really changed, and its reply names the commit. In the chat, `/dream-log
+[sha]` shows a Dream change as a diff, `/dream-restore` lists Dream versions
+and `/dream-restore <sha>` undoes one (as a new commit, so it can be undone
+too). `/dream-prompt init` copies Dream's instructions to `prompts/dream.md`,
+where you can change how Dream organizes memory; delete or empty the file to
+go back to the default. A workspace that is already inside a git repository
+gets no memory repository.
 
 Subagents, as in nanobot: the agent can hand a task to a child agent with the
 `subagent` tool (`action=create`). With `wait=true` it waits for the answer;

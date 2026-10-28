@@ -210,6 +210,9 @@ def test_help_text():
             "/model [preset] — Show or switch the active model preset.",
             "/history [n] — Print the last N persisted conversation messages.",
             "/dream — Manually trigger memory consolidation.",
+            "/dream-log — Show what the last Dream consolidation changed.",
+            "/dream-restore — Revert memory to a previous Dream snapshot.",
+            "/dream-prompt [init] — Tell Dream how to organize this workspace's memory.",
             "/skill — List all enabled skills available to the agent.",
             "/help — List available slash commands.",
         ]
