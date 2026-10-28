@@ -168,6 +168,8 @@ def _make_loop(
         # Idle auto-compaction on the bus loop's idle tick (nanobot from_config, loop.py:524).
         session_ttl_minutes=defaults.session_ttl_minutes,
         idle_compact_check_interval_seconds=defaults.idle_compact_check_interval_seconds,
+        # The ``my`` tool (``tools.my``; nanobot registers it from ``ToolsConfig``).
+        my_config=config.tools.my,
     )
 
 
