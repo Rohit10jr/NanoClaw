@@ -7,8 +7,10 @@ description and path; the model reads the full file with ``read_file`` when a
 task matches. Skills marked ``always`` are put in the prompt in full, and
 ``$skill-name`` in a message loads that skill for the turn.
 
-Skills come from the workspace's ``skills/`` folder and the built-in
-``nanoclaw/skills/``; a workspace skill replaces a built-in one of the same name.
+Skills come from the workspace's ``skills/`` folder, enabled Agent Plugins
+(``<workspace>/plugins/<name>/skills/``, nanoclaw/agent/plugins.py) and the
+built-in ``nanoclaw/skills/``, in that order: an earlier source replaces a later
+skill of the same name.
 """
 
 from __future__ import annotations
@@ -82,24 +84,50 @@ class SkillsLoader:
         return entries
 
     def list_skills(self, filter_unavailable: bool = True) -> list[dict[str, str]]:
-        """Workspace skills, then built-in ones not overridden by name.
+        """Workspace skills, then enabled Agent Plugin skills, then built-in
+        ones, each not overridden by name.
 
-        Each entry has ``name``, ``path`` and ``source`` (``workspace`` or
-        ``builtin``). With ``filter_unavailable``, skills whose required
-        programs or environment variables are missing are left out.
+        Each entry has ``name``, ``path`` and ``source`` (``workspace``,
+        ``plugin`` or ``builtin``). With ``filter_unavailable``, skills whose
+        required programs or environment variables are missing are left out.
         """
-        skills = self._skill_entries_from_dir(self.workspace_skills, "workspace")
-        seen = {entry["name"] for entry in skills}
-        if self.builtin_skills and self.builtin_skills.exists():
-            skills.extend(self._skill_entries_from_dir(self.builtin_skills, "builtin", skip_names=seen))
+        skills = self._discover_skills()
         if filter_unavailable:
             return [skill for skill in skills if self._check_requirements(self._get_skill_meta(skill["name"]))]
         return skills
 
+    def _discover_skills(self, plugin_documents: dict[str, str] | None = None) -> list[dict[str, str]]:
+        """Discovery order workspace → plugin → built-in (nanobot skills.py:123-162).
+
+        A plugin skill's text is the one captured while its package
+        fingerprint was verified; it goes into ``plugin_documents`` so
+        ``load_skill`` never re-reads a file that may have changed since.
+        """
+        from nanoclaw.agent.plugins import enabled_agent_plugin_skill_documents
+
+        plugin_skills = enabled_agent_plugin_skill_documents(self.workspace)
+        skills = self._skill_entries_from_dir(self.workspace_skills, "workspace")
+        seen = {entry["name"] for entry in skills}
+        for skill in plugin_skills:
+            if skill.name in seen:
+                continue
+            skills.append({"name": skill.name, "path": str(skill.path), "source": "plugin"})
+            if plugin_documents is not None:
+                plugin_documents[skill.name] = skill.content
+            seen.add(skill.name)
+        if self.builtin_skills and self.builtin_skills.exists():
+            skills.extend(self._skill_entries_from_dir(self.builtin_skills, "builtin", skip_names=seen))
+        return skills
+
     def load_skill(self, name: str) -> str | None:
         """The full ``SKILL.md`` text of a skill, or ``None``."""
-        entry = next((s for s in self.list_skills(filter_unavailable=False) if s["name"] == name), None)
-        return Path(entry["path"]).read_text(encoding="utf-8") if entry else None
+        plugin_documents: dict[str, str] = {}
+        entry = next((s for s in self._discover_skills(plugin_documents) if s["name"] == name), None)
+        if entry is None:
+            return None
+        if entry["source"] == "plugin":
+            return plugin_documents.get(name)
+        return Path(entry["path"]).read_text(encoding="utf-8")
 
     def load_skills_for_context(self, skill_names: list[str]) -> str:
         """Skills in full (without frontmatter), for the prompt."""
@@ -143,13 +171,13 @@ class SkillsLoader:
         are left out (nanobot/agent/skills.py:270-308); ``nanoclaw skills``
         still lists them with what is missing. Paths are relative to the
         group's folder, so the model joins them to read a skill with
-        ``read_file``. The workspace folder is shown as ``skills``; the
-        built-in one by its absolute path, because directory tools need the
+        ``read_file``. The workspace folder is shown as ``skills``, the
+        Agent Plugins folder as ``plugins``; the built-in one by its absolute path, because directory tools need the
         real path (only ``read_file`` maps ``skills/<name>/...`` to it).
 
         ``workspace`` is the turn's project folder: when it is not the agent
         workspace, relative paths would resolve against the project, so the
-        workspace folder is shown by its absolute path too (nanobot
+        workspace and plugins folders are shown by their absolute paths too (nanobot
         skills.py:275-298).
         """
         all_skills = self.list_skills(filter_unavailable=True)
@@ -161,8 +189,15 @@ class SkillsLoader:
         workspace_root = (
             Path("skills") if project_workspace == agent_workspace else self.workspace_skills.expanduser().resolve()
         )
+        plugins_root = self.workspace.expanduser().resolve() / "plugins"
         groups = (
             ("Workspace skills", "workspace", self.workspace_skills, workspace_root),
+            (
+                "Agent Plugin skills",
+                "plugin",
+                plugins_root,
+                Path("plugins") if project_workspace == agent_workspace else plugins_root,
+            ),
             ("Built-in skills", "builtin", self.builtin_skills, self.builtin_skills.expanduser().resolve()),
         )
         for label, source, root, display_root in groups:
