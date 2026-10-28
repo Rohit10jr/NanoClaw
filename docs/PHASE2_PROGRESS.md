@@ -133,7 +133,7 @@ Legend: ⏳ in progress · ✅ done and verified · ⛔ blocked
 | Docs | note 20, CODE_MAP, README, ROADMAP, notes 01/12 | main session | — | ✅ |
 | PR | `p2/layer-20` → `main` | main session | PR #12 | ✅ |
 
-## Layer 21 — runtime: gateway, cron, heartbeat, scheduled Dream, idle compaction, memory history, prompt overrides (`p2/layer-21`) ⏳
+## Layer 21 — runtime: gateway, cron, heartbeat, scheduled Dream, idle compaction, memory history, prompt overrides (`p2/layer-21`) ✅
 
 | Task | Scope (files) | Sub-agent | Verification | Status |
 |---|---|---|---|---|
@@ -142,9 +142,9 @@ Legend: ⏳ in progress · ✅ done and verified · ⛔ blocked
 | 21.3 Memory history, prompt overrides | `utils/gitstore.py` (dulwich), Dream commits, `/dream-log`, `/dream-restore`, `/dream-prompt` and workspace prompt overrides | sub-agent (worktree), phase A | 280 checks: 208 identical, 72 expected (product name, shorter prompts README) | ✅ |
 | 21.4 System jobs | Dream every 2 h, heartbeat (`HEARTBEAT.md`, evaluator) in the gateway | sub-agent (worktree), phase B | 1,061 checks identical, 5 expected (product name) | ✅ |
 | Integration | 3 conflicts (keep both), `uv.lock` regenerated, earlier `AGENTS.md` template still unedited | main session | 3,150 passed, 6 skipped | ✅ |
-| Mutation checks | ~200 rules | sub-agent (worktree) | | ⏳ |
+| Mutation checks | 420 rules | sub-agent (worktree) | 413 caught, 7 equivalent (69 tests added); 3,219 passed | ✅ |
 | Docs | note 21, CODE_MAP, README, ROADMAP, notes 04/06/11/14 | main session | — | ✅ |
-| PR | `p2/layer-21` → `main` | main session | | ⏳ |
+| PR | `p2/layer-21` → `main` | main session | PR #13 | ✅ |
 
 ## Blockers and open items
 

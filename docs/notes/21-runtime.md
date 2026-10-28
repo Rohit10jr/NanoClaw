@@ -95,11 +95,35 @@ appearing in the prompt, the earlier template's hash still counts as unedited.
 
 ## Tests
 
-Layer 21 adds 495 tests (2,655 → 3,150 passed): `tests/cron/` (nanobot's cron
+Layer 21 adds 564 tests (2,655 → 3,219 passed): `tests/cron/` (nanobot's cron
 tests), `test_cron_loop.py`, `test_gateway.py` (incl. real subprocesses),
 `test_autocompact.py`, `test_autocompact_unit.py`, `test_gitstore.py`,
-`test_dream_history.py`, `test_gateway_jobs.py`.
+`test_dream_history.py`, `test_gateway_jobs.py`, `test_layer21_gaps.py`.
 
 ### Mutation checks
 
-MUTATION_RESULTS
+420 rules were broken on purpose:
+
+| Area | Rules | Caught at once | Gaps closed with tests | Equivalent | Result |
+|---|---|---|---|---|---|
+| Cron, cron tool, cron turns, Scheduling section | 185 | 121 | 60 | 4 | 181 caught |
+| Gateway, settings | 85 | 66 | 19 | 0 | 85 caught |
+| Idle compaction | 38 | 32 | 3 | 3 | 35 caught |
+| Memory history, prompt overrides, templates | 68 | 61 | 7 | 0 | 68 caught |
+| Heartbeat, evaluator | 44 | 33 | 11 | 0 | 44 caught |
+
+69 new tests (`test_layer21_gaps.py`) close the gaps, for example: a cron
+schedule's time zone (Tokyo, New York, the 2026-03-08 clock change); a stale
+external edit for a job moved to another chat ignored; run history keeping the
+newest 20; a successful run clearing the last error; deferred cron turns in
+order and never injected into a running turn; an unknown time zone in `update`
+returned as a tool error; scheduled bus events drained before the gateway exits
+and signal handlers restored; IPv6 health URLs; the heartbeat running as
+session `heartbeat` with the target's chat and MCP connected; the evaluator
+failing closed on a missing decision; the diff cut at 6,000 characters.
+
+Equivalent (7): a boundary where both sides give the same next run; enabled
+checks repeated before a job runs (and every disable also clears its next run);
+deferred cron turns that only exist while their session queue does; and
+summary reads in temporary turns that always find the same value.
+
