@@ -104,6 +104,8 @@ from nanoclaw.agent.tools.exec_session import ExecSessionManager
 from nanoclaw.agent.tools.context import RequestContext, bind_request_context, reset_request_context
 from nanoclaw.agent.tools.file_state import FileStateStore, bind_file_states, reset_file_states
 from nanoclaw.agent.tools.cron import CronTool
+from nanoclaw.agent.tools.runtime_control import AgentRuntimeControl
+from nanoclaw.agent.tools.self import MyTool
 from nanoclaw.agent.tools.subagent import SubagentTool
 from nanoclaw.agent.turn_delivery import TurnDelivery, TurnDeliveryFactory
 from nanoclaw.agent.turn_hooks import AgentTurnHookSpec, build_agent_turn_hook
@@ -111,7 +113,7 @@ from nanoclaw.bus.events import INBOUND_META_TURN_ID, InboundMessage, OutboundMe
 from nanoclaw.bus.outbound_events import StreamDeltaEvent, StreamedResponseEvent, StreamEndEvent
 from nanoclaw.bus.queue import MessageBus
 from nanoclaw.command import CommandContext, CommandRouter, command_text, register_builtin_commands
-from nanoclaw.config.schema import ExecToolConfig, ModelPresetConfig
+from nanoclaw.config.schema import ExecToolConfig, ModelPresetConfig, MyToolConfig
 from nanoclaw.cron.service import CronService
 from nanoclaw.cron.session_turns import CRON_AUTOMATION_SPEC
 from nanoclaw.events import NO_EVENTS, AgentEvent, EventSink
@@ -245,6 +247,7 @@ class AgentLoop:
         # config default is 15 minutes / 60 s (agents.defaults).
         session_ttl_minutes: int = 0,
         idle_compact_check_interval_seconds: int = 0,
+        my_config: MyToolConfig | None = None,
     ) -> None:
         # ``model_presets`` include "default" (nanobot ``configured_model_presets``);
         # without one, "default" is these constructor settings.
@@ -310,6 +313,7 @@ class AgentLoop:
             exec_config=self.exec_config,
             session_manager=self.sessions,
         )
+        build_tools = tools is None
         if tools is None:
             # The main agent's tools: the standard set plus ``subagent``.
             # Subagents and Dream build their own sets without it.
@@ -322,10 +326,21 @@ class AgentLoop:
             tools.register(SubagentTool(self.subagents))
             if cron_service is not None:
                 tools.register(CronTool(cron_service, default_timezone=timezone or "UTC"))
-            logger.info("Registered {} tools: {}", len(tools.tool_names), tools.tool_names)
         elif cron_service is not None and not tools.has("cron"):
             tools.register(CronTool(cron_service, default_timezone=timezone or "UTC"))
         self.tools = tools
+        # ``config.tools.my``: the ``my`` tool, main agent only (nanobot
+        # ``MyTool.enabled``/``create`` through the tool loader, loop.py:661).
+        # nanobot's loader also adds it to a registry handed in; NanoClaw
+        # uses such a registry as given, like ``subagent``.
+        self.my_config = my_config if my_config is not None else MyToolConfig()
+        if build_tools and self.my_config.enable:
+            tools.register(MyTool(
+                runtime_control=AgentRuntimeControl(self),
+                modify_allowed=self.my_config.allow_set,
+            ))
+        if build_tools:
+            logger.info("Registered {} tools: {}", len(tools.tool_names), tools.tool_names)
         # nanobot ``cron_service`` / ``context.timezone``: the store the cron
         # tool edits and the default timezone of its schedules.
         self.cron_service = cron_service
@@ -446,6 +461,15 @@ class AgentLoop:
     def set_runtime_model(self, model: str) -> LLMRuntime:
         """Select a model on the current provider for future turns (nanobot loop.py:636)."""
         return self.runtime_resolver.select_model(model)
+
+    def set_runtime_context_window(self, context_window_tokens: int) -> LLMRuntime:
+        """Select a context limit for future turns (nanobot loop.py:640)."""
+        return self.runtime_resolver.select_context_window(context_window_tokens)
+
+    def set_runtime_max_iterations(self, value: int) -> None:
+        """The tool-call limit of future turns, subagents included (nanobot loop.py:542)."""
+        self.max_iterations = value
+        self.subagents.max_iterations = value
 
     def dream_runtime(self) -> LLMRuntime | None:
         """The preset Dream runs with, without changing defaults (nanobot loop.py:271)."""
@@ -1323,6 +1347,7 @@ class AgentLoop:
                 persist_session=not ephemeral,
                 can_receive_background_results=self._running,
                 metadata=dict(ctx.msg.metadata or {}),
+                sender_id=ctx.msg.sender_id,
             )
         )
         # nanobot loop.py:1310-1328: the progress hook first, then this

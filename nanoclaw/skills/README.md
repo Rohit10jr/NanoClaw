@@ -10,7 +10,8 @@ Each skill is a directory containing a `SKILL.md` file with:
 - YAML frontmatter (`name`, `description`, optional `metadata`)
 - Markdown instructions for the agent
 
-Two lines are adapted to NanoClaw's tools: `skill-creator` suggests shell
+`my` is nanobot's, with one example line adapted (NanoClaw has no
+`tools.web` setting). Two lines are adapted to NanoClaw's tools: `skill-creator` suggests shell
 `grep` instead of nanobot's `grep` tool, and `tmux` drops "exec background
 mode" (NanoClaw's `exec` has none).
 
@@ -26,10 +27,11 @@ built-in one.
 |-------|-------------|
 | `github` | Interact with GitHub using the `gh` CLI |
 | `memory` | Search past conversations in the history log |
+| `my` | Inspect or adjust the agent's runtime state with the `my` tool |
 | `skill-creator` | Create new skills |
 | `summarize` | Summarize URLs, files, and YouTube videos (needs the `summarize` CLI) |
 | `tmux` | Remote-control tmux sessions |
 | `weather` | Get weather info using wttr.in and Open-Meteo |
 
-nanobot also bundles `cron`, `image-generation`, `my`, `update-setup` and
+nanobot also bundles `cron`, `image-generation`, `update-setup` and
 `clawhub`; they need features NanoClaw doesn't have (see `docs/notes/07-skills.md`).

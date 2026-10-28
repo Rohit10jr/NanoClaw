@@ -198,7 +198,7 @@ def test_skills_summary(ws, builtin):
 
 def test_bundled_skills_are_valid():
     names = sorted(p.name for p in BUILTIN_SKILLS_DIR.iterdir() if (p / "SKILL.md").exists())
-    assert names == ["github", "memory", "skill-creator", "summarize", "tmux", "weather"]
+    assert names == ["github", "memory", "my", "skill-creator", "summarize", "tmux", "weather"]
     for name in names:
         meta = parse_skill_metadata((BUILTIN_SKILLS_DIR / name / "SKILL.md").read_text(encoding="utf-8"))
         assert valid_skill_metadata(meta, name), name
@@ -289,7 +289,7 @@ def test_cli_skills_command(capsys, ws):
     write_skill(ws / "skills", "mine", description="My own.")
     assert main(["skills", "-w", str(ws)]) == 0
     out = capsys.readouterr().out
-    assert out.startswith("Available skills (7):\n\n- **mine** — My own.\n")
+    assert out.startswith("Available skills (8):\n\n- **mine** — My own.\n")
     assert "- **weather** — Get current weather and forecasts." in out
 
 
