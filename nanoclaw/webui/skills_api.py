@@ -5,10 +5,12 @@ Ported from nanobot/webui/skills_api.py (c4dac64): ``webui_skills_payload``
 (``GET /api/webui/skills/{name}``) and ``set_webui_skill_enabled`` (the
 ``skill.update`` mutation). Payloads never include local paths.
 
-The enable switch persists like nanobot's: it loads ``config.json`` as
-stored (``${VAR}`` references unresolved), changes
-``agents.defaults.disabledSkills`` and saves the file again, so keys
-NanoClaw's schema does not know are dropped, as in nanobot.
+The enable switch differs from nanobot's on purpose: nanobot loads the
+config and re-saves it through its schema; NanoClaw sets only
+``agents.defaults.disabledSkills`` in the stored JSON and writes it back
+(two-space indent, like ``nanoclaw config init``), so keys only nanobot
+reads, unknown keys, key order and ``${VAR}`` references are kept (the
+layer 12 rule, as in ``refresh_config_file``).
 
 Not ported: ``delete_webui_skill`` (``skill.delete``) and the skills
 marketplace (``skill.install``, search, trending).
@@ -82,21 +84,43 @@ def set_webui_skill_enabled(
 
     ``disabled_skills`` is updated in place to the saved set.
     """
-    from nanoclaw.config.loader import load_config, save_config
+    from nanoclaw.config.loader import load_config
 
     _require_skill_entry(workspace_path, name)
-    config = load_config(config_path)
+    config = load_config(config_path)  # validates the stored file first
     next_disabled = set(config.agents.defaults.disabled_skills)
     if enabled:
         next_disabled.discard(name)
     else:
         next_disabled.add(name)
     if next_disabled != set(config.agents.defaults.disabled_skills):
-        config.agents.defaults.disabled_skills = sorted(next_disabled)
-        save_config(config, config_path)
+        _save_disabled_skills(sorted(next_disabled), config_path)
     disabled_skills.clear()
     disabled_skills.update(next_disabled)
     return {"name": name, "enabled": enabled, "deleted": False}
+
+
+def _save_disabled_skills(disabled: list[str], config_path: Path | None) -> None:
+    """Set ``agents.defaults.disabledSkills`` in the stored JSON, nothing else.
+
+    nanobot re-saves the whole config through its schema; NanoClaw edits the
+    raw file (like ``refresh_config_file``), so nanobot-only sections, unknown
+    keys, key order and ``${VAR}`` references stay as they are.
+    """
+    from nanoclaw.config.loader import _write_json, get_config_path
+
+    path = config_path or get_config_path()
+    raw: dict[str, Any] = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    agents = raw.get("agents")
+    if not isinstance(agents, dict):
+        agents = raw["agents"] = {}
+    defaults = agents.get("defaults")
+    if not isinstance(defaults, dict):
+        defaults = agents["defaults"] = {}
+    # A file written with the snake_case name keeps it (both names load).
+    key = "disabled_skills" if "disabled_skills" in defaults and "disabledSkills" not in defaults else "disabledSkills"
+    defaults[key] = disabled
+    _write_json(path, raw)
 
 
 def _require_skill_entry(workspace_path: Path, name: str) -> dict[str, str]:

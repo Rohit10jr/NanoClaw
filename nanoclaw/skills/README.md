@@ -12,7 +12,9 @@ Each skill is a directory containing a `SKILL.md` file with:
 
 Two lines are adapted to NanoClaw's tools: `skill-creator` suggests shell
 `grep` instead of nanobot's `grep` tool, and `tmux` drops "exec background
-mode" (NanoClaw's `exec` has none).
+mode" (NanoClaw's `exec` has none). `cron` drops nanobot's `message` tool
+instructions and "change the task's chat in WebUI" (NanoClaw has neither): a
+run is a turn in the task's saved chat, and the reply goes only there.
 
 The `metadata` field keeps nanobot's `{"nanobot": {...}}` form (for example
 `"requires": {"bins": ["curl"]}`), so skills work in both projects.

@@ -390,6 +390,9 @@ def test_cron_skill_is_bundled_with_the_product_name_adapted():
     meta = agent_skills.parse_skill_metadata(text)
     assert meta == {"name": "cron", "description": "Schedule reminders and recurring tasks."}
     assert "nanoclaw sends the agent's final reply" in text
+    # Deliberate difference: no `message` tool or WebUI chat change in NanoClaw.
+    assert "`message` tool" not in text and "WebUI" not in text
+    assert "cannot send to other chats or attach files" in text
     assert "cron(action=\"history\", job_id=\"...\", limit=5)" in text
 
 
@@ -399,10 +402,6 @@ def test_cron_skill_is_in_the_prompt(tmp_path):
 
 
 # --- web UI skills API (nanobot tests/webui/test_skills_api.py) ----------------------------------
-
-
-def _config(*disabled: str) -> SimpleNamespace:
-    return SimpleNamespace(agents=SimpleNamespace(defaults=SimpleNamespace(disabled_skills=list(disabled))))
 
 
 def test_disabled_skills_remain_visible_and_loadable(tmp_path):
@@ -453,20 +452,60 @@ def test_skill_detail_install_options_shapes(tmp_path):
 
 
 def test_set_webui_skill_enabled_persists_and_updates_runtime(tmp_path, monkeypatch):
+    # nanobot's test stubs load/save_config; NanoClaw edits the raw file, so
+    # this one watches the file instead.
     _named_skill(tmp_path, "custom-skill")
-    config = _config()
-    saved: list[object] = []
-    monkeypatch.setattr("nanoclaw.config.loader.load_config", lambda _path=None: config)
-    monkeypatch.setattr("nanoclaw.config.loader.save_config", lambda value, _path=None: saved.append(value))
+    path = tmp_path / "config.json"
+    monkeypatch.setattr("nanoclaw.config.loader._current_config_path", path)
     disabled: set[str] = set()
     action = set_webui_skill_enabled(tmp_path, "custom-skill", enabled=False, disabled_skills=disabled)
     assert action == {"name": "custom-skill", "enabled": False, "deleted": False}
-    assert config.agents.defaults.disabled_skills == ["custom-skill"]
+    assert json.loads(path.read_text()) == {"agents": {"defaults": {"disabledSkills": ["custom-skill"]}}}
+    assert load_config(path).agents.defaults.disabled_skills == ["custom-skill"]
     assert disabled == {"custom-skill"}
-    assert saved == [config]
     # No change: nothing is written.
+    path.write_text(path.read_text() + "\n")
+    before = path.read_text()
     set_webui_skill_enabled(tmp_path, "custom-skill", enabled=False, disabled_skills=disabled)
-    assert saved == [config]
+    assert path.read_text() == before
+
+
+def test_skill_toggle_keeps_unknown_keys_order_and_env_references(tmp_path):
+    # Deliberate difference: nanobot re-saves through its schema, dropping
+    # keys it does not model; NanoClaw changes only disabledSkills.
+    _named_skill(tmp_path, "custom-skill")
+    path = tmp_path / "config.json"
+    original = {
+        "zetaNanobotOnly": {"keep": [1, 2, {"deep": "x"}]},
+        "providers": {"openai": {"apiKey": "${SOME_KEY}"}},
+        "agents": {"defaults": {"unknownKnob": True, "model": "openai/gpt-x"}},
+        "channels": {"slack": {"enabled": False, "botToken": "${SLACK_TOKEN}"}},
+    }
+    path.write_text(json.dumps(original, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    set_webui_skill_enabled(tmp_path, "custom-skill", enabled=False, disabled_skills=set(), config_path=path)
+    expected = json.loads(json.dumps(original))
+    expected["agents"]["defaults"]["disabledSkills"] = ["custom-skill"]
+    assert path.read_text(encoding="utf-8") == json.dumps(expected, indent=2, ensure_ascii=False) + "\n"
+    assert list(json.loads(path.read_text())) == list(original)  # key order kept
+    set_webui_skill_enabled(tmp_path, "custom-skill", enabled=True, disabled_skills=set(), config_path=path)
+    expected["agents"]["defaults"]["disabledSkills"] = []
+    assert path.read_text(encoding="utf-8") == json.dumps(expected, indent=2, ensure_ascii=False) + "\n"
+
+
+def test_skill_toggle_keeps_a_snake_case_key(tmp_path):
+    _named_skill(tmp_path, "custom-skill")
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"agents": {"defaults": {"disabled_skills": ["weather"]}}}))
+    set_webui_skill_enabled(tmp_path, "custom-skill", enabled=False, disabled_skills=set(), config_path=path)
+    assert json.loads(path.read_text()) == {"agents": {"defaults": {"disabled_skills": ["custom-skill", "weather"]}}}
+
+
+def test_skill_toggle_adds_the_path_when_missing(tmp_path):
+    _named_skill(tmp_path, "custom-skill")
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"other": 1}))
+    set_webui_skill_enabled(tmp_path, "custom-skill", enabled=False, disabled_skills=set(), config_path=path)
+    assert json.loads(path.read_text()) == {"other": 1, "agents": {"defaults": {"disabledSkills": ["custom-skill"]}}}
 
 
 def test_skill_state_uses_explicit_gateway_config(tmp_path, monkeypatch):

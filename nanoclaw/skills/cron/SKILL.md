@@ -5,11 +5,11 @@ description: Schedule reminders and recurring tasks.
 
 # Cron
 
-Use the `cron` tool to schedule reminders or recurring tasks. New tasks run in the current chat. nanoclaw sends the agent's final reply to that chat. The user can change the task's chat in WebUI.
+Use the `cron` tool to schedule reminders or recurring tasks. New tasks run in the current chat: each run is an agent turn in that chat, and nanoclaw sends the agent's final reply there.
 
-Write what to do in `message`. For a normal reminder or report, do not copy the current channel, chat ID, or instructions to call the `message` tool into the task. For example, use "Remind me to drink water", not "Call message to send to this chat".
+Write what to do in `message`. For a normal reminder or report, do not copy the current channel or chat ID into the task. For example, use "Remind me to drink water", not "Send this to the current chat".
 
-If the user asks to send to other chats, preserve those recipients in the task instructions. Use the `message` tool for those sends and for file attachments. Existing tasks that explicitly request a `message` call still use it; changing the task's chat does not change explicit recipients in its instructions.
+A task's reply goes only to the chat it was created in; nanoclaw cannot send to other chats or attach files. If the user asks for that, explain the limitation instead of promising the send.
 
 Choose by timing and notification behavior, not repetition. A specified time or interval uses `cron`, even when it repeats: "every day at 8am, remind me to drink water" is a cron task. Use `HEARTBEAT.md` for background checks with flexible timing that should notify only on actionable changes. Heartbeat does not guarantee a requested time or interval; do not substitute it for an explicit schedule.
 
