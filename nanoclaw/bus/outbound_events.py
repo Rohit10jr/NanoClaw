@@ -183,4 +183,7 @@ def _event_content(event: AgentEvent) -> str:
         if event.phase == "cancelled":
             return "Context compaction cancelled."
         return "Context compacted."
+    if isinstance(event, TurnModelUpdatedEvent) and event.fallback:
+        # NanoClaw only: nanobot's WebUI shows the switch itself.
+        return f"Using fallback model {event.model}"
     return ""

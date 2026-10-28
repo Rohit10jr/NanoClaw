@@ -212,11 +212,20 @@ class FakeProvider(LLMProvider):
         tool_choice: str | dict[str, Any] | None = None,
         retry_mode: str = "standard",
         on_retry_wait: RetryWaitCallback | None = None,
+        on_retry_exhausted: RetryWaitCallback | None = None,
     ) -> LLMResponse:
         self.last_retry_mode = retry_mode
         if self.retries:
             return await super().chat_with_retry(
-                messages, tools, model, max_tokens, temperature, tool_choice, retry_mode, on_retry_wait
+                messages,
+                tools,
+                model,
+                max_tokens,
+                temperature,
+                tool_choice,
+                retry_mode,
+                on_retry_wait,
+                on_retry_exhausted,
             )
         return await self.safe_chat(
             messages=messages,
@@ -241,6 +250,7 @@ class FakeProvider(LLMProvider):
         on_stream_recover: StreamRecoverCallback | None = None,
         retry_mode: str = "standard",
         on_retry_wait: RetryWaitCallback | None = None,
+        on_retry_exhausted: RetryWaitCallback | None = None,
     ) -> LLMResponse:
         self.last_retry_mode = retry_mode
         if self.retries:
@@ -257,6 +267,7 @@ class FakeProvider(LLMProvider):
                 on_stream_recover,
                 retry_mode,
                 on_retry_wait,
+                on_retry_exhausted,
             )
         return await self.safe_chat_stream(
             messages=messages,

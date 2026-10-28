@@ -10,7 +10,8 @@ Layout (camelCase in JSON)::
     {
       "agents": {"defaults": {"workspace", "modelPreset", "model", "provider",
                               "maxTokens", "contextWindowTokens", "temperature",
-                              "reasoningEffort", "dream": {"modelOverride"},
+                              "reasoningEffort", "fallbackModels",
+                              "dream": {"modelOverride"},
                               "maxToolIterations", "maxConcurrentSubagents",
                               "maxToolResultChars", "providerRetryMode",
                               "timezone", "timezoneMode",
@@ -92,6 +93,26 @@ class RequestOverrides(Base):
     extra_body: dict[str, Any] | None = Field(default=None, repr=False)
 
 
+class InlineFallbackConfig(RequestOverrides):
+    """One inline fallback model configuration (nanobot schema.py:133).
+
+    nanobot's ``api`` (request-API selection) is not read, as for presets.
+    Omitted ``maxTokens``, ``contextWindowTokens`` and ``temperature`` come
+    from the primary preset; ``reasoningEffort`` does not.
+    """
+
+    model: str
+    provider: str
+    max_tokens: int | None = None
+    context_window_tokens: int | None = None
+    temperature: float | None = None
+    reasoning_effort: str | None = None
+
+
+# A ``modelPresets`` name or an inline model (nanobot schema.py:145).
+FallbackCandidate = str | InlineFallbackConfig
+
+
 class ModelPresetConfig(RequestOverrides):
     """A named set of model + generation parameters for quick switching (schema.py:148).
 
@@ -117,6 +138,8 @@ class AgentDefaults(Base):
     max_tokens: int = 8192
     context_window_tokens: int = DEFAULT_CONTEXT_WINDOW_TOKENS
     temperature: float = 0.1
+    # Tried in order when the active model fails (schema.py:179; nanoclaw/providers/fallback_provider.py).
+    fallback_models: list[FallbackCandidate] = Field(default_factory=list)
     max_tool_iterations: int = DEFAULT_MAX_TOOL_ITERATIONS
     max_concurrent_subagents: int = Field(default=4, ge=1)
     max_tool_result_chars: int = 16_000
@@ -341,6 +364,9 @@ class Config(Base):
         dream_name = self.agents.defaults.dream.model_override
         if dream_name and dream_name != "default" and dream_name not in self.model_presets:
             raise ValueError(f"Dream model preset {dream_name!r} not found in model_presets")
+        for fallback in self.agents.defaults.fallback_models:
+            if isinstance(fallback, str) and fallback not in self.model_presets:
+                raise ValueError(f"fallback_models entry {fallback!r} not found in model_presets")
         return self
 
     def resolve_default_preset(self) -> ModelPresetConfig:

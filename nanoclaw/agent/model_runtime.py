@@ -3,7 +3,10 @@
 The resolver owns the default ``LLMRuntime`` (provider, model, limits) and
 the named presets. ``resolve_preset`` builds a preset's runtime once and
 caches it, so sessions that picked a preset with ``/model`` share one
-provider; ``aclose`` closes every provider it handed out.
+provider; ``aclose`` closes every provider it handed out. A
+``FallbackProvider`` it hands out reports the fallback model that answered to
+the running request (``runner.publish_fallback_model``; nanobot attaches its
+WebUI observer the same way, cli/gateway_runtime.py:546).
 
 Left out from nanobot: config hot reload (``invalidate``/``refresh`` and
 provider signatures), per-run SDK overrides (``resolve_override``) and
@@ -20,8 +23,10 @@ from types import MappingProxyType
 from typing import Any, cast
 
 from nanoclaw.agent import model_presets as preset_helpers
+from nanoclaw.agent.runner import publish_fallback_model
 from nanoclaw.config.schema import ModelPresetConfig
 from nanoclaw.providers.base import LLMProvider
+from nanoclaw.providers.fallback_provider import FallbackProvider
 from nanoclaw.utils.llm_runtime import LLMRuntime
 
 __all__ = ["ModelRuntimeResolver"]
@@ -38,7 +43,8 @@ class ModelRuntimeResolver:
         preset_runtime_loader: preset_helpers.PresetRuntimeLoader | None = None,
     ) -> None:
         self._runtime = initial_runtime
-        self._providers: list[LLMProvider] = [initial_runtime.provider]
+        self._providers: list[LLMProvider] = []
+        self._track(initial_runtime.provider)
         self._model_presets = dict(model_presets or {})
         self._preset_runtime_loader = preset_runtime_loader
         self._resolved_presets: dict[str, LLMRuntime] = {}
@@ -64,6 +70,8 @@ class ModelRuntimeResolver:
     def _track(self, provider: LLMProvider) -> None:
         if not any(known is provider for known in self._providers):
             self._providers.append(provider)
+            if isinstance(provider, FallbackProvider):
+                provider.set_fallback_model_observer(publish_fallback_model)
 
     def update_default(self, **changes: Any) -> LLMRuntime:
         """Change fields of the default runtime (the loop's ``provider``, ``model``, ... setters)."""

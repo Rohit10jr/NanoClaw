@@ -31,6 +31,7 @@ from nanoclaw.bus.outbound_events import (
     ProgressEvent,
     StreamDeltaEvent,
     StreamEndEvent,
+    TurnModelUpdatedEvent,
     _event_content,
 )
 from nanoclaw.cli.stream import BOT_NAME, StreamRenderer, ThinkingSpinner, progress_line_markup
@@ -102,13 +103,15 @@ def print_progress_line(console: Console, text: str, spinner: ThinkingSpinner | 
 
 
 def progress_event_text(event: AgentEvent) -> str | None:
-    """The progress line for a retry wait or compaction event, else None.
+    """The progress line for a retry wait, compaction or fallback-model event, else None.
 
     nanobot prints both as "↳" lines (terminal.py:372-377), with the text of
     ``outbound_message_for_event`` (bus/outbound_events.py:149).
     """
     if isinstance(event, ContextCompactionEvent | RetryWaitEvent):
         return _event_content(event)
+    if isinstance(event, TurnModelUpdatedEvent) and event.fallback:
+        return _event_content(event)  # NanoClaw only: "Using fallback model ..."
     return None
 
 
