@@ -1,8 +1,8 @@
 """Start the enabled channels and deliver the agent's outbound messages to them.
 
 A slim port of nanobot channels/manager.py ``ChannelManager``: builds the
-enabled channels from config (NanoClaw has one, ``websocket``), starts and
-stops them, and runs the outbound dispatcher that consumes the bus:
+enabled channels from config (``websocket``, the web UI, and ``telegram``),
+starts and stops them, and runs the outbound dispatcher that consumes the bus:
 
 - consecutive stream deltas of one ``(channel, chat_id, stream_id)`` are
   coalesced into one (``_coalesce_stream_deltas``, manager.py:1081);
@@ -13,9 +13,12 @@ stops them, and runs the outbound dispatcher that consumes the bus:
   ``channels.sendMaxRetries`` attempts (``_send_with_retry``, :1150).
 
 nanobot's dispatcher also drops reasoning / progress / tool hints a
-channel does not want and ``RetryWaitEvent``; for the web UI those filters
-live in ``WebUIOutboundProjector.project`` (layer 22), so they are not
-repeated here. A future channel without its own projection must filter.
+channel does not want and ``RetryWaitEvent``, then calls the channel method
+for the event (``_send_once``: ``send_delta``, ``send_reasoning_delta``, ...).
+The web UI does both in ``WebUIOutboundProjector.project`` (layer 22), so a
+channel with ``projects_outbound`` (the default) gets every event through
+``send``; for the others (Telegram) the manager applies nanobot's filters
+and ``_send_once``. A ``DeliveryRejectedError`` is never retried.
 Left out: the scheduled-delivery outbox, restart notices, plugin discovery,
 hot reload and channel feature actions.
 """
@@ -31,9 +34,11 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
+from nanoclaw.bus.delivery import DeliveryRejectedError
 from nanoclaw.bus.events import OutboundMessage
 from nanoclaw.bus.outbound_events import (
     ProgressEvent,
+    RetryWaitEvent,
     RuntimeModelUpdatedEvent,
     StreamDeltaEvent,
     StreamedResponseEvent,
@@ -95,6 +100,34 @@ class ChannelManager:
 
     def _init_channels(self) -> None:
         """Build the enabled channels. (nanobot manager.py:268, without plugins)"""
+        self._init_websocket()
+        self._init_telegram()
+        self._validate_allow_from()
+
+    def _init_telegram(self) -> None:
+        tg_config = self.config.channels.telegram
+        if not tg_config.enabled:
+            return
+        try:
+            from nanoclaw.channels.telegram import TelegramChannel
+
+            channel: BaseChannel = TelegramChannel(tg_config, self.bus)
+        except Exception as exc:
+            self._channel_errors["telegram"] = "Channel runtime could not be loaded. Check gateway logs."
+            logger.warning("telegram channel not available: {}", exc)
+            return
+        self._apply_flags(channel, tg_config)
+        self.channels[channel.name] = channel
+        logger.info("{} channel enabled as {}", channel.display_name, channel.name)
+
+    def _validate_allow_from(self) -> None:
+        """(nanobot manager.py:361; nanobot checks for an omitted key, NanoClaw's
+        typed config has an empty list then)"""
+        for name, ch in self.channels.items():
+            if not getattr(ch.config, "allow_from", None):
+                logger.info('"{}" has no allowFrom; unapproved users will receive a pairing code', name)
+
+    def _init_websocket(self) -> None:
         ws_config = self.config.channels.websocket
         if not ws_config.enabled:
             return
@@ -115,7 +148,7 @@ class ChannelManager:
     def _apply_flags(self, channel: BaseChannel, section: Any) -> None:
         """Per-channel overrides of the ``channels`` defaults. (nanobot manager.py:236-246)"""
         defaults = self.config.channels
-        for key in ("send_progress", "send_tool_hints", "show_reasoning"):
+        for key in ("send_progress", "send_tool_hints", "show_reasoning", "show_compaction_notices"):
             value = getattr(section, key, None)
             setattr(channel, key, value if isinstance(value, bool) else getattr(defaults, key))
 
@@ -257,6 +290,9 @@ class ChannelManager:
                         msg = await self.bus.consume_outbound()
                 self._outbound_dispatching = True
                 event = msg.event
+                target = self.channels.get(msg.channel)
+                if target is not None and not target.projects_outbound and self._drop_for_channel(target, msg):
+                    continue
                 if (
                     isinstance(event, RuntimeModelUpdatedEvent)
                     and msg.channel == "websocket"
@@ -283,6 +319,47 @@ class ChannelManager:
                 break
             finally:
                 self._outbound_dispatching = False
+
+    @staticmethod
+    def _drop_for_channel(channel: BaseChannel, msg: OutboundMessage) -> bool:
+        """nanobot's dispatcher filters (manager.py:930-958) for a channel that
+        does not project events itself: reasoning unless ``show_reasoning``,
+        progress / tool hints unless ``send_progress`` / ``send_tool_hints``,
+        and retry-wait notices."""
+        event = msg.event
+        if isinstance(event, ProgressEvent):
+            if event.reasoning_delta or event.reasoning_end or event.reasoning:
+                return not channel.show_reasoning
+            return not (channel.send_tool_hints if event.tool_hint else channel.send_progress)
+        return isinstance(event, RetryWaitEvent)
+
+    @staticmethod
+    async def _send_once(channel: BaseChannel, msg: OutboundMessage) -> None:
+        """Call the channel method for the event. (nanobot manager.py:1057)"""
+        if channel.projects_outbound:
+            await channel.send(msg)
+            return
+        event = msg.event
+        if isinstance(event, ProgressEvent) and event.reasoning_end:
+            await channel.send_reasoning_end(msg.chat_id, msg.metadata, stream_id=event.stream_id)
+        elif isinstance(event, ProgressEvent) and event.reasoning_delta:
+            await channel.send_reasoning_delta(msg.chat_id, msg.content, msg.metadata, stream_id=event.stream_id)
+        elif isinstance(event, ProgressEvent) and event.reasoning:
+            await channel.send_reasoning(msg)
+        elif isinstance(event, ProgressEvent) and event.file_edit_events:
+            await channel.send_file_edit_events(msg.chat_id, event.file_edit_events, msg.metadata)
+        elif isinstance(event, StreamDeltaEvent | StreamEndEvent):
+            await channel.send_delta(
+                msg.chat_id,
+                msg.content,
+                msg.metadata,
+                stream_id=event.stream_id,
+                stream_end=isinstance(event, StreamEndEvent),
+                resuming=event.resuming if isinstance(event, StreamEndEvent) else False,
+                merge_next=event.merge_next if isinstance(event, StreamEndEvent) else False,
+            )
+        elif not isinstance(event, StreamedResponseEvent):
+            await channel.send(msg)
 
     def _coalesce_stream_deltas(self, first_msg: OutboundMessage) -> tuple[OutboundMessage, list[OutboundMessage]]:
         """Merge consecutive deltas of one stream already queued. (nanobot manager.py:1081)"""
@@ -327,12 +404,12 @@ class ChannelManager:
         while True:
             attempt += 1
             try:
-                await channel.send(msg)
+                await self._send_once(channel, msg)
                 return
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                if not channel.should_retry_send_error(e):
+                if isinstance(e, DeliveryRejectedError) or not channel.should_retry_send_error(e):
                     logger.error("Send to {} failed with a non-retryable {}: {}", msg.channel, type(e).__name__, e)
                     return
                 if attempt >= max_attempts:

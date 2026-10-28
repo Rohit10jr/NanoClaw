@@ -260,6 +260,37 @@ confirm dialog lists them. Settings, skills, apps, editing automations,
 channels, attachments and subagent panels are nanobot features NanoClaw does
 not serve; those pages show empty or error states.
 
+Telegram, as in nanobot: talk to the agent from a Telegram bot. In Telegram,
+message [@BotFather](https://t.me/BotFather), send `/newbot` and copy the token
+it gives you (`123456:ABC...`). Put it in `config.json` with your numeric
+Telegram user id (or `@username` without the `@`) in `allowFrom`:
+
+```json
+{"channels": {"telegram": {"enabled": true, "token": "123456:ABC...", "allowFrom": ["123456789"]}}}
+```
+
+then check the token and start the gateway, which polls Telegram for messages
+(no public URL needed):
+
+```bash
+uv run nanoclaw channels validate telegram   # asks Telegram's getMe whether the token works
+uv run nanoclaw gateway
+```
+
+Anyone not in `allowFrom` who messages the bot privately gets a pairing code
+instead of an answer; approve it with `/pairing approve <code>` from an
+allowed chat (or in the web UI). `"allowFrom": ["*"]` lets everyone in. In
+groups the bot answers only when @mentioned or replied to (`"groupPolicy":
+"open"` to answer everything); each forum topic is its own conversation.
+Replies stream in by editing one message (`streaming`, `streamEditInterval`),
+Markdown is rendered (code blocks, tables, links) and long answers are split
+at Telegram's 4096-character limit. Photos, voice notes and files are saved
+under `~/.nanoclaw/media/telegram` and passed to the agent as their path
+(there is no image input or transcription). Each chat is a
+`telegram:<chat id>` session, and the heartbeat delivers to the most recent
+one. Webhook mode (`"mode": "webhook"`, `webhookUrl`, `webhookSecretToken`)
+is supported too; `useProxy` is not (set `HTTPS_PROXY` instead).
+
 Subagents, as in nanobot: the agent can hand a task to a child agent with the
 `subagent` tool (`action=create`). With `wait=true` it waits for the answer;
 otherwise the child works in the background (up to 4 at once) and its report

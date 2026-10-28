@@ -32,7 +32,19 @@ Layout (camelCase in JSON)::
                                  "sendProgress", "sendToolHints",
                                  "showReasoning",
                                  "webuiDist"  # NanoClaw only
-                                 }},
+                                 },
+                   "showCompactionNotices",
+                   "telegram": {"enabled", "token", "mode", "allowFrom",
+                                "useProxy", "replyToMessage", "reactEmoji",
+                                "groupPolicy", "connectionPoolSize",
+                                "poolTimeout", "streaming",
+                                "inlineKeyboards", "richMessages",
+                                "streamEditInterval", "webhookUrl",
+                                "webhookListenHost", "webhookListenPort",
+                                "webhookPath", "webhookSecretToken",
+                                "webhookMaxConnections", "sendProgress",
+                                "sendToolHints", "showReasoning",
+                                "showCompactionNotices"}},
       "gateway": {"host", "port", "heartbeat": {"enabled", "intervalS"}},
       "providers": {"<name>": {"apiKey", "apiBase", "extraHeaders",
                                "extraBody", "extraQuery", "thinkingStyle"}, ...},
@@ -55,9 +67,11 @@ style variables override the file (schema.py:757). NanoClaw keeps its own
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import AliasChoices, Field, field_validator, model_validator
@@ -383,20 +397,86 @@ class WebSocketConfig(Base):
         return self
 
 
+class TelegramConfig(Base):
+    """``channels.telegram``: the Telegram bot (nanobot
+    channels/telegram/runtime.py:491 ``TelegramConfig``; same names, defaults
+    and checks).
+
+    ``useProxy`` is accepted and ignored: nanobot routes the bot through its
+    shared ``network.proxy``, which NanoClaw does not have (like
+    ``mcpServers.*.useProxy``); the standard ``HTTPS_PROXY`` / ``ALL_PROXY``
+    variables apply. The per-channel ``sendProgress`` / ``sendToolHints`` /
+    ``showReasoning`` / ``showCompactionNotices`` overrides are nanobot's
+    (channels/manager.py ``_resolve_bool_override``).
+    """
+
+    enabled: bool = False
+    token: str = ""
+    mode: Literal["polling", "webhook"] = "polling"
+    allow_from: list[str] = Field(default_factory=list)
+    use_proxy: bool = False
+    reply_to_message: bool = False
+    react_emoji: str = "👀"
+    group_policy: Literal["open", "mention"] = "mention"
+    connection_pool_size: int = 32
+    pool_timeout: float = 5.0
+    streaming: bool = True
+    inline_keyboards: bool = False
+    rich_messages: bool = False
+    stream_edit_interval: float = Field(default=0.6, ge=0.1)
+    webhook_url: str = ""
+    webhook_listen_host: str = "127.0.0.1"
+    webhook_listen_port: int = Field(default=8081, ge=1, le=65535)
+    webhook_path: str = "/telegram"
+    webhook_secret_token: str = ""
+    webhook_max_connections: int = Field(default=4, ge=1, le=100)
+    send_progress: bool | None = None
+    send_tool_hints: bool | None = None
+    show_reasoning: bool | None = None
+    show_compaction_notices: bool | None = None
+
+    @field_validator("webhook_path")
+    @classmethod
+    def webhook_path_must_start_with_slash(cls, value: str) -> str:
+        value = value.strip() or "/telegram"
+        if not value.startswith("/"):
+            raise ValueError('webhook_path must start with "/"')
+        return value
+
+    @model_validator(mode="after")
+    def validate_webhook_config(self) -> TelegramConfig:
+        if self.mode != "webhook":
+            return self
+        url = self.webhook_url.strip()
+        if not url:
+            raise ValueError("webhook_url is required when Telegram mode is webhook")
+        parsed = urlparse(url)
+        if parsed.scheme != "https" or not parsed.netloc:
+            raise ValueError("webhook_url must be a public HTTPS URL")
+        secret = self.webhook_secret_token.strip()
+        if not secret:
+            raise ValueError("webhook_secret_token is required when Telegram mode is webhook")
+        if len(secret) > 256 or re.match(r"^[A-Za-z0-9_-]+$", secret) is None:
+            raise ValueError("webhook_secret_token must be 1-256 characters using only A-Z, a-z, 0-9, _ and -")
+        return self
+
+
 class ChannelsConfig(Base):
     """Chat channel settings (nanobot schema.py:33 ``ChannelsConfig``, a subset).
 
     The first three also decide what the terminal shows while a turn works
-    (nanobot cli/agent.py:222-245). ``websocket`` is the web UI server
-    (nanobot keeps it as an extra key the channel parses). Other channels
-    (telegram, slack, ...) are not read.
+    (nanobot cli/agent.py:222-245). ``websocket`` is the web UI server and
+    ``telegram`` the Telegram bot (nanobot keeps both as extra keys the
+    channel parses). Other channels (slack, discord, ...) are not read.
     """
 
     send_progress: bool = True  # schema.py:43, the model's text before tool calls
     send_tool_hints: bool = True  # schema.py:44, e.g. read notes.txt
     show_reasoning: bool = True  # schema.py:45, the model's reasoning
+    show_compaction_notices: bool = False  # schema.py:46, automatic compaction chat notices
     send_max_retries: int = Field(default=3, ge=0, le=10)  # schema.py:48, delivery attempts
     websocket: WebSocketConfig = Field(default_factory=WebSocketConfig)
+    telegram: TelegramConfig = Field(default_factory=TelegramConfig)
 
 
 class ExecToolConfig(Base):
