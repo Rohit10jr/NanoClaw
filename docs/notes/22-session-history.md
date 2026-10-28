@@ -65,12 +65,34 @@ through `webui-thread` and the session list.
 
 ## Tests
 
-Layer 22 adds 203 tests (3,219 → 3,422): `tests/webui/` (nanobot's transcript,
+Layer 22 adds 278 tests (3,219 → 3,497): `tests/webui/` (nanobot's transcript,
 prompt index, session identity and session list tests, the history store),
 `test_webui_outbound_projection.py` (nanobot's wire tests, the frontend's
 fixture file, real websocket turns, the end-to-end replay),
-`test_turn_delivery.py`, and additions to the retry and fallback tests.
+`test_turn_delivery.py`, `test_layer22_gaps.py`, and additions to the retry and
+fallback tests.
 
 ### Mutation checks
 
-MUTATION_RESULTS
+444 rules were broken on purpose:
+
+| Area | Rules | Caught at once | Gaps closed with tests | Equivalent | Result |
+|---|---|---|---|---|---|
+| Wire encoders, projector | 145 | 109 | 34 | 2 | 143 caught |
+| Retry status, turn lifecycle, usage | 74 | 68 | 6 | 0 | 74 caught |
+| History store, thread projection, backfill | 144 | 73 | 66 | 5 | 139 caught |
+| Session list, titles, deletion | 81 | 41 | 39 | 1 | 80 caught |
+
+75 new tests (`test_layer22_gaps.py`) close the gaps, for example: base64
+scrubbing in tool events (case, leading spaces, the marker window); the
+projector forgetting a chat's buffers; a fallback that fails without retries
+not sending a second "cleared"; usage of the summary requests counted per
+round; every history validation rule, symlink refusal (also a symlink swapped
+in after the check), the 8 MiB limit and the read cache; page limits and
+cursors; the first fork marker as boundary; title generation from the first
+visible exchange and never over a title the user edited.
+
+Equivalent (8): an empty turn id that every caller already treats as missing;
+outcomes NanoClaw never produces; cache entries that can never be reused; and
+values rejected earlier or records that never carry the field.
+

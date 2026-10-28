@@ -146,16 +146,16 @@ Legend: ⏳ in progress · ✅ done and verified · ⛔ blocked
 | Docs | note 21, CODE_MAP, README, ROADMAP, notes 04/06/11/14 | main session | — | ✅ |
 | PR | `p2/layer-21` → `main` | main session | PR #13 | ✅ |
 
-## Layer 22 — session storage: per-chat event log for the web UI history (`p2/layer-22`) ⏳
+## Layer 22 — session storage: per-chat event log for the web UI history (`p2/layer-22`) ✅
 
 | Task | Scope (files) | Sub-agent | Verification | Status |
 |---|---|---|---|---|
 | 22.1 Wire projection | bus events → nanobot's web UI wire events (`message`, `delta`, `stream_end`, `reasoning_*`, `turn_end`, `context_compaction`, `error`, ...) | sub-agent (worktree), parallel | 46 sequences identical (real nanobot channel); 13 retry cases identical | ✅ |
 | 22.2 Transcript and thread history | per-chat event log (JSONL), `webui-thread` projection, backfill from session files, session list index (title, preview) | sub-agent (worktree), parallel | 48 checks identical | ✅ |
 | Integration | shared modules, end-to-end replay test | main session | 1 conflict; comparisons re-run; 3,422 passed, 6 skipped | ✅ |
-| Mutation checks | ~250 rules | sub-agent (worktree) | | ⏳ |
+| Mutation checks | 444 rules | sub-agent (worktree) | 436 caught, 8 equivalent (75 tests added); 3,497 passed | ✅ |
 | Docs | note 22, CODE_MAP, README, ROADMAP | main session | — | ✅ |
-| PR | `p2/layer-22` → `main` | main session | | ⏳ |
+| PR | `p2/layer-22` → `main` | main session | PR #14 | ✅ |
 
 ## Blockers and open items
 
