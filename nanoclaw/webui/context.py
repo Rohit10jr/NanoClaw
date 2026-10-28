@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from nanoclaw.agent.loop import AgentLoop
     from nanoclaw.channels.websocket import WebSocketChannel
     from nanoclaw.config import Config
+    from nanoclaw.cron.service import CronService
     from nanoclaw.session.manager import SessionManager
     from nanoclaw.webui.history import WebUIHistoryStore
 
@@ -51,8 +52,13 @@ class WebUIContext:
     ``mutations`` maps ``webui_request`` actions to handlers. The channel
     registers ``session.delete``; the REST module registers
     ``sidebar.update`` (payload ``{"state": {...}}``, answers the saved
-    state). An action with no handler answers nanobot's
+    state) and ``automation.enable`` / ``disable`` / ``delete`` / ``run``.
+    An action with no handler answers nanobot's
     ``404 unknown WebUI mutation action``.
+
+    ``cron`` is the gateway's cron service (nanobot ``cron_service``): the
+    loop's ``cron_service`` when the channel is built, replaced by the
+    gateway's own one (``Gateway``); None lists no automations.
     """
 
     config: Config
@@ -62,6 +68,7 @@ class WebUIContext:
     workspace: Path
     check_auth: Callable[[web.Request], bool]
     channel: WebSocketChannel | None = None
+    cron: CronService | None = None
     mutations: dict[str, WebUIMutation] = field(default_factory=dict)
     extras: dict[str, Any] = field(default_factory=dict)
 

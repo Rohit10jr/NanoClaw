@@ -152,3 +152,9 @@ async def test_health_reports_websocket_running(gateway) -> None:
     ready, body = gw.health()
     assert ready is True
     assert body["websocket"] == "running"
+
+
+async def test_webui_shares_the_gateway_cron_service(gateway) -> None:
+    """The web UI lists the jobs of the gateway's own cron store (task 23.5)."""
+    gw, channel, _port, _provider = gateway
+    assert channel.context.cron is gw.cron

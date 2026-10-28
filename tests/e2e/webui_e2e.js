@@ -123,6 +123,29 @@ async function apiGet(page, urlPath) {
   }, urlPath);
 }
 
+async function socketRequest(page, action, payload) {
+  // One webui_request on a socket of its own; answers the webui_response.
+  return page.evaluate(async ([a, p]) => {
+    const s = new URLSearchParams(location.hash.replace(/^#\??/, '')).get('bootstrapSecret');
+    const boot = await (await fetch('/webui/bootstrap', { headers: s ? { 'X-Nanobot-Auth': s } : {} })).json();
+    const ws = new WebSocket(`${location.origin.replace(/^http/, 'ws')}/?token=${encodeURIComponent(boot.token)}`);
+    const id = `e2e-${Date.now()}`;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('socket request timed out')), 10000);
+      ws.onmessage = (m) => {
+        const d = JSON.parse(m.data);
+        if (d.event === 'ready') ws.send(JSON.stringify({ type: 'webui_request', request_id: id, action: a, payload: p }));
+        if (d.event === 'webui_response' && d.request_id === id) {
+          clearTimeout(timer);
+          ws.close();
+          resolve(d);
+        }
+      };
+      ws.onerror = () => reject(new Error('socket error'));
+    });
+  }, [action, payload]);
+}
+
 function findFiles(root, pred, acc = []) {
   if (!fs.existsSync(root)) return acc;
   for (const name of fs.readdirSync(root)) {
@@ -328,6 +351,71 @@ async function s4b_delete_running(open) {
   assert(files.length === 0, `files re-created after the turn ended: ${JSON.stringify(files)}`);
   assert(!titles.some((t) => /Delta slowstream/.test(t)), `chat back after reload: ${JSON.stringify(titles)}`);
   return `deleted mid-turn; nothing re-created; sidebar ${JSON.stringify(titles)}`;
+}
+
+async function s4c_automations(open) {
+  // A chat with a bound cron job: the Session details popover lists it
+  // (GET /api/sessions/<key>/automations), and deleting the chat first answers
+  // blocked_by_automations; the confirm dialog then names the automation and
+  // a second Delete (delete_automations) removes chat and job.
+  const page = await open();
+  await page.getByRole('button', { name: 'New topic' }).click();
+  await page.waitForTimeout(300);
+  await send(page, 'Echo schedule hourly check');
+  await page.getByText('Scheduled.').first().waitFor({ timeout: 15000 });
+  const chatId = await activeChatId(page);
+  const key = `websocket:${chatId}`;
+  const listed = await apiGet(page, `/api/sessions/${encodeURIComponent(key)}/automations`);
+  assert(listed.status === 200, `automations route: ${JSON.stringify(listed)}`);
+  assert(listed.body.jobs.length === 1 && listed.body.jobs[0].name === 'Hourly repo check',
+    `automations: ${JSON.stringify(listed.body)}`);
+  const job = listed.body.jobs[0];
+  assert(job.schedule.kind === 'every' && job.schedule.every_ms === 3600000 && job.enabled === true,
+    `job shape: ${JSON.stringify(job)}`);
+  assert(job.origin && job.origin.session_key === key, `job origin: ${JSON.stringify(job.origin)}`);
+  // The popover: count 1, the job row, no load error.
+  await page.getByRole('button', { name: 'Session details' }).first().click();
+  const popover = page.locator('[data-radix-popper-content-wrapper]').last();
+  await popover.getByText('Hourly repo check').first().waitFor({ timeout: 10000 });
+  const popText = await popover.innerText();
+  assert(!popText.includes('Could not load automations'), `popover error:\n${popText}`);
+  const autoResp = page.rec.responses.filter((r) => r.url.includes('/automations'));
+  assert(autoResp.length > 0 && autoResp.every((r) => r.status === 200), `automations fetches: ${JSON.stringify(autoResp)}`);
+  await shot(page, 's4c_popover');
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(300);
+  // session.delete without delete_automations is refused (own socket, as a
+  // client that did not look up the automations would send it).
+  const blocked = await socketRequest(page, 'session.delete', { key });
+  assert(blocked.ok === true && blocked.result.deleted === false && blocked.result.blocked_by_automations === true,
+    `delete without confirmation: ${JSON.stringify(blocked)}`);
+  assert(blocked.result.automations.map((j) => j.name).join() === 'Hourly repo check', `blocked list: ${JSON.stringify(blocked.result)}`);
+  // The UI looks the automations up first: its confirm dialog names the job
+  // and the Delete sends delete_automations.
+  const title = (await sidebarTitles(page)).find((t) => /Echo schedule hourly/.test(t));
+  assert(title, `chat not in sidebar: ${JSON.stringify(await sidebarTitles(page))}`);
+  await page.getByRole('button', { name: `Topic actions for ${title}` }).click();
+  await page.getByRole('menuitem', { name: /Delete/ }).click();
+  const dialog = page.getByRole('alertdialog').or(page.getByRole('dialog')).first();
+  await dialog.getByText('Hourly repo check').first().waitFor({ timeout: 5000 });
+  const dialogText = await dialog.innerText();
+  assert(/linked automations/i.test(dialogText), `dialog does not mention the automations:\n${dialogText}`);
+  await shot(page, 's4c_delete_confirm');
+  await dialog.getByRole('button', { name: 'Delete' }).click();
+  const sent = await waitFrame(page, (d) => d.event === 'webui_response' && d.ok !== undefined &&
+    !String(d.request_id).startsWith('e2e-') &&
+    page.rec.frames.some((f) => f.dir === '>' && f.data.request_id === d.request_id && f.data.action === 'session.delete'));
+  const req = page.rec.frames.find((f) => f.dir === '>' && f.data.request_id === sent.request_id);
+  assert(req.data.payload.delete_automations === true, `delete payload: ${JSON.stringify(req.data)}`);
+  assert(sent.ok === true && sent.result.deleted === true, `delete: ${JSON.stringify(sent)}`);
+  await page.waitForTimeout(800);
+  assert(!(await sidebarTitles(page)).includes(title), 'chat still in sidebar after confirm');
+  const after = await apiGet(page, `/api/sessions/${encodeURIComponent(key)}/automations`);
+  assert(after.status === 200 && after.body.jobs.length === 0, `job left: ${JSON.stringify(after.body)}`);
+  const all = await apiGet(page, '/api/webui/automations');
+  assert(!all.body.jobs.some((j) => j.name === 'Hourly repo check'), `job still listed: ${JSON.stringify(all.body)}`);
+  await shot(page, 's4c_deleted');
+  return 'popover lists the bound job; bare session.delete blocked_by_automations; UI dialog names it and deletes with delete_automations; job removed';
 }
 
 async function s3b_switch_while_streaming(open) {
@@ -556,6 +644,7 @@ async function s9_secret(open) {
         ['s3b_switch_while_streaming', s3b_switch_while_streaming],
         ['s4_delete', s4_delete],
         ['s4b_delete_running', s4b_delete_running],
+        ['s4c_automations', s4c_automations],
         ['s5_stop_and_slash', s5_stop_and_slash],
         ['s6_failed_turn', s6_failed_turn],
         ['s7_commands', s7_commands],

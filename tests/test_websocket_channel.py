@@ -569,6 +569,91 @@ async def test_session_delete_removes_session_history_and_turn(harness: Harness)
     await client.ws.close()
 
 
+def _cron_with_job(harness: Harness, tmp_path: Path, chat: str, name: str = "Daily check") -> Any:
+    from nanoclaw.cron.service import CronService
+    from nanoclaw.cron.types import CronSchedule
+
+    cron = harness.channel.context.cron or CronService(tmp_path / "cron" / "jobs.json")
+    harness.channel.context.cron = cron
+    cron.add_job(
+        name=name,
+        schedule=CronSchedule(kind="every", every_ms=86_400_000),
+        message="Check the repo",
+        session_key=f"websocket:{chat}",
+        origin_channel="websocket",
+        origin_chat_id=chat,
+    )
+    return cron
+
+
+async def test_session_delete_blocks_bound_automations(harness: Harness, tmp_path: Path) -> None:
+    """(nanobot test_session_delete_blocks_bound_automations)"""
+    cron = _cron_with_job(harness, tmp_path, "doomed")
+    sessions = harness.channel.sessions
+    session = sessions.get_or_create("websocket:doomed")
+    session.add_message("user", "hi")
+    sessions.save(session)
+    client = await harness.connect()
+    [frame] = await client.request(request_id="d1", action="session.delete", payload={"key": "websocket:doomed"})
+    assert frame["ok"] is True
+    body = frame["result"]
+    assert body["deleted"] is False
+    assert body["blocked_by_automations"] is True
+    assert [job["name"] for job in body["automations"]] == ["Daily check"]
+    assert set(body["automations"][0]) == {"id", "name", "enabled", "schedule", "payload", "state"}
+    assert sessions.get_existing("websocket:doomed") is not None
+    assert cron.list_bound_cron_jobs_for_session("websocket:doomed")
+    # "false" / "no" do not confirm; true, "1" and "yes" do.
+    for request_id, flag in (("d2", False), ("d3", "no")):
+        [frame] = await client.request(
+            request_id=request_id, action="session.delete",
+            payload={"key": "websocket:doomed", "delete_automations": flag},
+        )
+        assert frame["result"]["blocked_by_automations"] is True
+    await client.ws.close()
+
+
+@pytest.mark.parametrize("flag", [True, "1", "YES"])
+async def test_session_delete_can_cascade_bound_automations(harness: Harness, tmp_path: Path, flag: Any) -> None:
+    """(nanobot test_session_delete_can_cascade_bound_automations)"""
+    cron = _cron_with_job(harness, tmp_path, "doomed")
+    _cron_with_job(harness, tmp_path, "kept", name="Other chat")
+    sessions = harness.channel.sessions
+    session = sessions.get_or_create("websocket:doomed")
+    session.add_message("user", "hi")
+    sessions.save(session)
+    client = await harness.connect()
+    [frame] = await client.request(
+        request_id="d1", action="session.delete", payload={"key": "websocket:doomed", "delete_automations": flag}
+    )
+    assert frame["result"] == {"deleted": True}
+    assert sessions.get_existing("websocket:doomed") is None
+    assert cron.list_bound_cron_jobs_for_session("websocket:doomed") == []
+    assert [job.name for job in cron.list_jobs(include_disabled=True)] == ["Other chat"]
+    await client.ws.close()
+
+
+async def test_session_automations_route_on_the_channel(harness: Harness, tmp_path: Path) -> None:
+    _cron_with_job(harness, tmp_path, "abc")
+    token = (await harness.bootstrap())["api_token"]
+    resp = await harness.get("/api/sessions/websocket%3Aabc/automations", {"Authorization": f"Bearer {token}"})
+    assert resp.status == 200
+    assert [job["name"] for job in json.loads(await resp.read())["jobs"]] == ["Daily check"]
+
+
+def test_channel_context_uses_the_loop_cron_service(tmp_path: Path) -> None:
+    from nanoclaw.cron.service import CronService
+
+    cron = CronService(tmp_path / "cron" / "jobs.json")
+    ws_dir = tmp_path / "ws"
+    ws_dir.mkdir()
+    agent = AgentLoop(
+        FakeProvider([]), ws_dir, sessions=SessionManager(ws_dir, sessions_root=tmp_path / "s"), cron_service=cron
+    )
+    channel = WebSocketChannel(WebSocketConfig(enabled=True, port=0), agent.bus, agent=agent, app_config=Config())
+    assert channel.context.cron is cron
+
+
 async def test_http_mutation_paths_require_the_socket(harness: Harness) -> None:
     for path in ("/api/sessions/websocket%3Ax/delete", "/api/webui/sidebar-state/update"):
         resp = await harness.get(path)

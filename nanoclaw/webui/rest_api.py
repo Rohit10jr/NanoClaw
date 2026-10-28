@@ -2,6 +2,7 @@
 
 Ported from nanobot/webui/ws_http.py (c4dac64): the session routes
 (``_dispatch_session_routes`` :831, ``_handle_sessions_list`` :978,
+``_handle_session_automations`` :1348, ``_handle_webui_automations`` :1457,
 ``_handle_webui_thread_get`` :1193, ``_handle_prompt_index_get`` :1093,
 ``_handle_webui_trace_detail_get`` :1302, ``_handle_session_context_get``
 :960), ``_handle_commands`` :1737, ``_handle_workspaces`` :1742, the sidebar
@@ -13,8 +14,9 @@ and every route answers ``401 Unauthorized`` without a valid API token.
 
 nanobot runs mutations only through the socket's ``webui_request``; a plain
 HTTP call to a mutation path answers 405 (ws_http.py:483). This module
-registers the ``sidebar.update`` mutation in ``ctx.mutations`` (the channel
-owns ``session.delete``) and answers 405 on the mutation paths it knows.
+registers the ``sidebar.update`` and ``automation.enable`` / ``disable`` /
+``delete`` / ``run`` mutations in ``ctx.mutations`` (the channel owns
+``session.delete``) and answers 405 on the mutation paths it knows.
 
 What differs from nanobot (deliberately):
 
@@ -30,11 +32,17 @@ What differs from nanobot (deliberately):
 - Sidebar state lives at ``<webui history dir>/sidebar-state.json``
   (``~/.nanoclaw/webui/<workspace-id>/``), per workspace like NanoClaw's
   sessions; nanobot keeps one per data directory.
+- Automations are the cron jobs of ``ctx.cron`` only (NanoClaw has no
+  local triggers). ``automation.update`` / ``automation.change-chat`` and
+  ``GET /api/webui/automations/result`` / ``chats`` are not served (the
+  Session details popover's edit form answers ``unknown WebUI mutation
+  action``).
 - No gateway-update maintenance (503) or slow-request diagnostics.
 """
 
 from __future__ import annotations
 
+import asyncio
 import gzip
 import json
 import math
@@ -52,7 +60,10 @@ from aiohttp import web
 from loguru import logger
 
 from nanoclaw.command.builtin import builtin_command_palette
+from nanoclaw.cron.session_turns import is_bound_cron_job
 from nanoclaw.webui.context import WebUIContext, default_workspace_scope_payload
+from nanoclaw.webui.inbound_commands import mutation_query_value
+from nanoclaw.webui.session_automations import all_automations_payload, session_automations_payload
 from nanoclaw.webui.session_identity import is_webui_session_key
 from nanoclaw.webui.session_list_index import webui_sessions_payload
 from nanoclaw.webui.transcript import (
@@ -399,6 +410,131 @@ async def _handle_session_context(request: web.Request) -> web.Response:
     if session is None:
         return _error(404, "session not found")
     return _json_response(session_context_payload(session))
+
+
+# --- automations (ws_http.py:1348, :1410-1630) ------------------------------------
+
+
+def pending_cron_job_ids(ctx: WebUIContext, session_key: str) -> set[str]:
+    """Cron jobs waiting for or running in the session (nanobot
+    ``cron_pending_job_ids``: ``agent.pending_cron_job_ids_for_session``)."""
+    lookup = getattr(ctx.loop, "pending_cron_job_ids_for_session", None)
+    if lookup is None:
+        return set()
+    try:
+        return set(lookup(session_key))
+    except Exception:
+        logger.exception("webui pending cron lookup failed")
+        return set()
+
+
+def _pending_cron_job_ids_for_all(ctx: WebUIContext) -> set[str]:
+    if ctx.cron is None:
+        return set()
+    pending: set[str] = set()
+    for job in ctx.cron.list_jobs(include_disabled=True):
+        session_key = job.payload.session_key
+        if not session_key and job.payload.origin_channel and job.payload.origin_chat_id:
+            session_key = f"{job.payload.origin_channel}:{job.payload.origin_chat_id}"
+        if session_key:
+            pending.update(pending_cron_job_ids(ctx, session_key))
+    return pending
+
+
+def _webui_automations_response(ctx: WebUIContext) -> web.Response:
+    return _json_response(
+        all_automations_payload(
+            ctx.cron,
+            sessions=ctx.sessions,
+            pending_job_ids=_pending_cron_job_ids_for_all(ctx),
+        )
+    )
+
+
+async def _handle_session_automations(request: web.Request) -> web.Response:
+    """GET /api/sessions/<key>/automations (ws_http.py:1348)."""
+    if not _authorized(request):
+        return _unauthorized()
+    key = _decode_api_key(_raw_session_segment(request))
+    if key is None:
+        return _error(400, "invalid session key")
+    if not is_webui_session_key(key):
+        return _error(404, "session not found")
+    ctx = _ctx(request)
+    return _json_response(
+        session_automations_payload(
+            ctx.cron,
+            key,
+            sessions=ctx.sessions,
+            pending_job_ids=pending_cron_job_ids(ctx, key),
+        )
+    )
+
+
+async def _handle_webui_automations(request: web.Request) -> web.Response:
+    """GET /api/webui/automations (ws_http.py:1457)."""
+    if not _authorized(request):
+        return _unauthorized()
+    return _webui_automations_response(_ctx(request))
+
+
+_AUTOMATION_RUN_TASKS: set[asyncio.Task[bool]] = set()
+
+
+def _log_automation_run_result(task: asyncio.Task[bool]) -> None:
+    _AUTOMATION_RUN_TASKS.discard(task)
+    if task.cancelled():
+        return
+    try:
+        ran = task.result()
+    except Exception:
+        logger.exception("WebUI automation run-now task failed")
+        return
+    if not ran:
+        logger.warning("WebUI automation run-now task did not execute")
+
+
+def _automation_action_mutation(ctx: WebUIContext, action: str):
+    async def automation_action(payload: dict[str, Any]) -> web.Response:
+        """``webui_request`` ``automation.<action>`` (ws_http.py:1528
+        ``_handle_webui_automation_action``), cron jobs only."""
+        cron = ctx.cron
+        if cron is None:
+            return _error(503, "automation service unavailable")
+        job_id = (mutation_query_value(payload, "id") or mutation_query_value(payload, "job_id") or "").strip()
+        if not job_id:
+            return _error(400, "missing automation id")
+        job = cron.get_job(job_id)
+        if job is None:
+            return _error(404, "automation not found")
+        if job.payload.kind == "system_event":
+            return _error(403, "system automation is protected")
+        if action in {"enable", "run"} and not is_bound_cron_job(job):
+            return _error(409, "automation has no linked chat")
+
+        if action == "enable":
+            if cron.enable_job(job_id, enabled=True) is None:
+                return _error(404, "automation not found")
+        elif action == "disable":
+            if cron.enable_job(job_id, enabled=False) is None:
+                return _error(404, "automation not found")
+        elif action == "delete":
+            result = cron.remove_job(job_id)
+            if result == "not_found":
+                return _error(404, "automation not found")
+            if result == "protected":
+                return _error(403, "system automation is protected")
+        elif action == "run":
+            if not job.enabled:
+                return _error(409, "automation is disabled")
+            task = asyncio.create_task(cron.run_job(job_id, force=False))
+            _AUTOMATION_RUN_TASKS.add(task)
+            task.add_done_callback(_log_automation_run_result)
+        else:
+            return _error(404, "unknown automation action")
+        return _webui_automations_response(ctx)
+
+    return automation_action
 
 
 # --- commands, workspaces -------------------------------------------------------
@@ -1037,9 +1173,12 @@ def register_rest_routes(app: web.Application, ctx: WebUIContext) -> None:
     """
     app[_CTX_KEY] = ctx
     ctx.mutations["sidebar.update"] = _sidebar_update_mutation(ctx)
+    for action in ("enable", "disable", "delete", "run"):
+        ctx.mutations[f"automation.{action}"] = _automation_action_mutation(ctx, action)
     for path in (
         "/api/webui/sidebar-state/update",
         "/api/sessions/{key}/delete",
+        "/api/webui/automations/{action:(enable|disable|delete|run|update|change-chat)}",
         "/api/workspaces/favorite",
         "/api/workspaces/resolve-project",
     ):
@@ -1050,6 +1189,8 @@ def register_rest_routes(app: web.Application, ctx: WebUIContext) -> None:
         ("/api/sessions/{key}/webui-thread/trace-detail", _handle_trace_detail),
         ("/api/sessions/{key}/webui-thread", _handle_webui_thread),
         ("/api/sessions/{key}/context", _handle_session_context),
+        ("/api/sessions/{key}/automations", _handle_session_automations),
+        ("/api/webui/automations", _handle_webui_automations),
         ("/api/commands", _handle_commands),
         ("/api/workspaces", _handle_workspaces),
         ("/api/webui/sidebar-state", _handle_sidebar_state),

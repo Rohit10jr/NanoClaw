@@ -71,10 +71,11 @@ from nanoclaw.webui.gateway_http import WebUIGatewayHTTP, http_error, resolve_we
 from nanoclaw.webui.gateway_tokens import GatewayTokenStore
 from nanoclaw.webui.history import WebUIHistoryStore
 from nanoclaw.webui.http_utils import normalize_config_path, strip_trailing_slash
-from nanoclaw.webui.inbound_commands import WebUICommandRouter, mutation_error, mutation_json
+from nanoclaw.webui.inbound_commands import WebUICommandRouter, mutation_error, mutation_json, mutation_query_value
 from nanoclaw.webui.metadata import WEBSOCKET_TURN_OWNER_METADATA_KEY, WEBUI_TURN_METADATA_KEY
 from nanoclaw.webui.outbound_projection import WebUIOutboundProjector, WireFrame, lifecycle_outbound
 from nanoclaw.webui.outbound_wire import encode_goal_status
+from nanoclaw.webui.session_automations import serialize_automation_jobs, session_automation_jobs
 from nanoclaw.webui.session_identity import is_webui_session_key, webui_chat_id, webui_session_key
 from nanoclaw.webui.session_list_index import (
     WORKSPACE_SCOPE_METADATA_KEY,
@@ -230,6 +231,7 @@ class WebSocketChannel(BaseChannel):
             workspace=agent.workspace,
             check_auth=self.tokens.check_api_token,
             channel=self,
+            cron=getattr(agent, "cron_service", None),
         )
         self.context.mutations["session.delete"] = self._mutation_session_delete
         self.commands = WebUICommandRouter(self)
@@ -777,8 +779,12 @@ class WebSocketChannel(BaseChannel):
 
     async def _mutation_session_delete(self, payload: dict[str, Any]) -> web.Response:
         """``session.delete``: stop the chat's work, delete its session and
-        history. (nanobot ws_http.py:1367 ``_handle_session_delete``, without
-        the automation check: NanoClaw keeps no session-bound automations list)"""
+        history. (nanobot ws_http.py:1367 ``_handle_session_delete``)
+
+        A chat with bound cron jobs is not deleted: the answer is
+        ``{"deleted": false, "blocked_by_automations": true, "automations":
+        [...]}`` until the request carries ``delete_automations`` (true,
+        ``"1"`` or ``"yes"``), which removes those jobs first."""
         raw_key = payload.get("key")
         if not isinstance(raw_key, str) or not raw_key.strip():
             return mutation_error(400, "missing session key")
@@ -787,6 +793,20 @@ class WebSocketChannel(BaseChannel):
             return mutation_error(400, "invalid session key")
         if not is_webui_session_key(key):
             return mutation_error(404, "session not found")
+        delete_automations = (mutation_query_value(payload, "delete_automations") or "").lower()
+        cron = self.context.cron
+        automation_jobs = session_automation_jobs(cron, key)
+        if automation_jobs and delete_automations not in {"1", "true", "yes"}:
+            return mutation_json(
+                {
+                    "deleted": False,
+                    "blocked_by_automations": True,
+                    "automations": serialize_automation_jobs(automation_jobs),
+                }
+            )
+        if cron is not None:
+            for job in automation_jobs:
+                cron.remove_job(job.id)
         await self.agent.cancel_active_tasks(key)
         self.agent.discard_session_file_state(key)
         deleted = delete_webui_session(self.sessions, self.history, key)
