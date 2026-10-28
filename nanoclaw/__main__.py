@@ -499,6 +499,30 @@ def _config_command(action: str | None) -> int:
     return 2
 
 
+def _channels_command(action: str, name: str | None) -> int:
+    """``nanoclaw channels status`` (nanobot ``channels status``, cli/commands.py:499) and
+    ``nanoclaw channels validate telegram`` (nanobot's WebUI channel check,
+    channels/validation.py ``validate_channel_config``)."""
+    try:
+        config = _runtime_config()
+    except ConfigLoadError as exc:
+        raise SystemExit(str(exc)) from None
+    if action == "status":
+        print("Channel   Enabled")
+        for label, section in (("Telegram", config.channels.telegram), ("WebSocket", config.channels.websocket)):
+            print(f"{label:<9} {'yes' if section.enabled else 'no'}")
+        return 0
+    from nanoclaw.channels.telegram.validation import validate_channel_config
+
+    result = validate_channel_config(name or "telegram")
+    print(f"{result['name']}: {result['status']} - {result['message']}")
+    for item in result["checks"]:
+        print(f"  [{item['status']}] {item['label']}: {item.get('message', '')}")
+    if identity := result.get("identity"):
+        print(f"  bot: @{identity.get('name', '?')} (id {identity.get('account', '?')})")
+    return 0 if result["status"] in ("connected", "configured") else 1
+
+
 def main(argv: list[str] | None = None, provider: LLMProvider | None = None) -> int:
     parser = argparse.ArgumentParser(prog="nanoclaw", description="A minimal personal AI agent.")
     parser.add_argument("-V", "--version", action="version", version=f"nanoclaw {__version__}")
@@ -602,6 +626,14 @@ def main(argv: list[str] | None = None, provider: LLMProvider | None = None) -> 
         "init", parents=[common], help="write a default config file, or add missing settings to an existing one"
     )
 
+    channels_cmd = commands.add_parser("channels", help="show the chat channels, or check a bot token")
+    channels_actions = channels_cmd.add_subparsers(dest="channels_action", required=True)
+    channels_actions.add_parser("status", parents=[common], help="list the channels and whether they are enabled")
+    channels_validate = channels_actions.add_parser(
+        "validate", parents=[common], help="check a channel's settings (telegram: the bot token, via getMe)"
+    )
+    channels_validate.add_argument("name", nargs="?", default="telegram", choices=["telegram"])
+
     args = parser.parse_args(argv)
     if args.command is None:
         parser.print_help()
@@ -614,6 +646,8 @@ def main(argv: list[str] | None = None, provider: LLMProvider | None = None) -> 
     set_nanoclaw_logs(getattr(args, "logs", False) or verbose)
     if args.command == "config":
         return _config_command(args.config_action)
+    if args.command == "channels":
+        return _channels_command(args.channels_action, getattr(args, "name", None))
 
     config = _with_preset(_runtime_config(), getattr(args, "preset", None))
     # Trusted private ranges web_fetch may reach (nanobot tools.ssrfWhitelist,

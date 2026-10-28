@@ -315,7 +315,7 @@ def load_runtime_config(config_path: Path | None = None, env: Mapping[str, str] 
     return apply_env_overrides(resolve_config_env_vars(load_config(path), config_path=path), env)
 
 
-_SECRET_KEYS = {"apikey"}
+_SECRET_KEYS = {"apikey", "token", "webhooksecrettoken"}  # channel tokens (Telegram bot, web UI)
 
 
 def mask_secrets(data: object) -> object:

@@ -10,8 +10,9 @@ to what NanoClaw has. One asyncio process runs:
 - the ``/health`` endpoint on ``gateway.host``:``gateway.port`` (default
   127.0.0.1:18790; ``GET /health``, at most 64 connections, nanobot's JSON);
 - the channel manager (nanoclaw/channels/manager.py): the enabled channels
-  and the outbound dispatcher. NanoClaw's channel is the web UI
-  (``channels.websocket``, off by default; layer 23).
+  and the outbound dispatcher. NanoClaw's channels are the web UI
+  (``channels.websocket``, off by default; layer 23) and Telegram
+  (``channels.telegram``, off by default; layer 24).
 
 SIGINT / SIGTERM set a shutdown event (a second one cancels the tasks), then
 the channels are stopped, the tasks cancelled and awaited (bounded), the loop
@@ -36,7 +37,7 @@ a legacy ``cron`` expression), the protected ``heartbeat`` job reads
 session-bound jobs run as turns of their session, other agent jobs are
 skipped. The heartbeat needs a delivery target: the most recently used
 session of an enabled channel other than the CLI (a web UI chat,
-``websocket:<chat_id>``). With no channels it finds none and does nothing,
+``websocket:<chat_id>``, or a Telegram chat, ``telegram:<chat_id>``). With no channels it finds none and does nothing,
 as nanobot does with only the CLI.
 
 Left out of nanobot's runtime: background mode (``--background``,
