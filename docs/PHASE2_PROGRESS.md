@@ -182,6 +182,15 @@ Legend: ⏳ in progress · ✅ done and verified · ⛔ blocked
 | Docs | note 24, CODE_MAP, README, ROADMAP | main session | — | ✅ |
 | PR | `p2/layer-24` → `main` | main session | PR #16 | ✅ |
 
+## Layer 25 — skills and plugins (`p2/layer-25`) ⏳
+
+| Task | Scope (files) | Sub-agent | Verification | Status |
+|---|---|---|---|---|
+| 25.1 Skills catch-up | `skill_metadata.py`, per-prompt skill snapshot, `disabledSkills`, skills shown as disabled (CLI, web UI), the built-in `cron` skill | sub-agent (worktree), parallel | | ⏳ |
+| 25.2 Agent plugins | `agent/plugins.py` (packages in `plugins/`, approval bound to content), plugin skills, `read_file` allowance, plugin MCP servers, `nanoclaw plugins` | sub-agent (worktree), parallel | | ⏳ |
+| 25.3 `my` tool and skill | nanobot's `my` tool (inspect the agent's own setup), the `my` skill | sub-agent (worktree), parallel | | ⏳ |
+| Integration, mutation checks, docs, PR | | | | |
+
 ## Blockers and open items
 
 | Item | Status |
@@ -189,5 +198,5 @@ Legend: ⏳ in progress · ✅ done and verified · ⛔ blocked
 | Real-model tests need API keys as environment secrets | Open; FakeProvider only until then |
 | Live Telegram test needs a bot token | Open; mocked tests until then |
 | Windows shell (16.4) not yet run on Windows | Needs a run of `uv run pytest` on Windows by the user |
-| PRs #2–#4 merged; #5–#15 (layers 13–23) open; later layers stacked on them | — |
+| PRs #2–#4 merged; #5–#16 (layers 13–24) open; later layers stacked on them | — |
 | Rewrite earlier commits to the user's author | After phase 2 (user decision) |
