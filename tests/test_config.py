@@ -446,7 +446,7 @@ def test_cli_config_init_and_show(tmp_path, monkeypatch, capsys):
     assert (defaults["modelPreset"], defaults["reasoningEffort"], defaults["dream"]) == (
         None,
         None,
-        {"modelOverride": None},
+        {"enabled": True, "intervalH": 2, "modelOverride": None},  # nanobot: no "cron" when unset
     )
     assert main(["config", "init", "-c", str(path)]) == 0
     assert "already up to date" in capsys.readouterr().out

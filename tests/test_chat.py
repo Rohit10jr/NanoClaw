@@ -213,6 +213,7 @@ def test_help_text():
             "/dream-log — Show what the last Dream consolidation changed.",
             "/dream-restore — Revert memory to a previous Dream snapshot.",
             "/dream-prompt [init] — Tell Dream how to organize this workspace's memory.",
+            "/evaluator-prompt [init] — Customize the heartbeat notification gate prompt for this workspace.",
             "/skill — List all enabled skills available to the agent.",
             "/help — List available slash commands.",
         ]

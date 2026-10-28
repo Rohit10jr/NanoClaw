@@ -2,10 +2,10 @@
 
 Mirrors nanobot/command/builtin.py for the commands NanoClaw has (/new,
 /compact, /stop, /status, /model, /history, /dream, /dream-log,
-/dream-restore, /dream-prompt, /skill, /help), with nanobot's spec fields and
+/dream-restore, /dream-prompt, /evaluator-prompt, /skill, /help), with nanobot's spec fields and
 texts. Handlers return an :class:`OutboundMessage` instead of
 printing, so any channel can show them. nanobot's other commands (/restart,
-/goal, /trigger, /evaluator-prompt, /pairing, the ``!`` shell) need features
+/goal, /trigger, /pairing, the ``!`` shell) need features
 NanoClaw does not have yet.
 """
 
@@ -47,7 +47,7 @@ CommandLifecycle = Literal[
 # nanobot writes "🐈 nanobot" in its help and status texts; NanoClaw's
 # terminal name is plain "nanoclaw" (cli/stream.py BOT_NAME).
 BOT_LABEL = "nanoclaw"
-# Where nanobot's texts say "nanobot's default" (/dream-prompt).
+# Where nanobot's texts say "nanobot's default" (/dream-prompt, /evaluator-prompt).
 PRODUCT_NAME = "nanoclaw"
 
 _HISTORY_DEFAULT_COUNT = 10
@@ -148,6 +148,14 @@ BUILTIN_COMMAND_SPECS: tuple[BuiltinCommandSpec, ...] = (
         "/dream-prompt",
         "Dream memory",
         "Tell Dream how to organize this workspace's memory.",
+        "file-text",
+        "[init]",
+        accepts_args=True,
+    ),
+    BuiltinCommandSpec(
+        "/evaluator-prompt",
+        "Heartbeat evaluator",
+        "Customize the heartbeat notification gate prompt for this workspace.",
         "file-text",
         "[init]",
         accepts_args=True,
@@ -388,6 +396,59 @@ async def cmd_dream_prompt(ctx: CommandContext) -> OutboundMessage:
             f"Dream memory instructions: {PRODUCT_NAME} default\n\n"
             f"- Editable file: `{display_path}`\n"
             "- Run `/dream-prompt init` to create an editable copy."
+        )
+
+    return OutboundMessage(
+        channel=ctx.msg.channel,
+        chat_id=ctx.msg.chat_id,
+        content=content,
+        metadata={**dict(ctx.msg.metadata or {}), META_RENDER_AS: "text"},
+    )
+
+
+async def cmd_evaluator_prompt(ctx: CommandContext) -> OutboundMessage:
+    """Show or set up the workspace heartbeat evaluator prompt. (nanobot builtin.py:574)
+
+    nanobot's texts, with "nanoclaw's default" for "nanobot's default".
+    """
+    from nanoclaw.utils.evaluator import (
+        default_evaluator_prompt,
+        evaluator_prompt_file,
+        has_evaluator_prompt_override,
+    )
+
+    workspace = ctx.loop.context.memory.workspace
+    path = evaluator_prompt_file(workspace)
+    display_path = path.relative_to(workspace).as_posix()
+    args = ctx.args.strip().lower()
+
+    if args == "init":
+        if not initialize_workspace_prompt(path, default_evaluator_prompt()):
+            content = (
+                f"Heartbeat evaluator prompt already exists at `{display_path}`.\n\n"
+                f"Edit that file, or delete/empty it to return to {PRODUCT_NAME}'s default."
+            )
+        else:
+            content = (
+                f"Created heartbeat evaluator prompt at `{display_path}`.\n\n"
+                "Edit that file to control when the heartbeat notification gate speaks. "
+                "It must still instruct the model to call the `evaluate_notification` tool, "
+                "otherwise the gate fails closed and stays silent. "
+                f"Delete or empty it to return to {PRODUCT_NAME}'s default."
+            )
+    elif args:
+        content = "Usage: /evaluator-prompt [init]"
+    elif has_evaluator_prompt_override(workspace):
+        content = (
+            "Heartbeat evaluator prompt: custom for this workspace\n\n"
+            f"- Path: `{display_path}`\n"
+            f"- Delete or empty this file to return to {PRODUCT_NAME}'s default."
+        )
+    else:
+        content = (
+            f"Heartbeat evaluator prompt: {PRODUCT_NAME} default\n\n"
+            f"- Editable file: `{display_path}`\n"
+            "- Run `/evaluator-prompt init` to create an editable copy."
         )
 
     return OutboundMessage(
@@ -761,5 +822,7 @@ def register_builtin_commands(router: CommandRouter) -> None:
     router.prefix("/dream-restore ", cmd_dream_restore)
     router.exact("/dream-prompt", cmd_dream_prompt)
     router.prefix("/dream-prompt ", cmd_dream_prompt)
+    router.exact("/evaluator-prompt", cmd_evaluator_prompt)
+    router.prefix("/evaluator-prompt ", cmd_evaluator_prompt)
     router.exact("/skill", cmd_skill)
     router.exact("/help", cmd_help)

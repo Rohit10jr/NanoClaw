@@ -174,7 +174,7 @@ Replies stream word by word, with the model's reasoning shown as dim `✻` lines
 
 In the chat, slash commands: `/new` (start over), `/compact`, `/stop` (cancel
 the running turn and background subagents; finished work is kept), `/status`,
-`/model [preset]`, `/history [n]`, `/dream`, `/dream-log`, `/dream-restore`, `/dream-prompt`, `/skill`, `/help`. While the agent works you see what
+`/model [preset]`, `/history [n]`, `/dream`, `/dream-log`, `/dream-restore`, `/dream-prompt`, `/evaluator-prompt`, `/skill`, `/help`. While the agent works you see what
 it does (`↳ $ ls`, `↳ read notes.txt`), and you can keep typing: a new message
 is folded into the running turn, as in nanobot.
 
@@ -218,8 +218,17 @@ foreground until Ctrl+C or SIGTERM. It answers `GET /health` on
 `gateway.host`:`gateway.port` (default `127.0.0.1:18790`, `--port` to change)
 and summarizes conversations idle for `agents.defaults.idleCompactAfterMinutes`
 (default 15, 0 = off) in the background; `nanoclaw chat` does that too while
-it runs. No channels exist yet, so nothing reaches it from outside; scheduled
-jobs, Telegram and the web UI build on it.
+it runs. It also runs the scheduled jobs: your `cron` jobs, Dream every 2 hours
+(`agents.defaults.dream`: `intervalH`, a legacy `cron` expression, or
+`enabled: false`; each run commits as `dream: periodic memory consolidation`)
+and the heartbeat every 30 minutes (`gateway.heartbeat`: `intervalS`,
+`enabled`). The heartbeat reads the tasks under `## Active Tasks` in the
+workspace's `HEARTBEAT.md`, runs them, and lets a small model call decide
+whether the result is worth sending to your most recent chat
+(`/evaluator-prompt init` copies that decision's instructions to
+`prompts/evaluator.md`). No channels exist yet, so nothing reaches the gateway
+from outside and the heartbeat has nowhere to deliver (it then does nothing,
+as nanobot does with only the CLI); Telegram and the web UI build on it.
 
 ```bash
 uv run nanoclaw gateway            # logs on stderr (--no-logs to hide, -v for debug)

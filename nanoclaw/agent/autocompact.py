@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any, Callable, Coroutine
 from loguru import logger
 
 from nanoclaw.events import NO_EVENTS, EventSink
+from nanoclaw.session.keys import is_dream_session
 from nanoclaw.session.manager import Session, SessionManager
 from nanoclaw.session.summary import SessionSummary, session_summary_from_metadata
 
@@ -34,11 +35,6 @@ if TYPE_CHECKING:
     from nanoclaw.utils.llm_runtime import LLMRuntime
 
 SessionEventFactory = Callable[[str], EventSink]
-
-
-def is_dream_session(key: str) -> bool:
-    """The per-run session namespace owned by Dream. (nanobot session/keys.py:13)"""
-    return key.startswith("dream:")
 
 
 class AutoCompact:

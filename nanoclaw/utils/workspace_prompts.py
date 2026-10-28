@@ -2,10 +2,10 @@
 
 Mirrors nanobot/utils/workspace_prompts.py. A prompt named ``<name>`` can be
 replaced for one workspace by a non-empty ``prompts/<name>.md``; an empty or
-missing file means the built-in default. NanoClaw's overridable prompt is
-Dream's (``prompts/dream.md``, ``MemoryStore._dream_template``, ``/dream-prompt``).
-nanobot's second one, the heartbeat evaluator (``prompts/evaluator.md``),
-uses the same helpers and arrives with heartbeat.
+missing file means the built-in default. The overridable prompts, as in
+nanobot: Dream's (``prompts/dream.md``, ``MemoryStore._dream_template``,
+``/dream-prompt``) and the heartbeat evaluator's (``prompts/evaluator.md``,
+``utils/evaluator.py``, ``/evaluator-prompt``).
 """
 
 from __future__ import annotations
