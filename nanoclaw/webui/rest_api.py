@@ -699,6 +699,138 @@ def _reasoning_effort_values(provider_name: str | None, model: str) -> list[str]
     return list(_DEFAULT_REASONING_EFFORT_VALUES)
 
 
+# nanobot webui/request_settings.py: request-override values whose key names a
+# secret are shown masked.
+_REDACTED_PROVIDER_SECRET = "••••••••"
+_PROVIDER_SECRET_KEYS = frozenset({
+    "auth", "authentication", "authorization", "bearer", "cookie", "credential", "credentials",
+    "hmac", "key", "passphrase", "passwd", "proxyauthorization", "setcookie", "sig", "signature",
+})
+_PROVIDER_SECRET_KEY_SUFFIXES = (
+    "accesskey", "apikey", "encryptionkey", "password", "privatekey", "secret", "secretkey",
+    "signingkey", "subscriptionkey", "token",
+)
+
+
+def _is_secret_key(key: Any) -> bool:
+    compact = re.sub(r"[^a-z0-9]", "", str(key).lower())
+    return compact in _PROVIDER_SECRET_KEYS or compact.endswith(_PROVIDER_SECRET_KEY_SUFFIXES)
+
+
+def _redact_request_secrets(value: Any, *, secret: bool = False) -> Any:
+    if secret and value not in (None, ""):
+        return _REDACTED_PROVIDER_SECRET
+    if isinstance(value, dict):
+        return {key: _redact_request_secrets(item, secret=_is_secret_key(key)) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact_request_secrets(item) for item in value]
+    return value
+
+
+def _mask_secret_hint(secret: str | None) -> str | None:
+    """nanobot settings_models.py ``mask_secret_hint``."""
+    if not secret:
+        return None
+    if len(secret) <= 8:
+        return "••••"
+    return f"{secret[:4]}••••{secret[-4:]}"
+
+
+def _provider_requires_api_key(spec: Any) -> bool:
+    return not (spec.is_local or spec.is_direct)
+
+
+def _provider_requires_api_base(spec: Any) -> bool:
+    return bool(spec.backend == "openai_compat" and spec.is_direct and not spec.default_api_base)
+
+
+def _provider_configured(spec: Any, entry: Any) -> bool:
+    """nanobot settings_models.py ``provider_configured_for_settings`` (no OAuth/Bedrock)."""
+    if _provider_requires_api_base(spec):
+        return bool(entry.api_base)
+    if _provider_requires_api_key(spec):
+        return bool(entry.api_key)
+    return bool(entry.api_key or entry.api_base)
+
+
+def _model_catalog_kind(spec: Any) -> str:
+    """nanobot settings_models.py ``model_catalog_kind``."""
+    if spec.backend != "openai_compat":
+        return "unsupported"
+    if spec.is_local:
+        return "local"
+    if spec.is_direct:
+        return "custom"
+    if spec.is_gateway:
+        return "catalog"
+    return "official"
+
+
+def _provider_row(name: str, spec: Any, entry: Any, *, is_custom: bool, active: bool) -> dict[str, Any]:
+    """nanobot settings_models.py ``_provider_settings_row`` over NanoClaw's registry.
+
+    NanoClaw has no OAuth providers and no request-API selection: every row
+    is ``api_key``-authenticated and speaks its backend's one API. The
+    active provider also counts as configured when its entry has a key or a
+    base, which is what NanoClaw needs to call it (an env-only
+    ``NANOCLAW_API_KEY`` fills ``custom`` with a key and no base; NanoClaw
+    then uses OpenAI's base, where nanobot would ask for one).
+    """
+    apis = ["anthropic_messages"] if spec.backend == "anthropic" else ["chat_completions"]
+    configured = _provider_configured(spec, entry) or (active and bool(entry.api_key or entry.api_base))
+    advanced = ["extra_headers", "extra_body", "extra_query", "use_proxy"]
+    if is_custom:
+        advanced.append("thinking_style")
+    return {
+        "name": name,
+        "label": spec.label,
+        "is_custom": is_custom,
+        "configured": configured,
+        "auth_type": "api_key",
+        "api_key_required": _provider_requires_api_key(spec),
+        "api_key_hint": _mask_secret_hint(entry.api_key),
+        "api_base": entry.api_base,
+        "default_api_base": spec.default_api_base or None,
+        "model_selectable": True,
+        "model_catalog": _model_catalog_kind(spec),
+        "request_apis": apis,
+        "adapter_request_apis": apis,
+        "api": None,
+        "provider_api_configurable": False,
+        "model_api_configurable": False,
+        "advanced_fields": advanced,
+        "extra_headers": _redact_request_secrets(entry.extra_headers),
+        "extra_body": _redact_request_secrets(entry.extra_body),
+        "extra_query": _redact_request_secrets(entry.extra_query),
+        "thinking_style": entry.thinking_style,
+        "region": None,
+        "profile": None,
+        "use_proxy": False,
+    }
+
+
+def provider_settings_rows(config: Any, active_provider: str | None) -> list[dict[str, Any]]:
+    """One row per registry provider, then one per custom ``providers`` entry
+    (nanobot ``_provider_settings_rows`` + its dynamic providers)."""
+    from dataclasses import replace
+
+    from nanoclaw.config.schema import ProviderConfig
+    from nanoclaw.providers.registry import PROVIDERS, find_by_name
+
+    rows = []
+    for spec in PROVIDERS:
+        found = config.provider_entry(spec.name)
+        entry = found[1] if found else ProviderConfig()
+        rows.append(_provider_row(spec.name, spec, entry, is_custom=False, active=spec.name == active_provider))
+    custom_spec = find_by_name("custom")
+    assert custom_spec is not None
+    for key, entry in config.custom_providers().items():
+        label = entry.display_name or key.replace("-", " ").replace("_", " ").title()
+        spec = replace(custom_spec, name=key, display_name=label)
+        rows.append(_provider_row(key, spec, entry, is_custom=True, active=key == active_provider))
+    return rows
+
+
 def _preset_row(config: Any, name: str, preset: Any, *, active: bool, is_default: bool) -> dict[str, Any]:
     resolved = config.get_provider_name(preset.model, preset=preset)
     row: dict[str, Any] = {
@@ -718,7 +850,7 @@ def _preset_row(config: Any, name: str, preset: Any, *, active: bool, is_default
     if not is_default:
         for field in ("extra_headers", "extra_body", "extra_query"):
             value = getattr(preset, field, None)
-            row[field] = {k: "********" for k in value} if field == "extra_headers" and value else value
+            row[field] = _redact_request_secrets(value)
     row["reasoning_effort_values"] = _reasoning_effort_values(resolved or preset.provider, preset.model)
     return row
 
@@ -764,7 +896,7 @@ def settings_payload(ctx: WebUIContext) -> dict[str, Any]:
         "model_call_order": [],
         "model_call_order_editable": False,
         "model_configuration_migratable": False,
-        "providers": [],
+        "providers": provider_settings_rows(config, provider_name),
         "web_search": {
             "provider": "duckduckgo", "api_key_hint": None, "base_url": None,
             "max_results": 5, "timeout": 30,

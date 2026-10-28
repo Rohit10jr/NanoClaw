@@ -478,6 +478,117 @@ async def test_settings_follows_the_active_preset(client, ctx):
     assert {p["name"]: p["active"] for p in body["model_presets"]} == {"default": False, "fast": True}
 
 
+def _needs_setup(settings: dict, scoped_preset: str | None = None) -> bool:
+    """The frontend's gate on sending (webui/src/components/thread/model-preset.ts
+    ``toModelBadgeInfo``): the composer shows "Choose your AI" and refuses to
+    send while this is true. ``inferProviderFromModelName`` is not ported: it
+    only matters when a preset names no provider at all."""
+    presets = settings.get("model_presets") or []
+    if scoped_preset:
+        preset = next((p for p in presets if p["name"] == scoped_preset), None)
+    else:
+        configured = settings["agent"].get("model_preset") or "default"
+        preset = next((p for p in presets if p["name"] == configured), None) or next(
+            (p for p in presets if p["active"]), None)
+    model = (preset or {}).get("model") if scoped_preset else (settings["agent"].get("model") or None)
+    raw = (preset or {}).get("provider") or (None if scoped_preset else settings["agent"].get("provider")) or None
+    if raw == "auto":
+        provider = (preset or {}).get("resolved_provider") or (
+            None if scoped_preset else settings["agent"].get("resolved_provider")) or None
+    else:
+        provider = raw
+    row = next((r for r in settings.get("providers") or [] if r["name"] == provider), None) if provider else None
+    return not model or not provider or row is None or not row["configured"]
+
+
+async def _settings_for(client, ctx, raw_config: dict, env: dict | None = None) -> dict:
+    from nanoclaw.config.loader import apply_env_overrides
+
+    config = Config.model_validate(raw_config)
+    ctx.config = apply_env_overrides(config, env or {}) if env is not None else config
+    resp = await client.get("/api/settings", headers=AUTH)
+    assert resp.status == 200
+    return await resp.json()
+
+
+async def test_settings_active_provider_row_is_configured(client, ctx):
+    body = await _settings_for(client, ctx, {
+        "agents": {"defaults": {"model": "anthropic/claude-sonnet-4"}},
+        "providers": {"anthropic": {"apiKey": "sk-ant-0123456789abcdef"}},
+    })
+    assert body["agent"]["provider"] == body["agent"]["resolved_provider"] == "anthropic"
+    rows = {row["name"]: row for row in body["providers"]}
+    assert rows["anthropic"]["configured"] is True
+    assert rows["anthropic"]["label"] == "Anthropic"
+    assert rows["anthropic"]["api_key_hint"] == "sk-a••••cdef"
+    assert "sk-ant-0123456789abcdef" not in json.dumps(body)
+    assert rows["openai"]["configured"] is False
+    assert rows["custom"]["is_custom"] is False and rows["custom"]["model_catalog"] == "custom"
+    assert not _needs_setup(body)
+
+
+async def test_settings_env_only_key_configures_custom(client, ctx):
+    """Phase 1's ``NANOCLAW_API_KEY`` alone: ``custom`` gets the key (no base,
+    NanoClaw then calls api.openai.com); the UI must still let the user send."""
+    body = await _settings_for(client, ctx, {}, env={"NANOCLAW_API_KEY": "sk-env-0123456789", "NANOCLAW_MODEL": "gpt-4o"})
+    assert body["agent"]["model"] == "gpt-4o"
+    assert body["agent"]["resolved_provider"] == "custom"
+    rows = {row["name"]: row for row in body["providers"]}
+    assert rows["custom"]["configured"] is True
+    assert rows["custom"]["api_base"] is None
+    assert not _needs_setup(body)
+
+
+async def test_settings_env_key_and_base(client, ctx):
+    body = await _settings_for(client, ctx, {}, env={
+        "NANOCLAW_API_KEY": "k", "NANOCLAW_API_BASE": "http://localhost:9999/v1", "NANOCLAW_MODEL": "my-model"})
+    rows = {row["name"]: row for row in body["providers"]}
+    assert body["agent"]["resolved_provider"] == "custom"
+    assert rows["custom"]["configured"] is True
+    assert rows["custom"]["api_base"] == "http://localhost:9999/v1"
+    assert rows["custom"]["api_key_hint"] == "••••"
+    assert not _needs_setup(body)
+
+
+async def test_settings_without_any_provider_needs_setup(client, ctx):
+    body = await _settings_for(client, ctx, {"agents": {"defaults": {"model": "gpt-4o"}}})
+    assert body["agent"]["resolved_provider"] == "auto"
+    assert not any(row["configured"] for row in body["providers"])
+    assert _needs_setup(body)
+
+
+async def test_settings_forced_provider_and_scoped_preset(client, ctx):
+    body = await _settings_for(client, ctx, {
+        "agents": {"defaults": {"model": "deepseek-chat", "provider": "deepseek"}},
+        "providers": {"deepseek": {"apiKey": "sk-deep-123456789"}},
+        "modelPresets": {
+            "fast": {"model": "gpt-4o-mini", "provider": "openai"},
+            "local": {"model": "llama3.2", "provider": "ollama"},
+        },
+    })
+    assert body["agent"]["provider"] == "deepseek"
+    assert not _needs_setup(body)
+    # A chat pinned to a preset whose provider has no key asks for setup, as in nanobot.
+    assert _needs_setup(body, "fast")
+    assert _needs_setup(body, "local")  # Ollama without an apiBase is not configured
+
+
+async def test_settings_custom_provider_entries_and_redaction(client, ctx):
+    body = await _settings_for(client, ctx, {
+        "agents": {"defaults": {"model": "companyProxy/gpt-4"}},
+        "providers": {"companyProxy": {"apiBase": "https://proxy.example/v1", "displayName": "Company",
+                                       "extraHeaders": {"Authorization": "Bearer s3cret", "X-Team": "ai"}}},
+    })
+    rows = {row["name"]: row for row in body["providers"]}
+    row = rows["companyProxy"]
+    assert row["is_custom"] is True and row["label"] == "Company" and row["configured"] is True
+    assert row["extra_headers"] == {"Authorization": "••••••••", "X-Team": "ai"}
+    assert "thinking_style" in row["advanced_fields"]
+    assert body["agent"]["resolved_provider"] == "companyProxy"
+    assert not _needs_setup(body)
+    assert list(rows)[-1] == "companyProxy"  # custom entries after the registry rows
+
+
 async def test_pairing_is_empty(client):
     resp = await client.get("/api/settings/pairing", headers=AUTH)
     assert resp.status == 200
