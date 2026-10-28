@@ -121,11 +121,20 @@ Legend: ⏳ in progress · ✅ done and verified · ⛔ blocked
 | Docs | note 19, CODE_MAP, README, ROADMAP, note 08 | main session | — | ✅ |
 | PR | `p2/layer-19` → `main` | main session | PR #11 | ✅ |
 
+## Layer 20 — providers: registry, presets, `/model`, Anthropic, fallback (`p2/layer-20`) ⏳
+
+| Task | Scope (files) | Sub-agent | Verification | Status |
+|---|---|---|---|---|
+| 20.1 Registry, presets, `/model` | `providers/registry.py`, `factory.py`, model presets and runtime, `--preset`, `/model`, config | sub-agent (worktree), phase A | | ⏳ |
+| 20.2 Anthropic adapter | new `providers/anthropic_provider.py`, `anthropic` dependency | sub-agent (worktree), phase A | | ⏳ |
+| 20.3 Fallback models | `providers/fallback_provider.py`, `fallbackModels` | sub-agent (worktree), phase B | | |
+| Integration, mutation checks, docs, PR | | | | |
+
 ## Blockers and open items
 
 | Item | Status |
 |---|---|
 | Real-model tests need API keys as environment secrets | Open; FakeProvider only until then |
 | Windows shell (16.4) not yet run on Windows | Needs a run of `uv run pytest` on Windows by the user |
-| PRs #2–#4 merged; #5–#10 (layers 13–18) open; later layers stacked on them | — |
+| PRs #2–#4 merged; #5–#11 (layers 13–19) open; later layers stacked on them | — |
 | Rewrite earlier commits to the user's author | After phase 2 (user decision) |
