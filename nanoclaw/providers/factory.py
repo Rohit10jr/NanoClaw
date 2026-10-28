@@ -14,9 +14,7 @@ Fallback models (``agents.defaults.fallbackModels``) are not wrapped here yet.
 from __future__ import annotations
 
 import importlib
-import inspect
 from collections.abc import Mapping
-from typing import Any
 
 from nanoclaw.config.loader import (
     ENV_API_BASE,
@@ -94,36 +92,18 @@ def _make_anthropic_provider(
     api_key = p.api_key if p else None
     if custom_spec is not None:
         api_key = api_key or "no-key"
-    kwargs: dict[str, Any] = {
-        "api_key": api_key,
-        "api_base": route.api_base,
-        "default_model": route.model,
-        "extra_headers": _provider_extra_headers(spec, p),
-        "extra_body": p.extra_body if p else None,
-        "extra_query": p.extra_query if p else None,
-        "spec": custom_spec,
-        "provider_name": route.provider_name,
-        "reasoning_effort": preset.reasoning_effort,
-    }
-    provider_cls = module.AnthropicProvider
-    # nanobot's constructor arguments; ones the adapter does not take yet are
-    # left out, as long as they are unset.
-    params = inspect.signature(provider_cls).parameters
-    if not any(
-        param.kind is inspect.Parameter.VAR_KEYWORD for param in params.values()
-    ):
-        dropped = {key: value for key, value in kwargs.items() if key not in params}
-        unsupported = [
-            key
-            for key, value in dropped.items()
-            if value is not None and key != "provider_name"
-        ]
-        if unsupported:
-            raise ValueError(
-                f"Provider '{route.provider_name}' does not support {', '.join(unsupported)}."
-            )
-        kwargs = {key: value for key, value in kwargs.items() if key in params}
-    return provider_cls(**kwargs)
+    return module.AnthropicProvider(
+        api_key=api_key,
+        api_base=route.api_base,
+        default_model=route.model,
+        extra_headers=_provider_extra_headers(spec, p),
+        extra_body=p.extra_body if p else None,
+        extra_query=p.extra_query if p else None,
+        spec=custom_spec,
+        provider_name=route.provider_name,
+        # NanoClaw's stand-in for nanobot's provider.generation.reasoning_effort.
+        reasoning_effort=preset.reasoning_effort,
+    )
 
 
 def _make_provider_core(

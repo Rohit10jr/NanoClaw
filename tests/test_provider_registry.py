@@ -411,44 +411,17 @@ def test_anthropic_backend_without_adapter_is_a_clear_error(monkeypatch):
         make_provider(config)
 
 
-def test_anthropic_backend_builds_the_adapter_lazily(monkeypatch):
-    import types
+def test_anthropic_backend_builds_the_real_adapter():
+    from nanoclaw.providers.anthropic_provider import AnthropicProvider
 
-    seen = {}
-
-    class AnthropicProvider:
-        def __init__(
-            self,
-            api_key=None,
-            api_base=None,
-            default_model="",
-            extra_headers=None,
-            extra_body=None,
-        ):
-            seen.update(
-                api_key=api_key,
-                api_base=api_base,
-                default_model=default_model,
-                extra_headers=extra_headers,
-            )
-
-    module = types.ModuleType("nanoclaw.providers.anthropic_provider")
-    module.AnthropicProvider = AnthropicProvider
-    monkeypatch.setitem(sys.modules, "nanoclaw.providers.anthropic_provider", module)
     config = cfg(
-        {"anthropic": {"apiKey": "a", "extraHeaders": {"X": "1"}}},
+        {"anthropic": {"apiKey": "sk-ant-a", "extraHeaders": {"X": "1"}, "extraBody": {"metadata": {"user_id": "u"}}}},
         model="anthropic/claude-opus-4-5",
+        reasoningEffort="high",
     )
-    assert isinstance(make_provider(config), AnthropicProvider)
-    assert seen == {
-        "api_key": "a",
-        "api_base": None,
-        "default_model": "anthropic/claude-opus-4-5",
-        "extra_headers": {"X": "1"},
-    }
-    # A setting the adapter cannot take is refused rather than dropped.
-    effort = cfg(
-        {"anthropic": {"apiKey": "a"}}, model="claude-opus-4-5", reasoningEffort="high"
-    )
-    with pytest.raises(ValueError, match="does not support reasoning_effort"):
-        make_provider(effort)
+    provider = make_provider(config)
+    assert isinstance(provider, AnthropicProvider)
+    assert provider.default_model == "anthropic/claude-opus-4-5"
+    assert provider.reasoning_effort == "high"
+    # The registry prefix is not sent to the API.
+    assert provider._request_model_name(provider.default_model) == "claude-opus-4-5"
