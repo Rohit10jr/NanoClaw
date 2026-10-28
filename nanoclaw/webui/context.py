@@ -52,7 +52,8 @@ class WebUIContext:
     ``mutations`` maps ``webui_request`` actions to handlers. The channel
     registers ``session.delete``; the REST module registers
     ``sidebar.update`` (payload ``{"state": {...}}``, answers the saved
-    state) and ``automation.enable`` / ``disable`` / ``delete`` / ``run``.
+    state), ``automation.enable`` / ``disable`` / ``delete`` / ``run`` and
+    ``settings.pairing.approve`` / ``deny``.
     An action with no handler answers nanobot's
     ``404 unknown WebUI mutation action``.
 
