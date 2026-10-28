@@ -73,10 +73,32 @@ A live test needs a bot token; until then everything runs with mocked bots.
 
 ## Tests
 
-Layer 24 adds 290 tests (3,774 → 4,064): `test_telegram_channel.py` (nanobot's
+Layer 24 adds 433 tests (3,774 → 4,207): `test_telegram_channel.py` (nanobot's
 142 test functions), `test_telegram_validation.py`, `test_telegram_gateway.py`,
-`test_channel_manager_dispatch.py`, `tests/pairing/`.
+`test_channel_manager_dispatch.py`, `test_layer24_gaps.py`, `tests/pairing/`.
 
 ### Mutation checks
 
-MUTATION_RESULTS
+605 rules were broken on purpose:
+
+| Area | Rules | Caught at once | Gaps closed with tests | Equivalent | Result |
+|---|---|---|---|---|---|
+| Telegram channel | 356 | 187 | 161 | 8 | 348 caught |
+| Validation, CLI, config, manager, base channel, splitting | 110 | 41 | 66 | 3 | 107 caught |
+| Pairing, `/pairing`, web UI pairing | 139 | 107 | 28 | 4 | 135 caught |
+
+143 new tests (`test_layer24_gaps.py`) close the gaps, for example: an old
+`"1|a|b"` sender id must not match `allowFrom` `"1"`; startup retry delays
+doubling and resetting; the polling stall watchdog (not in webhook mode);
+table widths for CJK text and escaping in inline code, bold and strike; an
+invalid chat id never retried; the keyboard only on the last chunk; overflowing
+streams sending their middle chunks; the inbound reorder window and one worker
+per session; every token-validation branch; `split_message` boundaries (two
+mutants looped forever, so the test runs the split with a time limit); expired
+pairing codes neither reused nor approvable.
+
+Equivalent (15): checks repeated earlier or later (`"*"` in `allowFrom`, a
+length check at the top of the loop, the mention fallback), an unused constant,
+errors already turned into an exit elsewhere, and parent folders the atomic
+write creates itself.
+
