@@ -71,11 +71,39 @@ fallback chain (20.3).
 
 ## Tests
 
-Layer 20 adds 370 tests (2,226 → 2,596): `test_provider_registry.py`,
+Layer 20 adds 435 tests (2,226 → 2,661, of which 6 skip on Linux): `test_provider_registry.py`,
 `test_openai_compat_spec.py`, `test_model_presets.py`,
 `test_anthropic_provider.py`, `test_anthropic_sdk.py` (the real SDK over a mock
-HTTP transport) and `test_fallback_provider.py`, adapted from nanobot's.
+HTTP transport), `test_fallback_provider.py` and `test_provider_gaps.py`, adapted from nanobot's.
 
 ### Mutation checks
 
-MUTATION_RESULTS
+309 rules were broken on purpose (the run was interrupted by a container
+restart; a second sub-agent finished it from the saved tests and logs):
+
+| Area | Rules | Caught at once | Gaps closed with tests | Equivalent | Result |
+|---|---|---|---|---|---|
+| Registry, routing, factory | 64 | 45 | 14 | 5 | 59 caught |
+| Presets, runtime, `/model`, OpenAI parameters | 85 | 68 | 17 | 0 | 85 caught |
+| Anthropic adapter, thinking blocks | 90 | 75 | 13 | 2 | 88 caught |
+| Fallback and its wiring | 70 | 52 | 16 | 2 | 68 caught |
+
+59 new tests close the gaps, for example: `openrouter/anthropic/claude-x`
+stripped to `claude-x`; dash/underscore normalisation in keyword matching; a
+custom provider without a base never used as a last resort; the Anthropic
+adapter receiving the configured base and extra body; presets saved on `/model`
+and on recovery; empty text blocks dropped and cache markers on the last system
+block; thinking budgets; every `_should_fallback` rule; a fallback that already
+streamed text stops the chain; a fallback model's token count not triggering
+compaction.
+
+Equivalent (9): checks repeated later with the same message (custom provider
+without a base), branches that can't be reached (an Anthropic backend is never
+an `openai_compat` spec), names that are always canonical already, and token
+tables where each entry is also matched by a broader rule.
+
+The layer 16 split `wait_for` test, which had failed now and then in every
+mutation run since layer 17, was finally explained here: its text `ab` appeared
+in the random hex session id about 4% of the time. It now uses letters outside
+hex.
+

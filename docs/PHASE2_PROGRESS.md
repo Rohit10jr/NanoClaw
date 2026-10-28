@@ -121,7 +121,7 @@ Legend: ⏳ in progress · ✅ done and verified · ⛔ blocked
 | Docs | note 19, CODE_MAP, README, ROADMAP, note 08 | main session | — | ✅ |
 | PR | `p2/layer-19` → `main` | main session | PR #11 | ✅ |
 
-## Layer 20 — providers: registry, presets, `/model`, Anthropic, fallback (`p2/layer-20`) ⏳
+## Layer 20 — providers: registry, presets, `/model`, Anthropic, fallback (`p2/layer-20`) ✅
 
 | Task | Scope (files) | Sub-agent | Verification | Status |
 |---|---|---|---|---|
@@ -129,9 +129,9 @@ Legend: ⏳ in progress · ✅ done and verified · ⛔ blocked
 | 20.2 Anthropic adapter | new `providers/anthropic_provider.py`, `anthropic` dependency | sub-agent (worktree), phase A | 134 request/response/stream/error comparisons: 2 deliberate (malformed replay args), 0 unexpected | ✅ |
 | 20.3 Fallback models | `providers/fallback_provider.py`, `fallbackModels` | sub-agent (worktree), phase B | 72 scenarios identical; re-run after merging | ✅ |
 | Integration | merges, factory builds the real Anthropic adapter | main session | No conflicts; comparisons re-run; 2,596 passed, 6 skipped | ✅ |
-| Mutation checks | ~150 rules | sub-agent (worktree) | | ⏳ |
+| Mutation checks | 309 rules | sub-agent (worktree); interrupted by a container restart, finished by a second sub-agent | 300 caught, 9 equivalent (59 tests added); 2,655 passed | ✅ |
 | Docs | note 20, CODE_MAP, README, ROADMAP, notes 01/12 | main session | — | ✅ |
-| PR | `p2/layer-20` → `main` | main session | | ⏳ |
+| PR | `p2/layer-20` → `main` | main session | PR #12 | ✅ |
 
 ## Blockers and open items
 
