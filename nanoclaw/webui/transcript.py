@@ -60,46 +60,15 @@ from nanoclaw.webui.history import (
     record_from_fact,
     turn_records,
 )
+from nanoclaw.webui.metadata import WEBUI_MESSAGE_SOURCE_METADATA_KEY, WEBUI_TURN_METADATA_KEY
+from nanoclaw.webui.outbound_wire import project_tool_events
 from nanoclaw.webui.session_identity import webui_chat_id, webui_session_key
 
 if TYPE_CHECKING:
     from nanoclaw.session.manager import Session
 
-# nanobot webui/metadata.py
-WEBUI_TURN_METADATA_KEY = INBOUND_META_TURN_ID
-WEBUI_MESSAGE_SOURCE_METADATA_KEY = "_webui_message_source"
 # nanobot command/builtin.py: the internal command a WebUI "!cmd" input runs as.
 USER_SHELL_COMMAND = "/__shell"
-_TOOL_EVENT_BINARY_OMISSION = "[binary content omitted from WebUI]"
-
-
-def _is_base64_data_url(value: str) -> bool:
-    candidate = value.lstrip()
-    return candidate[:5].casefold() == "data:" and ";base64," in candidate[:256].casefold()
-
-
-def _project_tool_event_value(value: object) -> Any:
-    """Copy one dynamic value while removing inline binary payloads."""
-    if value is None or isinstance(value, bool | int | float):
-        return value
-    if isinstance(value, str):
-        return _TOOL_EVENT_BINARY_OMISSION if _is_base64_data_url(value) else value
-    if isinstance(value, dict):
-        return {str(key): _project_tool_event_value(item) for key, item in cast(dict[object, object], value).items()}
-    if isinstance(value, list | tuple):
-        return [_project_tool_event_value(item) for item in cast(Sequence[object], value)]
-    return str(value)
-
-
-def project_tool_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Build WebUI-safe tool events (nanobot webui/outbound_wire.py ``project_tool_events``;
-    a private copy so this module does not depend on the outbound wire port)."""
-    projected_events: list[dict[str, Any]] = []
-    for event in events:
-        projected = _project_tool_event_value(cast(object, event))
-        if isinstance(projected, dict):
-            projected_events.append(cast(dict[str, Any], projected))
-    return projected_events
 
 WEBUI_TRANSCRIPT_SCHEMA_VERSION = 3
 WEBUI_FORK_MARKER_EVENT = "fork_marker"

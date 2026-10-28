@@ -25,7 +25,7 @@ from nanoclaw.agent.tools.subagent import SubagentTool
 from nanoclaw.bus.outbound_events import ProgressEvent, StreamDeltaEvent, StreamEndEvent
 from nanoclaw.cli.chat import Chat
 from nanoclaw.config import ChannelsConfig
-from nanoclaw.events import ContextCompactionEvent, EventSink, RetryWaitEvent
+from nanoclaw.events import ContextCompactionEvent, EventSink, RetryStatusEvent, RetryWaitEvent
 from nanoclaw.providers import FakeProvider, LLMResponse, ToolCallRequest
 from nanoclaw.providers.fake import ScriptedStream
 from nanoclaw.session import SessionManager
@@ -66,6 +66,10 @@ class Recorder:
         self.sink = EventSink(self.publish)
 
     async def publish(self, event):
+        if isinstance(event, RetryStatusEvent) and event.state == "cleared" and event.max_attempts is None:
+            # Each request chain resets the retry state (layer 22); a sink
+            # that accepts every event sees this before every request.
+            return
         self.events.append(event)
 
     def summary(self):
@@ -91,6 +95,8 @@ class Recorder:
                 out.append(("retry_wait", e.content))
             elif isinstance(e, ContextCompactionEvent):
                 out.append(("compaction", f"{e.phase}:{e.reason}:{e.notify}"))
+            elif isinstance(e, RetryStatusEvent):
+                out.append(("retry_status", f"{e.state}:{e.attempt}/{e.max_attempts}:{e.error_kind}"))
             else:
                 out.append((type(e).__name__, ""))
         return out
@@ -205,7 +211,9 @@ async def test_retry_waits_become_events(ws, tmp_path, monkeypatch):
     assert result.final_content == "Fine."
     assert rec.summary() == [
         ("retry_wait", "Model request failed, retry in 1s (attempt 1)."),
+        ("retry_status", "waiting:1/4:unknown"),
         ("delta", "Fine."),
+        ("retry_status", "recovered:2/4:unknown"),
         ("end", "final"),
     ]
 

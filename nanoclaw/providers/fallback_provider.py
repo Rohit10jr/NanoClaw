@@ -9,8 +9,6 @@ have it:
 - ``ProviderCallContext`` and its entry points (``chat_with_context``,
   ``chat_stream_with_context``): conversation state, native compaction
   windows and per-call response-source attribution;
-- ``RetryStatusEvent`` callbacks (``on_retry_status``): NanoClaw's retry loop
-  only reports text (``on_retry_wait`` / ``on_retry_exhausted``);
 - per-call ``reasoning_effort``: a NanoClaw provider takes its effort when it
   is built, so each fallback's effort comes with the provider the factory
   builds for its preset;
@@ -29,9 +27,11 @@ from typing import Any
 
 from loguru import logger
 
+from nanoclaw.events import RetryStatusEvent
 from nanoclaw.providers.base import (
     LLMProvider,
     LLMResponse,
+    RetryStatusCallback,
     RetryWaitCallback,
     StreamRecoverCallback,
 )
@@ -245,6 +245,7 @@ class FallbackProvider(LLMProvider):
         retry_mode: str,
         on_retry_wait: RetryWaitCallback | None,
         on_retry_exhausted: RetryWaitCallback | None,
+        on_retry_status: RetryStatusCallback | None = None,
         should_retry_guard: Callable[[], bool] | None = None,
         on_stream_recover: StreamRecoverCallback | None = None,
     ) -> LLMResponse:
@@ -256,6 +257,8 @@ class FallbackProvider(LLMProvider):
                 "on_retry_wait": on_retry_wait,
                 "on_retry_exhausted": on_retry_exhausted,
             })
+            if on_retry_status is not None:
+                call_kwargs["on_retry_status"] = on_retry_status
             if stream:
                 return await self._primary.chat_stream_with_retry(**call_kwargs)
             return await self._primary.chat_with_retry(**call_kwargs)
@@ -295,6 +298,7 @@ class FallbackProvider(LLMProvider):
             retry_mode=retry_mode,
             on_retry_wait=on_retry_wait,
             on_retry_exhausted=on_retry_exhausted,
+            on_retry_status=on_retry_status,
             has_streamed=has_streamed,
             on_stream_recover=recover_stream,
             persistent_retry_guard=should_retry_guard,
@@ -333,31 +337,51 @@ class FallbackProvider(LLMProvider):
         has_streamed: list[bool] | None,
         on_stream_recover: StreamRecoverCallback | None,
         persistent_retry_guard: Callable[[], bool] | None,
+        on_retry_status: RetryStatusCallback | None = None,
     ) -> LLMResponse:
         """Retry each candidate, deferring terminal events until the chain fails."""
 
         async def _call_chain(**chain_kwargs: Any) -> LLMResponse:
             last_exhausted_message: str | None = None
+            last_exhausted_status: RetryStatusEvent | None = None
             primary_attempted = False
             primary_exhausted_message: str | None = None
+            primary_exhausted_status: RetryStatusEvent | None = None
 
             async def _capture_exhaustion(message: str) -> None:
                 nonlocal last_exhausted_message
                 last_exhausted_message = message
 
+            async def _capture_status(status: RetryStatusEvent) -> None:
+                nonlocal last_exhausted_status
+                if status.state == "exhausted":
+                    last_exhausted_status = status
+                elif on_retry_status:
+                    await on_retry_status(status)
+
+            async def _clear_status_for_fallback() -> None:
+                if last_exhausted_status is not None and on_retry_status is not None:
+                    await on_retry_status(replace(last_exhausted_status, state="cleared", next_retry_at=None))
+
             async def _call_candidate(provider: LLMProvider, candidate_kwargs: dict[str, Any]) -> LLMResponse:
-                nonlocal last_exhausted_message, primary_attempted, primary_exhausted_message
+                nonlocal last_exhausted_message, last_exhausted_status
+                nonlocal primary_attempted, primary_exhausted_message, primary_exhausted_status
                 last_exhausted_message = None
+                last_exhausted_status = None
                 if provider is self._primary:
                     primary_attempted = True
-                response = await call(provider, {
+                candidate_call_kwargs = {
                     **candidate_kwargs,
                     "retry_mode": "standard",
                     "on_retry_wait": on_retry_wait,
                     "on_retry_exhausted": _capture_exhaustion,
-                })
+                }
+                if on_retry_status is not None:
+                    candidate_call_kwargs["on_retry_status"] = _capture_status
+                response = await call(provider, candidate_call_kwargs)
                 if provider is self._primary:
                     primary_exhausted_message = last_exhausted_message
+                    primary_exhausted_status = last_exhausted_status
                 return response
 
             response = await self._try_with_fallback(
@@ -365,11 +389,15 @@ class FallbackProvider(LLMProvider):
                 chain_kwargs,
                 has_streamed=has_streamed,
                 on_stream_recover=on_stream_recover,
+                on_fallback_attempt=_clear_status_for_fallback if on_retry_status is not None else None,
             )
             if retry_mode != "persistent" and response.finish_reason == "error":
                 terminal_message = primary_exhausted_message if primary_attempted else last_exhausted_message
+                terminal_status = primary_exhausted_status if primary_attempted else last_exhausted_status
                 if terminal_message and on_retry_exhausted:
                     await on_retry_exhausted(terminal_message)
+                if terminal_status and on_retry_status:
+                    await on_retry_status(terminal_status)
             return response
 
         if retry_mode != "persistent":
@@ -379,6 +407,7 @@ class FallbackProvider(LLMProvider):
             retry_mode="persistent",
             on_retry_wait=on_retry_wait,
             on_retry_exhausted=on_retry_exhausted,
+            on_retry_status=on_retry_status,
             call=_call_chain,
             should_retry_guard=persistent_retry_guard,
             on_stream_recover=on_stream_recover,

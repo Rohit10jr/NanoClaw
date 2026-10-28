@@ -13,10 +13,14 @@ made per bus turn (``AgentLoop._dispatch_one``). It
   lifecycle events (started, running, completed, idle; local subscribers only,
   nanoclaw/bus/runtime_events.py).
 
+Since layer 22 it also records the turn's runtime (``TurnRuntimeAdmitted``),
+per-request usage and the terminal retry status for ``TurnCompleted``, and a
+model error is not sent to a ``websocket`` chat as a reply (the web UI shows
+the failed ``turn_end`` instead), as in nanobot.
+
 Left out: route policies and admission (channel plugins), session
 generations, response-source attribution (no ResponseSourceEvent producer
-yet), scheduled-delivery correlation and the per-turn runtime and usage
-bookkeeping for the WebUI.
+yet) and scheduled-delivery correlation.
 """
 
 from __future__ import annotations
@@ -47,7 +51,9 @@ from nanoclaw.events import (
     RetryStatusEvent,
     RetryWaitEvent,
 )
+from nanoclaw.providers.base import LLMUsage
 from nanoclaw.session.keys import is_internal_session
+from nanoclaw.utils.llm_runtime import LLMRuntime
 
 # Which operation events a channel gets (nanobot bus/notification_delivery.py:21):
 # "lifecycle" only for routes that publish a turn's lifecycle (user turns),
@@ -197,6 +203,8 @@ class TurnDelivery:
     _stream_segment: int = field(init=False, default=0)
     _stream_open: bool = field(init=False, default=False)
     _stop_reason: str | None = field(init=False, default=None)
+    _failure_error_kind: str | None = field(init=False, default=None)
+    _retry_status: RetryStatusEvent | None = field(init=False, default=None)
 
     def __post_init__(self) -> None:
         self._routed_events = _bind_events(self.bus, self.route)
@@ -226,11 +234,23 @@ class TurnDelivery:
                 self.delivery_message, self.session_key, "running", started_at=started_at
             )
 
+    async def runtime_admitted(self, runtime: LLMRuntime) -> None:
+        """Record the turn's runtime; publish it for user turns. (nanobot :297)"""
+        if self.route.publish_lifecycle:
+            await self.runtime_event_publisher.turn_runtime_admitted(self.delivery_message, self.session_key, runtime)
+            return
+        self.runtime_event_publisher.record_turn_runtime(self.session_key, runtime)
+
     def record_latency(self, latency_ms: int | None) -> None:
         self.runtime_event_publisher.record_turn_latency(self.session_key, latency_ms)
 
-    def record_stop_reason(self, stop_reason: str) -> None:
+    def record_usage(self, round_usages: list[LLMUsage]) -> None:
+        """(nanobot :311)"""
+        self.runtime_event_publisher.record_turn_usage(self.session_key, round_usages)
+
+    def record_stop_reason(self, stop_reason: str, *, failure_error_kind: str | None = None) -> None:
         self._stop_reason = stop_reason
+        self._failure_error_kind = failure_error_kind
 
     def background_response(
         self, content: str | None, *, stop_reason: str, streamed: bool, latency_ms: int | None
@@ -262,7 +282,9 @@ class TurnDelivery:
         completed_chat_id = self.lifecycle_message.chat_id
         if response is not None:
             completed_channel, completed_chat_id = response.channel, response.chat_id
-            await self.bus.publish_outbound(response)
+            # The web UI shows a failed turn_end, not the error text (nanobot :375).
+            if response.channel != "websocket" or stop_reason != "error":
+                await self.bus.publish_outbound(response)
         elif self.lifecycle_message.channel == "cli":
             await self.bus.publish_outbound(
                 OutboundMessage(
@@ -274,6 +296,7 @@ class TurnDelivery:
             )
         if publish_completion:
             outcome, failure_kind = _turn_outcome(stop_reason)
+            retry_status = self._retry_status if failure_kind == "model" else None
             await self.runtime_event_publisher.turn_completed(
                 channel=completed_channel,
                 chat_id=completed_chat_id,
@@ -281,6 +304,8 @@ class TurnDelivery:
                 metadata=self.lifecycle_message.metadata,
                 outcome=outcome,
                 failure_kind=failure_kind,
+                failure_error_kind=self._failure_error_kind or (retry_status.error_kind if retry_status else None),
+                failure_attempts=retry_status.attempt if retry_status else None,
             )
 
     async def fail(self, *, publish_completion: bool) -> None:
@@ -318,6 +343,8 @@ class TurnDelivery:
         (nanobot :441)"""
         if isinstance(event, ResponseSourceEvent):
             return
+        if isinstance(event, RetryStatusEvent):
+            self._retry_status = event if event.state == "exhausted" else None
         if isinstance(event, StreamDeltaEvent | StreamEndEvent):
             if not self.streaming:
                 return

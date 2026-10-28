@@ -1,1 +1,1 @@
-"""Backend helpers for the bundled WebUI surface."""
+"""The web UI backend: wire projection and session storage (nanobot webui/)."""

@@ -867,6 +867,79 @@ class TestRetryBeforeFailover:
         factory.assert_not_called()
 
 
+    # --- structured retry lifecycle (layer 22; nanobot test_runner_fallback.py:1213-1310) ---
+
+    @staticmethod
+    def _recorder():
+        from nanoclaw.events import RetryStatusEvent
+
+        statuses: list[RetryStatusEvent] = []
+
+        async def record(status: RetryStatusEvent) -> None:
+            statuses.append(status)
+
+        return statuses, record
+
+    async def test_primary_exhaustion_is_cleared_when_fallback_takes_over(self) -> None:
+        from nanoclaw.events import RetryStatusEvent
+
+        primary = _FakeProvider("primary", responses=[_retryable_error(f"attempt {n}") for n in range(4)])
+        factory = MagicMock(return_value=_FakeProvider("fallback", _make_response("fallback ok")))
+        provider = FallbackProvider(primary, [_fallback("fallback-a")], factory)
+        statuses, record = self._recorder()
+        with patch(SLEEP, new_callable=AsyncMock):
+            result = await provider.chat_with_retry(HI, on_retry_status=record)
+        assert result.content == "fallback ok"
+        assert [s.state for s in statuses] == ["waiting", "waiting", "waiting", "cleared"]
+        assert statuses[-1] == RetryStatusEvent(state="cleared", attempt=4, max_attempts=4, error_kind="server")
+
+    async def test_all_candidates_exhaust_with_one_terminal_status(self) -> None:
+        primary = _FakeProvider("primary", _retryable_error("primary unavailable"))
+        fallback = _FakeProvider("fallback", _retryable_error("fallback unavailable"))
+        provider = FallbackProvider(primary, [_fallback("fallback-a")], MagicMock(return_value=fallback))
+        statuses, record = self._recorder()
+        terminal = AsyncMock()
+        with patch(SLEEP, new_callable=AsyncMock):
+            result = await provider.chat_with_retry(HI, on_retry_exhausted=terminal, on_retry_status=record)
+        assert result.finish_reason == "error"
+        assert "cleared" in [s.state for s in statuses]
+        assert [s.state for s in statuses].count("exhausted") == 1
+        assert statuses[-1].state == "exhausted"
+        terminal.assert_awaited_once_with("Model request failed after 4 attempts, giving up.")
+
+    async def test_fallback_auth_error_keeps_the_primary_exhaustion(self) -> None:
+        from nanoclaw.events import RetryStatusEvent
+
+        primary = _FakeProvider("primary", _make_response("net", finish_reason="error", error_kind="connection"))
+        fallback = _FakeProvider("fallback", _make_response("auth", finish_reason="error", error_status_code=401))
+        provider = FallbackProvider(primary, [_fallback("backup")], MagicMock(return_value=fallback))
+        statuses, record = self._recorder()
+        with patch(SLEEP, new_callable=AsyncMock):
+            await provider.chat_with_retry(HI, on_retry_status=record)
+        assert len(primary.chat_calls) == 4 and len(fallback.chat_calls) == 1
+        assert statuses[-1] == RetryStatusEvent(state="exhausted", attempt=4, max_attempts=4, error_kind="connection")
+
+    async def test_persistent_chain_reports_one_terminal_status(self) -> None:
+        primary = _FakeProvider("primary", _retryable_error("primary unavailable"))
+        fallback = _FakeProvider("fallback", _retryable_error("fallback unavailable"))
+        provider = FallbackProvider(primary, [_fallback("fallback-a")], MagicMock(return_value=fallback))
+        provider._PERSISTENT_IDENTICAL_ERROR_LIMIT = 2
+        statuses, record = self._recorder()
+        with patch(SLEEP, new_callable=AsyncMock):
+            result = await provider.chat_with_retry(HI, retry_mode="persistent", on_retry_status=record)
+        assert result.finish_reason == "error"
+        assert sum(s.state == "exhausted" for s in statuses) == 1
+        assert statuses[-1].state == "exhausted" and statuses[-1].max_attempts is None
+
+    async def test_status_callback_reaches_a_primary_without_fallbacks(self) -> None:
+        primary = _FakeProvider("primary", responses=[_retryable_error("x"), _make_response("ok")])
+        provider = FallbackProvider(primary, [], MagicMock())
+        statuses, record = self._recorder()
+        with patch(SLEEP, new_callable=AsyncMock):
+            assert (await provider.chat_with_retry(HI, on_retry_status=record)).content == "ok"
+        assert [s.state for s in statuses] == ["waiting", "recovered"]
+
+
 class TestFailoverOnArrearageError:
     async def test_non_retryable_quota_tries_configured_fallback(self) -> None:
         primary = _FakeProvider("primary", _make_response(

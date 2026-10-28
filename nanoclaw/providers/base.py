@@ -11,15 +11,18 @@ import asyncio
 import json
 import os
 import re
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from typing import Any
+from typing import Any, Literal
 
 from loguru import logger
+
+from nanoclaw.events import RetryStatusEvent
 
 # Longest silence allowed between two streamed chunks (nanobot base.py:38-40).
 STREAM_IDLE_TIMEOUT_ENV = "NANOCLAW_STREAM_IDLE_TIMEOUT_S"
@@ -32,6 +35,8 @@ RETRY_AFTER_BUFFER = 1
 # Called with a short status text while a retry waits or when retrying stops
 # (nanobot ``RetryEventCallback``).
 RetryWaitCallback = Callable[[str], Awaitable[None]]
+# Called with the structured retry lifecycle (nanobot ``RetryStatusCallback``).
+RetryStatusCallback = Callable[[RetryStatusEvent], Awaitable[None]]
 
 # Streaming callbacks (nanobot base.py:1085 ``chat_stream`` parameters).
 # A tool-call delta is ``{"index", "call_id", "name", "arguments_delta"}``.
@@ -264,6 +269,27 @@ class LLMUsage:
             "context_tokens": self.context_tokens,
             "request_count": self.request_count,
         }
+
+    def to_turn_dict(self) -> dict[str, int]:
+        """The compact per-turn shape the web UI shows (nanobot types.py:206).
+
+        nanobot also adds ``generation_ms`` / ``measured_completion_tokens``
+        and ``ttft_ms`` / ``timed_requests``; NanoClaw does not time requests.
+        """
+        result: dict[str, int] = {
+            "prompt_tokens": self.input_tokens,
+            "completion_tokens": self.output_tokens,
+            "total_tokens": self.total_tokens,
+            "request_count": self.request_count,
+            "estimated_tokens": self.estimated_tokens,
+        }
+        if self.context_tokens is not None:
+            result["context_tokens"] = self.context_tokens
+        if self.cache_read_tokens is not None:
+            result["cached_tokens"] = self.cache_read_tokens
+        if self.cache_write_tokens is not None:
+            result["cache_write_tokens"] = self.cache_write_tokens
+        return result
 
     @classmethod
     def from_dict(cls, value: object) -> LLMUsage | None:
@@ -528,6 +554,7 @@ class LLMProvider(ABC):
         retry_mode: str = "standard",
         on_retry_wait: RetryWaitCallback | None = None,
         on_retry_exhausted: RetryWaitCallback | None = None,
+        on_retry_status: RetryStatusCallback | None = None,
     ) -> LLMResponse:
         """:meth:`chat_stream` under the :meth:`chat_with_retry` policy (nanobot base.py:1230).
 
@@ -572,6 +599,7 @@ class LLMProvider(ABC):
             retry_mode=retry_mode,
             on_retry_wait=on_retry_wait,
             on_retry_exhausted=on_retry_exhausted or on_retry_wait,
+            on_retry_status=on_retry_status,
             should_retry_guard=lambda: not has_streamed_content,
             on_stream_recover=_recover_stream if on_stream_recover else None,
         )
@@ -691,6 +719,7 @@ class LLMProvider(ABC):
         retry_mode: str = "standard",
         on_retry_wait: RetryWaitCallback | None = None,
         on_retry_exhausted: RetryWaitCallback | None = None,
+        on_retry_status: RetryStatusCallback | None = None,
     ) -> LLMResponse:
         """:meth:`chat`, retried on transient failures (nanobot base.py:1299).
 
@@ -716,6 +745,7 @@ class LLMProvider(ABC):
             retry_mode=retry_mode,
             on_retry_wait=on_retry_wait,
             on_retry_exhausted=on_retry_exhausted or on_retry_wait,
+            on_retry_status=on_retry_status,
         )
 
     async def _run_chat_with_retry(
@@ -726,6 +756,7 @@ class LLMProvider(ABC):
         retry_mode: str,
         on_retry_wait: RetryWaitCallback | None,
         on_retry_exhausted: RetryWaitCallback | None,
+        on_retry_status: RetryStatusCallback | None = None,
         should_retry_guard: Callable[[], bool] | None = None,
         on_stream_recover: StreamRecoverCallback | None = None,
     ) -> LLMResponse:
@@ -739,6 +770,7 @@ class LLMProvider(ABC):
             retry_mode=retry_mode,
             on_retry_wait=on_retry_wait,
             on_retry_exhausted=on_retry_exhausted,
+            on_retry_status=on_retry_status,
             call=self.safe_chat_stream if stream else None,
             should_retry_guard=should_retry_guard,
             on_stream_recover=on_stream_recover,
@@ -751,11 +783,16 @@ class LLMProvider(ABC):
         retry_mode: str,
         on_retry_wait: RetryWaitCallback | None,
         on_retry_exhausted: RetryWaitCallback | None = None,
+        on_retry_status: RetryStatusCallback | None = None,
         call: Callable[..., Awaitable[LLMResponse]] | None = None,
         should_retry_guard: Callable[[], bool] | None = None,
         on_stream_recover: StreamRecoverCallback | None = None,
     ) -> LLMResponse:
-        """The retry loop (nanobot base.py:1580), without image stripping or status events.
+        """The retry loop (nanobot base.py:1580), without image stripping.
+
+        ``on_retry_status`` hears the structured lifecycle: ``waiting`` before
+        each wait chunk, ``recovered`` / ``cleared`` when a retried chain ends
+        (only after a retry), ``exhausted`` when retrying gives up.
 
         ``call`` is :meth:`safe_chat` (the default) or :meth:`safe_chat_stream`
         (nanobot base.py:1388). For streams, ``should_retry_guard()`` turns
@@ -768,10 +805,24 @@ class LLMProvider(ABC):
         attempt = 0
         last_error_key: str | None = None
         identical_error_count = 0
+
+        async def _finish_retry_status(state: Literal["recovered", "cleared"], response: LLMResponse) -> None:
+            # nanobot base.py:1600
+            if attempt > 1 and on_retry_status:
+                await on_retry_status(
+                    RetryStatusEvent(
+                        state=state,
+                        attempt=attempt,
+                        max_attempts=None if persistent else len(delays) + 1,
+                        error_kind=self.public_error_kind(response),
+                    )
+                )
+
         while True:
             attempt += 1
             response = await call(**kwargs)
             if response.finish_reason != "error":
+                await _finish_retry_status("recovered", response)
                 return response
 
             # Text already shown can't be taken back, so only a stalled stream
@@ -779,6 +830,7 @@ class LLMProvider(ABC):
             if should_retry_guard is not None and not should_retry_guard():
                 if (response.error_kind or "").lower() != "timeout":
                     logger.warning("LLM stream failed after content was emitted; skipping retry")
+                    await _finish_retry_status("cleared", response)
                     return response
                 if on_stream_recover:
                     logger.warning(
@@ -804,6 +856,7 @@ class LLMProvider(ABC):
             if not self.is_transient_response(response):
                 # nanobot retries once without images here unless the error is
                 # auth or billing; NanoClaw sends no images, so it just stops.
+                await _finish_retry_status("cleared", response)
                 return response
 
             if persistent and identical_error_count >= self._PERSISTENT_IDENTICAL_ERROR_LIMIT:
@@ -814,6 +867,15 @@ class LLMProvider(ABC):
                 )
                 if on_retry_exhausted:
                     await on_retry_exhausted(f"Persistent retry stopped after {identical_error_count} identical errors.")
+                if on_retry_status:
+                    await on_retry_status(
+                        RetryStatusEvent(
+                            state="exhausted",
+                            attempt=attempt,
+                            max_attempts=None,
+                            error_kind=self.public_error_kind(response),
+                        )
+                    )
                 return response
             if not persistent and attempt > len(delays):
                 logger.warning(
@@ -823,6 +885,15 @@ class LLMProvider(ABC):
                 )
                 if on_retry_exhausted:
                     await on_retry_exhausted(f"Model request failed after {attempt} attempts, giving up.")
+                if on_retry_status:
+                    await on_retry_status(
+                        RetryStatusEvent(
+                            state="exhausted",
+                            attempt=attempt,
+                            max_attempts=len(delays) + 1,
+                            error_kind=self.public_error_kind(response),
+                        )
+                    )
                 return response
 
             retry_after = self._extract_retry_after_from_response(response)
@@ -839,7 +910,13 @@ class LLMProvider(ABC):
                 (response.content or "")[:120].lower(),
             )
             await self._sleep_with_heartbeat(
-                delay, attempt=attempt, persistent=persistent, on_retry_wait=on_retry_wait
+                delay,
+                attempt=attempt,
+                persistent=persistent,
+                on_retry_wait=on_retry_wait,
+                error_kind=self.public_error_kind(response),
+                max_attempts=None if persistent else len(delays) + 1,
+                on_retry_status=on_retry_status,
             )
 
     async def _sleep_with_heartbeat(
@@ -849,17 +926,31 @@ class LLMProvider(ABC):
         attempt: int,
         persistent: bool,
         on_retry_wait: RetryWaitCallback | None,
+        error_kind: str = "unknown",
+        max_attempts: int | None = None,
+        on_retry_status: RetryStatusCallback | None = None,
     ) -> None:
         """Sleep in chunks of up to 30s, reporting before each one (nanobot base.py:1527).
 
         Uses ``asyncio.sleep`` so tests can patch it out.
         """
+        next_retry_at = time.time() + max(0.0, delay)
         remaining = max(0.0, delay)
         while remaining > 0:
             if on_retry_wait:
                 kind = "persistent retry" if persistent else "retry"
                 await on_retry_wait(
                     f"Model request failed, {kind} in {max(1, int(round(remaining)))}s (attempt {attempt})."
+                )
+            if on_retry_status:
+                await on_retry_status(
+                    RetryStatusEvent(
+                        state="waiting",
+                        attempt=attempt,
+                        max_attempts=max_attempts,
+                        error_kind=error_kind,
+                        next_retry_at=next_retry_at,
+                    )
                 )
             chunk = min(remaining, self._RETRY_HEARTBEAT_CHUNK)
             await asyncio.sleep(chunk)
