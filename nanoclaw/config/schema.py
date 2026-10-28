@@ -1,7 +1,7 @@
 """The ``config.json`` schema: a subset of nanobot ``config/schema.py``.
 
 Every field here has nanobot's JSON name, nesting and default, except where a
-comment says otherwise. nanobot's other sections (gateway, api, the
+comment says otherwise. nanobot's other sections (api, the
 per-channel entries under channels, ...) are not read: unknown keys are
 ignored, so a nanobot ``config.json`` loads unchanged.
 
@@ -15,9 +15,12 @@ Layout (camelCase in JSON)::
                               "maxToolIterations", "maxConcurrentSubagents",
                               "maxToolResultChars", "providerRetryMode",
                               "timezone", "timezoneMode",
+                              "idleCompactAfterMinutes",
+                              "idleCompactCheckIntervalSeconds",
                               "compaction"  # NanoClaw only
                               }},
       "channels": {"sendProgress", "sendToolHints", "showReasoning"},
+      "gateway": {"host", "port", "heartbeat": {"enabled", "intervalS"}},
       "providers": {"<name>": {"apiKey", "apiBase", "extraHeaders",
                                "extraBody", "extraQuery", "thinkingStyle"}, ...},
       "modelPresets": {"<name>": {"model", "provider", "maxTokens",
@@ -153,6 +156,16 @@ class AgentDefaults(Base):
     # NanoClaw only (not in nanobot): "nanobot" (default, like upstream) or
     # "fixed" (docs/UPSTREAM_BUGS.md, bug 4). nanobot ignores the key.
     compaction: CompactionMode = "nanobot"
+    # Idle auto-compaction threshold in minutes, 0 = off (schema.py:199;
+    # JSON ``idleCompactAfterMinutes``, legacy ``sessionTtlMinutes``).
+    session_ttl_minutes: int = Field(
+        default=15,
+        ge=0,
+        validation_alias=AliasChoices("idleCompactAfterMinutes", "sessionTtlMinutes", "session_ttl_minutes"),
+        serialization_alias="idleCompactAfterMinutes",
+    )
+    # Minimum seconds between scans for idle sessions (schema.py:205).
+    idle_compact_check_interval_seconds: int = Field(default=60, ge=0)
     dream: DreamConfig = Field(default_factory=DreamConfig)  # schema.py:212
 
     @model_validator(mode="before")
@@ -321,11 +334,29 @@ class ToolsConfig(Base):
     ssrf_whitelist: list[str] = Field(default_factory=list)  # schema.py:460, CIDR ranges
 
 
+class HeartbeatConfig(Base):
+    """Heartbeat settings (nanobot schema.py:378). Stored for the heartbeat
+    system job (layer 21.4); the gateway only prints them."""
+
+    enabled: bool = True
+    interval_s: int = 30 * 60  # 30 minutes
+
+
+class GatewayConfig(Base):
+    """``nanoclaw gateway`` settings (nanobot schema.py:405 ``GatewayConfig``,
+    without ``restartMode``: NanoClaw has no ``/restart``)."""
+
+    host: str = "127.0.0.1"  # local-only bind by default
+    port: int = 18790  # the /health endpoint
+    heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
+
+
 class Config(Base):
     """Root configuration (nanobot schema.py:501, a subset)."""
 
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)  # schema.py:507
+    gateway: GatewayConfig = Field(default_factory=GatewayConfig)  # schema.py:512
     # nanobot declares a field per registry provider plus extra keys for custom
     # ones (schema.py:292). NanoClaw keeps one dict: a key naming a registry
     # provider (``deepseek``, ``lmStudio``) configures it, any other key is a

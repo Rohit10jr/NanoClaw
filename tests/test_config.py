@@ -258,11 +258,18 @@ def test_merge_missing_defaults():
 def test_refresh_keeps_nanobot_only_keys_and_adds_missing_settings(tmp_path):
     path = write(
         tmp_path / "config.json",
-        {"agents": {"defaults": {"model": "m", "botName": "nb"}}, "gateway": {"port": 1}, "providers": {"x": {}}},
+        {
+            "agents": {"defaults": {"model": "m", "botName": "nb"}},
+            "api": {"port": 1},
+            "gateway": {"port": 2},
+            "providers": {"x": {}},
+        },
     )
     assert refresh_config_file(path) is True
     saved = json.loads(path.read_text(encoding="utf-8"))
-    assert saved["gateway"] == {"port": 1} and saved["agents"]["defaults"]["botName"] == "nb"
+    assert saved["api"] == {"port": 1} and saved["agents"]["defaults"]["botName"] == "nb"
+    # The gateway section is NanoClaw's since layer 21: its missing keys are added.
+    assert saved["gateway"] == {"port": 2, "host": "127.0.0.1", "heartbeat": {"enabled": True, "intervalS": 1800}}
     assert saved["agents"]["defaults"]["model"] == "m"
     assert saved["agents"]["defaults"]["maxToolIterations"] == 200
     assert saved["tools"]["ssrfWhitelist"] == []

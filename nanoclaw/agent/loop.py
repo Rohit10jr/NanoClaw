@@ -46,10 +46,13 @@ Since layer 20 the provider and model settings live in a
 its session's runtime: the preset picked with ``/model`` (saved in the
 session metadata), else the default (nanobot ``runtime_for_session``).
 
+Since layer 21 the 1 s idle tick of ``run`` drives idle auto-compaction
+(``_check_expired_sessions_if_due``, agent/autocompact.py): sessions idle for
+``session_ttl_minutes`` are summarized in the background.
+
 Left out of nanobot's loop: unified sessions, goals and turn continuations,
 automation (cron) turns, WebUI recovery admission and follow-up journal,
-config hot reload, the global concurrency gate and idle auto-compaction (the
-1 s idle tick of ``run`` is kept).
+config hot reload and the global concurrency gate.
 """
 
 from __future__ import annotations
@@ -58,7 +61,7 @@ import asyncio
 import copy
 import dataclasses
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -68,6 +71,7 @@ from typing import Any
 
 from loguru import logger
 
+from nanoclaw.agent.autocompact import AutoCompact
 from nanoclaw.agent.context import ContextBuilder
 from nanoclaw.agent.context_governance import (
     CONTEXT_SAFETY_BUFFER,
@@ -129,6 +133,7 @@ from nanoclaw.session.recovery import (
 )
 from nanoclaw.session.summary import (
     HIDDEN_HISTORY_META,
+    SessionSummary,
     SessionSummaryCheckpoint,
     session_summary_from_metadata,
 )
@@ -180,6 +185,8 @@ class TurnContext:
     # The provider and model settings the turn runs with (nanobot
     # ``TurnContext.runtime``): the session's preset, else the loop default.
     runtime: LLMRuntime | None = None
+    # The summary the turn starts from (nanobot ``TurnContext.pending_summary``).
+    pending_summary: SessionSummary | None = None
     result: AgentRunResult | None = None
     outbound: OutboundMessage | None = None
     command_handled: bool = False
@@ -219,6 +226,10 @@ class AgentLoop:
         model_preset: str | None = None,
         dream_model_preset: str | None = None,
         preset_runtime_loader: PresetRuntimeLoader | None = None,
+        # Idle auto-compaction (nanobot loop.py:300, :318): 0 = off here, the
+        # config default is 15 minutes / 60 s (agents.defaults).
+        session_ttl_minutes: int = 0,
+        idle_compact_check_interval_seconds: int = 0,
     ) -> None:
         # ``model_presets`` include "default" (nanobot ``configured_model_presets``);
         # without one, "default" is these constructor settings.
@@ -322,6 +333,16 @@ class AgentLoop:
         self._pending_queues: dict[str, asyncio.Queue[InboundMessage]] = {}
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._close_lock: asyncio.Lock | None = None
+        # nanobot loop.py:455-463.
+        self.auto_compact = AutoCompact(
+            sessions=self.sessions,
+            consolidator=self.consolidator,
+            session_ttl_minutes=session_ttl_minutes,
+            bind_events=self._idle_events,
+            session_lock=self._get_session_lock,
+        )
+        self._idle_compact_check_interval_s = idle_compact_check_interval_seconds
+        self._next_idle_compact_check_at = time.monotonic()
 
     # -- model selection (nanobot loop.py:230-290, 560-640) ------------------
 
@@ -552,8 +573,8 @@ class AgentLoop:
         """Consume inbound messages until stopped. (nanobot loop.py:1428)
 
         Turns run as session worker tasks, so the loop stays free for
-        ``/stop``. The 1 s timeout is nanobot's idle tick (it drives idle
-        auto-compaction there; NanoClaw has none yet).
+        ``/stop``. The 1 s timeout is nanobot's idle tick: it drives idle
+        auto-compaction (``_check_expired_sessions_if_due``).
         """
         self._running = True
         try:
@@ -566,6 +587,7 @@ class AgentLoop:
                     async with asyncio.timeout(1.0):
                         msg = await self.bus.consume_inbound()
                 except TimeoutError:
+                    await self._check_expired_sessions_if_due()
                     continue
                 except asyncio.CancelledError:
                     # Real cancellation ends the loop; a stray CancelledError
@@ -584,6 +606,33 @@ class AgentLoop:
                     logger.exception("Failed to dispatch inbound message for {}", msg.session_key)
         finally:
             await self.aclose()
+
+    async def _check_expired_sessions_if_due(self) -> None:
+        """Scan idle sessions without blocking the event loop. (nanobot loop.py:1410)
+
+        At most once per ``idle_compact_check_interval_seconds``; sessions
+        with a busy worker are left alone (D13).
+        """
+        now = time.monotonic()
+        if now < self._next_idle_compact_check_at:
+            return
+        self._next_idle_compact_check_at = now + self._idle_compact_check_interval_s
+        await self.auto_compact.check_expired(
+            self.schedule_background,
+            self.runtime_for_session,
+            active_session_keys=self._pending_queues.keys(),
+        )
+
+    def _idle_events(self, session_key: str) -> EventSink:
+        """Bind one idle compaction to its session's chat. (nanobot loop.py:1017)"""
+        return self.turn_delivery_factory.session_events(session_key)
+
+    def schedule_background(self, coro: Coroutine[Any, Any, Any]) -> None:
+        """Run a coroutine as a tracked background task, cancelled by ``aclose``.
+        (nanobot loop.py:1844)"""
+        task = asyncio.create_task(coro)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
     def stop(self) -> None:
         """Stop ``run`` at its next idle tick. (nanobot loop.py:1855)"""
@@ -913,6 +962,7 @@ class AgentLoop:
             ctx.events = EventSink(track_output, events.accepts_type)
 
         await self._restore_turn(ctx)
+        await self._compact_session(ctx)
         if ctx.kind == "user" and await self._dispatch_command(ctx):
             return ctx
         if ctx.runtime is None:
@@ -950,6 +1000,17 @@ class AgentLoop:
         changed = restore_pending_interruption(ctx.session) or changed
         if changed:
             self.sessions.save(ctx.session)
+
+    async def _compact_session(self, ctx: TurnContext) -> None:
+        """Pick up the summary an idle compaction left. (nanobot loop.py:2143)
+
+        Runs before commands, as in nanobot, so ``/new`` also drops a summary
+        kept in memory.
+        """
+        if ctx.ephemeral:
+            return
+        assert ctx.session is not None
+        ctx.session, ctx.pending_summary = await self.auto_compact.prepare_session(ctx.session, ctx.session_key)
 
     async def _dispatch_command(self, ctx: TurnContext) -> bool:
         """Run a registered slash command; True when it handled the input.
@@ -1017,7 +1078,12 @@ class AgentLoop:
 
         # Build: history first, then save the user's message before running,
         # so it survives a crash or an error mid-turn.
-        summary = session_summary_from_metadata(session.metadata, fallback_last_active=session.updated_at)
+        # A summary an idle compaction just wrote, else the saved one
+        # (``_compact_session``). A temporary turn reads its own session's.
+        if ephemeral:
+            summary = session_summary_from_metadata(session.metadata, fallback_last_active=session.updated_at)
+        else:
+            summary = ctx.pending_summary
         history = session.get_history()
         boundary = len(session.messages)
         blocks: list[RuntimeContextBlock] = []
