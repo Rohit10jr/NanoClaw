@@ -9,7 +9,8 @@ Since layer 13 the runner reports what it does through an :class:`AgentHook`
 (``spec.hook``), called at the same points and in the same order as nanobot's
 runner, and every model request goes through ``chat_stream_with_retry``
 (deltas only reach the hook when it ``wants_streaming()``). Retry waits are
-published to ``spec.events`` as :class:`RetryWaitEvent`.
+published to ``spec.events`` as :class:`RetryWaitEvent` and, when the sink
+takes it (the web UI), as :class:`RetryStatusEvent` (since layer 22).
 
 Since layer 14 a caller can fold messages that arrive mid-turn into the run
 (``injection_callback``, drained before every model call and after an answer;
@@ -74,7 +75,7 @@ from nanoclaw.agent.tools.registry import with_retry_hint
 from nanoclaw.agent.tools.violations import classify_violation, is_ssrf_violation
 from nanoclaw.agent.tools.context import current_request_context
 from nanoclaw.bus.outbound_events import TurnModelUpdatedEvent
-from nanoclaw.events import NO_EVENTS, EventSink, RetryWaitEvent
+from nanoclaw.events import NO_EVENTS, EventSink, RetryStatusEvent, RetryWaitEvent
 from nanoclaw.providers import LLMProvider, LLMResponse, LLMUsage, ToolCallRequest
 from nanoclaw.providers.fallback_provider import FallbackModelSelection
 from nanoclaw.session.summary import SessionSummaryCheckpoint
@@ -227,6 +228,10 @@ class AgentRunResult:
     tool_events: list[dict[str, str]] = field(default_factory=list)
     had_injections: bool = False
     summary_checkpoint: SessionSummaryCheckpoint | None = field(default=None, repr=False)
+    # Per-request usage in display order (nanobot runner.py:138), and the
+    # public error kind of a model failure (nanobot runner.py:141).
+    round_usages: list[LLMUsage] = field(default_factory=list)
+    failure_error_kind: str | None = None
 
 
 def _add_usage(total: LLMUsage | None, new: LLMUsage | None) -> LLMUsage | None:
@@ -477,6 +482,8 @@ class AgentRunner:
         tools_used: list[str] = []
         tool_events: list[dict[str, str]] = []
         usage: LLMUsage | None = None
+        round_usages: list[LLMUsage] = []
+        failure_error_kind: str | None = None
         empty_retries = 0
         # Per-run throttle for repeated attempts at the same outside target.
         workspace_violation_counts: dict[str, int] = {}
@@ -513,6 +520,8 @@ class AgentRunner:
             reasoning_text, response.content = extract_reasoning(
                 response.reasoning_content, response.thinking_blocks, response.content
             )
+            if raw_usage is not None:
+                round_usages.append(raw_usage)
             context.usage = raw_usage
             usage = _add_usage(usage, raw_usage)
             if reasoning_text and not context.streamed_reasoning:
@@ -621,6 +630,8 @@ class AgentRunner:
                     messages_for_model + [{"role": "user", "content": FINALIZATION_RETRY_PROMPT}],
                     with_tools=False,
                 )
+                if response.usage is not None:
+                    round_usages.append(response.usage)
                 usage = _add_usage(usage, response.usage)
                 context.response = response
                 context.usage = _add_usage(raw_usage, response.usage)
@@ -677,6 +688,7 @@ class AgentRunner:
                 if should_continue:
                     had_injections = True
                     continue
+                failure_error_kind = LLMProvider.public_error_kind(response)
                 break
 
             # 4. Still nothing to say (runner.py:783-801).
@@ -720,6 +732,8 @@ class AgentRunner:
             # Out of iterations: ask for a summary with tools off, else a fixed message.
             stop_reason = "max_iterations"
             final_content, finalize_usage = await self._finalize_after_max_iterations(spec, state, hook, messages)
+            if finalize_usage is not None:
+                round_usages.append(finalize_usage)
             usage = _add_usage(usage, finalize_usage)
             messages.append(build_assistant_message(final_content))
 
@@ -733,6 +747,8 @@ class AgentRunner:
             tool_events,
             had_injections=had_injections,
             summary_checkpoint=state.compaction.summary_checkpoint,
+            round_usages=round_usages,
+            failure_error_kind=failure_error_kind,
         )
 
     def _retry_wait_callback(self, spec: AgentRunSpec) -> Callable[[str], Awaitable[None]] | None:
@@ -744,6 +760,18 @@ class AgentRunner:
             await spec.events.emit(RetryWaitEvent(content))
 
         return publish
+
+    @staticmethod
+    async def _retry_status_callback(spec: AgentRunSpec) -> Callable[[RetryStatusEvent], Awaitable[None]] | None:
+        """Retry lifecycle as RetryStatusEvent, when the turn's sink takes it.
+
+        Each request chain starts by clearing the previous chain's state
+        (nanobot providers/base.py:1367-1371 ``_retry_notifications``).
+        """
+        if not spec.events.accepts(RetryStatusEvent):
+            return None
+        await spec.events.emit(RetryStatusEvent("cleared", 1, None, "unknown"))
+        return spec.events.emit
 
     async def _request(
         self,
@@ -779,11 +807,15 @@ class AgentRunner:
         _raise_if_cancelling()
         events_token = _request_events.set(spec.events)
         try:
+            retry_kwargs: dict[str, Any] = {}
+            if (on_retry_status := await self._retry_status_callback(spec)) is not None:
+                retry_kwargs["on_retry_status"] = on_retry_status
             response = await spec.provider.chat_stream_with_retry(
                 **kwargs,
                 **(stream or {}),
                 retry_mode=spec.provider_retry_mode,
                 on_retry_wait=self._retry_wait_callback(spec),
+                **retry_kwargs,
             )
         finally:
             _request_events.reset(events_token)

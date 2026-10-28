@@ -90,9 +90,12 @@ class TurnEndEvent(AgentEvent):
     failure_message: str | None = None
 
 
-# The events below have no producer in NanoClaw yet (goals, session sync and
-# model switching come in later layers). They are plain data, kept so the
-# module matches nanobot's.
+# Of the events below, GoalStatusEvent (running/idle only) and
+# TurnModelUpdatedEvent (and, above, TurnEndEvent) come from
+# nanoclaw/webui/outbound_projection.py ``lifecycle_outbound`` (layer 22;
+# fallback switches also from the runner); the others have no producer in NanoClaw
+# yet (goals, session sync and model switching come in later layers). They
+# are plain data, kept so the module matches nanobot's.
 
 
 @dataclass(frozen=True)

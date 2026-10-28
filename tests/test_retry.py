@@ -321,3 +321,108 @@ async def test_loop_passes_its_retry_mode_to_the_main_run(tmp_path):
     loop = AgentLoop(fake, ws, provider_retry_mode="persistent")
     await loop.process_direct("hello")
     assert fake.last_retry_mode == "persistent"
+
+
+# --- structured retry lifecycle (layer 22; nanobot test_provider_retry.py) -------
+
+
+async def _statuses_of(provider, **kwargs):
+    from nanoclaw.events import RetryStatusEvent
+
+    statuses: list[RetryStatusEvent] = []
+
+    async def record(status: RetryStatusEvent) -> None:
+        statuses.append(status)
+
+    response = await provider.chat_with_retry(messages=USER, on_retry_status=record, **kwargs)
+    return response, statuses
+
+
+async def test_chat_with_retry_emits_structured_retry_lifecycle(delays, monkeypatch):
+    monkeypatch.setattr("nanoclaw.providers.base.time.time", lambda: 100.0)
+    provider = ScriptedProvider([error("network connection failed", error_kind="connection"), LLMResponse(content="ok")])
+    response, statuses = await _statuses_of(provider)
+    assert response.content == "ok"
+    assert [s.state for s in statuses] == ["waiting", "recovered"]
+    assert (statuses[0].attempt, statuses[0].max_attempts, statuses[0].error_kind) == (1, 4, "connection")
+    assert statuses[0].next_retry_at == 101.0
+    assert statuses[1].attempt == 2 and statuses[1].next_retry_at is None
+
+
+async def test_chat_with_retry_clears_waiting_status_on_terminal_non_transient_error(delays):
+    provider = ScriptedProvider([
+        error("network connection failed", error_kind="connection"),
+        error("401 unauthorized", error_status_code=401, error_should_retry=False),
+    ])
+    response, statuses = await _statuses_of(provider)
+    assert response.content == "401 unauthorized"
+    assert [s.state for s in statuses] == ["waiting", "cleared"]
+    assert (statuses[-1].attempt, statuses[-1].error_kind) == (2, "authentication")
+
+
+async def test_first_attempt_success_or_terminal_error_reports_nothing(delays):
+    for response in (LLMResponse(content="ok"), error("401 unauthorized")):
+        _, statuses = await _statuses_of(ScriptedProvider([response]))
+        assert statuses == []
+
+
+async def test_chat_with_retry_reports_exhaustion(delays):
+    from nanoclaw.events import RetryStatusEvent
+
+    provider = ScriptedProvider([
+        error("429 rate limit a"),
+        error("429 rate limit b"),
+        error("429 rate limit c"),
+        error("503 final server error", error_status_code=503),
+    ])
+    progress: list[str] = []
+
+    async def wait(text: str) -> None:
+        progress.append(text)
+
+    response, statuses = await _statuses_of(provider, on_retry_wait=wait)
+    assert response.content == "503 final server error"
+    assert progress[-1] == "Model request failed after 4 attempts, giving up."
+    assert [s.state for s in statuses] == ["waiting", "waiting", "waiting", "exhausted"]
+    assert statuses[-1] == RetryStatusEvent(state="exhausted", attempt=4, max_attempts=4, error_kind="server")
+
+
+async def test_persistent_exhaustion_has_no_attempt_limit(delays):
+    provider = ScriptedProvider([error("503 same", error_status_code=503)] * 10)
+    _, statuses = await _statuses_of(provider, retry_mode="persistent")
+    assert [s.state for s in statuses] == ["waiting"] * 9 + ["exhausted"]
+    assert {s.max_attempts for s in statuses} == {None}
+
+
+async def test_long_waits_report_waiting_per_chunk_with_one_deadline(delays, monkeypatch):
+    monkeypatch.setattr("nanoclaw.providers.base.time.time", lambda: 0.0)
+    provider = ScriptedProvider([error("429", error_status_code=429, error_retry_after_s=64.0), LLMResponse(content="ok")])
+    _, statuses = await _statuses_of(provider)
+    waiting = [s for s in statuses if s.state == "waiting"]
+    assert len(waiting) == len(delays) == 3
+    assert {s.next_retry_at for s in waiting} == {64.0 + RETRY_AFTER_BUFFER}
+    assert {s.error_kind for s in waiting} == {"rate_limit"}
+
+
+async def test_stream_failure_after_content_clears_a_retried_chain(delays):
+    from nanoclaw.events import RetryStatusEvent
+
+    class Streaming(ScriptedProvider):
+        async def chat_stream(self, **kwargs):
+            response = await self.chat(**kwargs)
+            if response.content == "partial" and kwargs.get("on_content_delta"):
+                await kwargs["on_content_delta"]("partial")
+            return response
+
+    async def delta(_text):
+        return None
+
+    statuses: list[RetryStatusEvent] = []
+
+    async def record(status):
+        statuses.append(status)
+
+    provider = Streaming([error("503", error_status_code=503), error("partial", error_status_code=503)])
+    response = await provider.chat_stream_with_retry(messages=USER, on_content_delta=delta, on_retry_status=record)
+    assert response.finish_reason == "error"
+    assert [(s.state, s.attempt) for s in statuses] == [("waiting", 1), ("cleared", 2)]
