@@ -42,8 +42,8 @@ recovery, governance) for later.
 | 24 | Telegram channel, pairing | done |
 | 25 | Skills catch-up (`disabledSkills`, `cron`), Agent Plugins, the `my` tool | done |
 
-Phase 1 (the core agent) is complete. Phase 2 builds the production backend
-(layers 11–25; progress in [`docs/PHASE2_PROGRESS.md`](docs/PHASE2_PROGRESS.md)).
+Phase 1 (the core agent) and phase 2 (the production backend, layers 11–25)
+are complete; see [`docs/PHASE2_PROGRESS.md`](docs/PHASE2_PROGRESS.md).
 
 - [`docs/ROADMAP.md`](docs/ROADMAP.md): every layer in build order, plus the
   production features we'll review afterwards.

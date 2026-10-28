@@ -148,9 +148,30 @@ snapshot, above).
 
 ## Tests
 
-Layer 25 adds 204 tests (4,207 → 4,411): `test_skills_snapshot_disabled.py`,
-`test_agent_plugins.py`, `test_agent_plugins_cli.py`, `test_my_tool.py`.
+Layer 25 adds 306 tests (4,207 → 4,513): `test_skills_snapshot_disabled.py`,
+`test_agent_plugins.py`, `test_agent_plugins_cli.py`, `test_my_tool.py`, `test_layer25_gaps.py`.
 
 ### Mutation checks
 
-MUTATION_RESULTS
+478 rules were broken on purpose:
+
+| Area | Rules | Caught at once | Gaps closed with tests | Equivalent | Result |
+|---|---|---|---|---|---|
+| Skills, snapshot, disabled skills, web UI skills, `cron` skill | 173 | 139 | 24 | 10 | 163 caught |
+| Agent Plugins, plugins CLI, MCP merge, file reads | 161 | 82 | 77 | 2 | 159 caught |
+| `my` tool, runtime control, config | 144 | 94 | 43 | 7 | 137 caught |
+
+102 new tests (`test_layer25_gaps.py`) close the gaps, for example: each skills
+call discovering only once per snapshot; a plugin skill served from the bytes
+captured at verification; plugin name and logo rules; the fingerprint covering
+renames and symlink targets; a changed package staying off even after the
+change is reverted (its approval is deleted); every MCP server rule (extra
+fields, non-stdio, reserved env keys, commands escaping the package); `my`
+refusing `auth`, `API_KEY`, `Token`, `__hidden`; limits like
+`max_iterations` 100 accepted and 101 refused.
+
+Equivalent (19): checks repeated by a later filter or by validation that runs
+first, regex and YAML details that give the same result, a second decode of
+an already-decoded URL part (skill names can't contain `%`), and defence-in-
+depth checks whose cases are already refused elsewhere.
+
