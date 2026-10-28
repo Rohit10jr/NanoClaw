@@ -798,6 +798,20 @@ Note: [`notes/23-webui-backend.md`](notes/23-webui-backend.md). Links point at n
 | `WebsocketTurnRegistry` (`session/webui_turns.py`) | [`session/webui_turns.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/session/webui_turns.py) | On the channel instead of module globals |
 | `channels.websocket` config | [`config/schema.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/config/schema.py) | Same names; `webuiDist` NanoClaw only |
 
+## Layer 24 — Telegram and pairing
+
+Note: [`notes/24-telegram.md`](notes/24-telegram.md). Links point at nanobot `c4dac64`.
+
+| NanoClaw | nanobot (`c4dac64`) | How it compares |
+|---|---|---|
+| `nanoclaw/channels/telegram/runtime.py` `TelegramChannel` | [`channels/telegram/runtime.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/channels/telegram/runtime.py) | 100 cases identical; no shared proxy, no transcription |
+| `nanoclaw/channels/telegram/validation.py`; `nanoclaw channels` CLI | [`channels/telegram/validation.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/channels/telegram/validation.py) | Same check, from the CLI |
+| `ChannelManager` non-projecting dispatch, `BaseChannel.send_delta`/`send_reasoning*`/`send_file_edit_events` | [`channels/manager.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/channels/manager.py), [`channels/base.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/channels/base.py) | Same filters and routing |
+| `nanoclaw/utils/helpers.py` `split_message`; `nanoclaw/bus/delivery.py` | [`utils/helpers.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/utils/helpers.py) | Same |
+| `nanoclaw/pairing/` store, events | [`pairing/`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/pairing) | 29 cases identical |
+| `BaseChannel.is_allowed`, `_handle_message` pairing branch; `/pairing` | [`channels/base.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/channels/base.py), [`command/builtin.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/command/builtin.py) | Same |
+| `nanoclaw/webui/settings_system.py` pairing payload and actions | [`webui/settings_system.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/webui/settings_system.py) | Plain functions |
+
 [nb-pta]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/providers/base.py#L118
 [nb-tcr]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/providers/base.py#L72
 [nb-tcr-hvn]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/providers/base.py#L81
