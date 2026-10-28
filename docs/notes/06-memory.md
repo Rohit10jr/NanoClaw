@@ -239,7 +239,8 @@ the first commit `init: nanoclaw memory store` (nanobot: `nanobot`), and
 `/dream-prompt` says "nanoclaw's default". `prompts/README.md` has only the
 Dream section; nanobot's heartbeat-evaluator section, `prompts/evaluator.md`
 and `/evaluator-prompt` come with heartbeat (21.4), which can reuse
-`utils/workspace_prompts.py` as nanobot's `utils/evaluator.py` does.
+`utils/workspace_prompts.py` as nanobot's `utils/evaluator.py` does *(layer
+21.4: done, see below)*.
 
 Checked by running both projects (scratchpad `t213/compare.py`: nine
 scenarios on fresh workspaces through real loops and each project's command
@@ -250,6 +251,35 @@ workspace). Every reply, follow-up, commit message, author, tracked file and
 file content compared after normalizing SHAs, times and paths: 208 the same,
 72 expected (product name, the shorter `prompts/README.md`, difference #9),
 0 different. Tests: `tests/test_gitstore.py`, `tests/test_dream_history.py`.
+
+### Since layer 21.4: scheduled Dream (and the heartbeat's prompt override)
+
+`nanoclaw gateway` registers Dream as nanobot's protected cron system job
+`dream` (`cli/gateway.py` `Gateway.register_system_jobs`, nanobot
+gateway_runtime.py:934). The schedule is nanobot's `DreamConfig`
+(`agents.defaults.dream`): `enabled` (default true), `intervalH` (default 2,
+at least 1) or a legacy `cron` expression (wins over the interval, in
+`agents.defaults.timezone`; left out of a saved config when unset), and
+`modelOverride` as before. Startup prints `✓ Dream: every 2h` (or `cron <expr>
+(legacy)`); with `enabled: false` it prints `○ Dream: disabled`, removes the
+job and moves the Dream cursor to the end of the journal (nanobot
+`_advance_dream_cursor_if_behind`), so turning Dream back on later does not
+replay old entries. When the job is due, `Gateway.run_dream_job` runs the same
+Dream turn as `/dream` (nanobot :660-722) with no reply; afterwards
+`commit_dream_changes` commits `dream: periodic memory consolidation` plus the
+diff only if a memory file changed, and the journal is compacted. nanobot also
+prunes its saved Dream sessions; NanoClaw's Dream turns are never saved.
+
+The heartbeat's notification gate has nanobot's workspace override:
+`prompts/evaluator.md` (`utils/evaluator.py`, `/evaluator-prompt [init]`, the
+"Heartbeat evaluator" section of `prompts/README.md`), on the same helpers as
+`prompts/dream.md`. The heartbeat itself is described in `cli/gateway.py`.
+
+Checked by running both projects through their real gateway startup
+(scratchpad `t214/compare.py`; system jobs for 8 configs, 5 scheduled Dream
+runs, 11 heartbeat runs, plus the pure parsing, target and evaluator
+functions): 1,061 leaves the same, 5 expected (product name in the first
+commit), 0 different. Tests: `tests/test_gateway_jobs.py`.
 
 ## Differences from nanobot (deliberate)
 
@@ -271,7 +301,7 @@ file content compared after normalizing SHAs, times and paths: 208 the same,
 |---|---|---|---|---|
 | Compaction in the middle of a turn | `agent/context_governance.py` `_compact_request_history`, `runner.py` | Summarizes while a long tool loop grows, keeping the newest steps | Needs the rest of context governance | **Phase 2: Context governance** *(layer 15: done)* |
 | Idle auto-compact | `agent/autocompact.py`, `loop.py` `_check_expired_sessions_if_due` | Summarizes a conversation after 15 idle minutes, in the background | Needs an always-running process; nanobot's own one-shot CLI doesn't run it either | **Phase 2: Message bus + channels** (long-running mode) |
-| Dream every 2 hours | `cli/gateway_runtime.py` cron job, `DreamConfig` | Runs Dream on a schedule | Same: needs the always-running gateway | **Phase 2: Cron + heartbeat** |
+| Dream every 2 hours | `cli/gateway_runtime.py` cron job, `DreamConfig` | Runs Dream on a schedule | Same: needs the always-running gateway | **Phase 2: Cron + heartbeat** *(layer 21.4: done, the gateway's `dream` system job; see "Since layer 21.4")* |
 | Git history of memory files | `utils/gitstore.py`, `/dream-log`, `/dream-restore` | Commits `SOUL.md`/`USER.md`/`MEMORY.md` after each Dream, so changes can be viewed and undone | An audit trail, not needed for memory to work; adds a `.git` folder to the workspace | **Phase 2: Memory history (git)** *(layer 21.3: done)* |
 | Provider-native compaction | `summarize_provider_compaction`, provider conversation state | Lets APIs with server-side conversation state compact on their side | Our adapter uses the standard chat API | **Phase 2: Provider conversation state** |
 | `prompts/dream.md` override | `utils/workspace_prompts.py`, `/dream-prompt` | Replace Dream's instructions with your own file | A customisation option | **Phase 2: Prompt overrides** *(layer 21.3: done)* |

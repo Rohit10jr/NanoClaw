@@ -11,7 +11,8 @@ Layout (camelCase in JSON)::
       "agents": {"defaults": {"workspace", "modelPreset", "model", "provider",
                               "maxTokens", "contextWindowTokens", "temperature",
                               "reasoningEffort", "fallbackModels",
-                              "dream": {"modelOverride"},
+                              "dream": {"enabled", "intervalH", "cron",
+                                        "modelOverride"},
                               "maxToolIterations", "maxConcurrentSubagents",
                               "maxToolResultChars", "providerRetryMode",
                               "timezone", "timezoneMode",
@@ -54,6 +55,7 @@ from nanoclaw.config.base import Base
 from nanoclaw.config.timezone import detect_system_timezone
 
 if TYPE_CHECKING:
+    from nanoclaw.cron.types import CronSchedule
     from nanoclaw.providers.registry import ProviderSpec
 
 # nanobot's default is ~/.nanobot/workspace (config/home.py:27).
@@ -75,17 +77,41 @@ CompactionMode = Literal["nanobot", "fixed"]
 
 
 class DreamConfig(Base):
-    """Dream settings (nanobot schema.py:64 ``DreamConfig``, the preset only).
+    """Dream settings (nanobot schema.py:64 ``DreamConfig``): the schedule of
+    the gateway's protected ``dream`` system job and the model preset.
 
-    nanobot also schedules Dream (``enabled``, ``intervalH``, ``cron``);
-    NanoClaw runs Dream on request (``nanoclaw dream``, ``/dream``), so only
-    the model preset is read.
+    ``enabled`` registers the job when ``nanoclaw gateway`` starts (default
+    every ``intervalH`` = 2 hours; a legacy ``cron`` expression wins over the
+    interval). ``nanoclaw dream`` and ``/dream`` run Dream on request either way.
     """
 
+    _HOUR_MS: ClassVar[int] = 3_600_000
+
+    enabled: bool = True  # Register the periodic Dream consolidation job on startup
+    interval_h: int = Field(default=2, ge=1)  # Every 2 hours by default
+    cron: str | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )  # Legacy cron expression override
     model_override: str | None = Field(
         default=None,
         validation_alias=AliasChoices("modelOverride", "model", "model_override"),
     )  # Model preset name for Dream runs
+
+    def build_schedule(self, timezone: str) -> CronSchedule:
+        """Build the runtime schedule, preferring the legacy cron override if present."""
+        from nanoclaw.cron.types import CronSchedule
+
+        if self.cron:
+            return CronSchedule(kind="cron", expr=self.cron, tz=timezone)
+        return CronSchedule(kind="every", every_ms=self.interval_h * self._HOUR_MS)
+
+    def describe_schedule(self) -> str:
+        """Return a human-readable summary for logs and startup output."""
+        if self.cron:
+            return f"cron {self.cron} (legacy)"
+        hours = self.interval_h
+        return f"every {hours}h"
 
 
 class RequestOverrides(Base):
@@ -335,8 +361,8 @@ class ToolsConfig(Base):
 
 
 class HeartbeatConfig(Base):
-    """Heartbeat settings (nanobot schema.py:378). Stored for the heartbeat
-    system job (layer 21.4); the gateway only prints them."""
+    """Heartbeat settings (nanobot schema.py:378): the gateway's protected
+    ``heartbeat`` system job, every ``intervalS`` seconds."""
 
     enabled: bool = True
     interval_s: int = 30 * 60  # 30 minutes

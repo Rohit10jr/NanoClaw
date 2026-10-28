@@ -47,6 +47,7 @@ from nanoclaw.events import (
     RetryStatusEvent,
     RetryWaitEvent,
 )
+from nanoclaw.session.keys import is_internal_session
 
 # Which operation events a channel gets (nanobot bus/notification_delivery.py:21):
 # "lifecycle" only for routes that publish a turn's lifecycle (user turns),
@@ -154,7 +155,7 @@ class TurnDeliveryFactory:
         yet, so only that fallback; maintenance sessions (Dream, heartbeat)
         get no notices.
         """
-        if session_key == "heartbeat" or session_key.startswith("dream:"):
+        if is_internal_session(session_key):
             return EventSink()
         route = tuple(session_key.split(":", 1))
         if len(route) != 2 or route[0] not in {"websocket", "cli"}:

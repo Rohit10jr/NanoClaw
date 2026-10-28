@@ -555,6 +555,7 @@ def test_banner_lines(tmp_path) -> None:
     assert "Warning: No channels enabled" in text
     assert "Idle compaction: after 15 min" in text
     assert "Heartbeat: every 1800s" in text
+    assert "Dream: every 2h" in text and "Cron: 2 scheduled jobs" in text
     config.gateway.heartbeat.enabled = False
     config.agents.defaults.session_ttl_minutes = 0
     gateway.print_banner()

@@ -123,8 +123,8 @@ do change (here, the time) are attached to the **user's message** inside
 | Images in the user message | `build_user_content` | Vision models |
 | Legacy `SOUL.md` upgrade | `_load_bootstrap_files` | Migrating old installs |
 | Git-backed profile files | `sync_workspace_templates` → `GitStore` | History of `SOUL.md`/`USER.md`/`MEMORY.md` edits (nanobot creates `.git` and `.gitignore` in the workspace) |
-| `HEARTBEAT.md` | `templates/HEARTBEAT.md`, gateway heartbeat job | Periodic background task list |
-| `prompts/` overrides | `templates/prompts/README.md`, `utils/workspace_prompts.py` | Editable prompts for Dream (memory) and the heartbeat evaluator; not part of the system prompt |
+| `HEARTBEAT.md` | `templates/HEARTBEAT.md`, gateway heartbeat job | Periodic background task list *(layer 21.4: done; created in new workspaces, read by the gateway's `heartbeat` job)* |
+| `prompts/` overrides | `templates/prompts/README.md`, `utils/workspace_prompts.py` | Editable prompts for Dream (memory) and the heartbeat evaluator; not part of the system prompt *(layer 21.3: Dream; layer 21.4: the evaluator)* |
 | Runtime-context detach/reattach | `runtime_context.py` | Hiding the blocks when showing history in UIs. (Since layer 5 we do return and save nanobot's marker of what was appended, which these functions use.) |
 | Other runtime-context providers | tools, web UI | Session messages, goals, CLI apps, quotes |
 
@@ -166,4 +166,7 @@ environment):
 No code changes were needed. Two gaps in the notes were fixed: the files nanobot
 creates that we don't (`HEARTBEAT.md`, `prompts/`, the workspace git repository)
 are now listed under "What we left out", and the matching code comment in
-`sync_workspace_templates` was completed.
+`sync_workspace_templates` was completed. *(Layers 21.3 and 21.4: all three are created now; `HEARTBEAT.md` holds
+nanobot's text with "nanoclaw", and `AGENTS.md` is nanobot's full template
+again, with its "Scheduled Reminders" and "Heartbeat Tasks" sections, now
+that the `cron` tool and the heartbeat exist.)*
