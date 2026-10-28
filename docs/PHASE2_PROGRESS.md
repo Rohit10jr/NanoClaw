@@ -133,11 +133,21 @@ Legend: ⏳ in progress · ✅ done and verified · ⛔ blocked
 | Docs | note 20, CODE_MAP, README, ROADMAP, notes 01/12 | main session | — | ✅ |
 | PR | `p2/layer-20` → `main` | main session | PR #12 | ✅ |
 
+## Layer 21 — runtime: gateway, cron, heartbeat, scheduled Dream, idle compaction, memory history, prompt overrides (`p2/layer-21`) ⏳
+
+| Task | Scope (files) | Sub-agent | Verification | Status |
+|---|---|---|---|---|
+| 21.1 Cron | `cron/` (types, service, bound runner), cron tool, `cron_reminder.md`, the Scheduling prompt section, `croniter` | sub-agent (worktree), phase A | | ⏳ |
+| 21.2 Gateway, idle compaction | `nanoclaw gateway` (foreground, signals, `/health`), `gateway` config, `agent/autocompact.py` in `AgentLoop.run()` | sub-agent (worktree), phase A | | ⏳ |
+| 21.3 Memory history, prompt overrides | `utils/gitstore.py` (dulwich), Dream commits, `/dream-log`, `/dream-restore`, `/dream-prompt` and workspace prompt overrides | sub-agent (worktree), phase A | | ⏳ |
+| 21.4 System jobs | Dream every 2 h, heartbeat (`HEARTBEAT.md`, evaluator) in the gateway | sub-agent (worktree), phase B | | |
+| Integration, mutation checks, docs, PR | | | | |
+
 ## Blockers and open items
 
 | Item | Status |
 |---|---|
 | Real-model tests need API keys as environment secrets | Open; FakeProvider only until then |
 | Windows shell (16.4) not yet run on Windows | Needs a run of `uv run pytest` on Windows by the user |
-| PRs #2–#4 merged; #5–#11 (layers 13–19) open; later layers stacked on them | — |
+| PRs #2–#4 merged; #5–#12 (layers 13–20) open; later layers stacked on them | — |
 | Rewrite earlier commits to the user's author | After phase 2 (user decision) |
