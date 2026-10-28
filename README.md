@@ -38,6 +38,7 @@ recovery, governance) for later.
 | 20 | Providers: registry, model presets, `/model`, Anthropic (Claude), fallback models | done |
 | 21 | Runtime: `nanoclaw gateway`, cron, heartbeat, scheduled Dream, idle compaction, memory history | done |
 | 22 | Session history for the web UI (wire events, per-chat display history) | done |
+| 23 | Web UI backend: nanobot's own web UI works against `nanoclaw gateway` | done |
 
 Phase 1 (the core agent) is complete. Phase 2 builds the production backend
 (layers 11–25; progress in [`docs/PHASE2_PROGRESS.md`](docs/PHASE2_PROGRESS.md)).

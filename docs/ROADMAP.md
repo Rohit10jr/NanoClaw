@@ -197,7 +197,7 @@ be used unchanged on top of it. Progress: [`PHASE2_PROGRESS.md`](PHASE2_PROGRESS
 | 20 | Providers | Registry, presets, fallback, Anthropic, `/model` | `providers/registry.py`, `agent/model_presets.py`, `fallback_provider.py`, `anthropic_provider.py` | ~1,100 | ✅ done |
 | 21 | Gateway and schedules | `nanoclaw gateway`, cron, heartbeat, scheduled Dream, idle compaction, memory git history, prompt overrides | `cli/gateway_runtime.py`, `cron/`, `agent/autocompact.py`, `utils/gitstore.py` | ~1,300 | ✅ done |
 | 22 | Session storage | JSONL + per-chat event log for the web UI history | `session/` | ~300 | ✅ done |
-| 23 | Web UI backend | WebSocket channel and minimal web UI backend (`webui.core.v1`) | `channels/websocket/`, `webui/` | ~1,200 | |
+| 23 | Web UI backend | WebSocket channel and minimal web UI backend (`webui.core.v1`) | `channels/websocket/`, `webui/` | ~1,200 | ✅ done |
 | 24 | Telegram | First chat app | `channels/telegram/` | ~500 | |
 | 25 | Skills and plugins | Disabled skills, skill cache, plugins, `cron` skill | `agent/plugins.py`, `skills/` | ~350 | |
 
