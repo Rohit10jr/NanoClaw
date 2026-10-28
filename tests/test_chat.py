@@ -207,6 +207,7 @@ def test_help_text():
             "/compact — Compact this chat's context and continue the conversation.",
             "/stop — Cancel the active agent turn for this chat.",
             "/status — Display runtime, provider, and channel status.",
+            "/model [preset] — Show or switch the active model preset.",
             "/history [n] — Print the last N persisted conversation messages.",
             "/dream — Manually trigger memory consolidation.",
             "/skill — List all enabled skills available to the agent.",

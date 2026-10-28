@@ -125,7 +125,13 @@ def test_forced_provider():
 def test_auto_prefers_the_model_prefix_then_the_first_configured_entry():
     providers = {"custom": {}, "deepseek": {"apiKey": "ds"}, "openrouter": {"apiKey": "or"}}
     assert providers_config(providers, model="openrouter/anthropic/claude").resolve_provider()[0] == "openrouter"
+    # No prefix or keyword match: the first provider with a key in registry
+    # order, gateways first (nanobot schema.py:697). Layer 12 took the first
+    # entry in file order (deepseek).
     config = providers_config(providers, model="gpt-4o")
+    assert config.resolve_provider()[0] == "openrouter"
+    assert config.get_api_base() == "https://openrouter.ai/api/v1"
+    config = providers_config(providers, model="deepseek-chat")
     assert config.resolve_provider()[0] == "deepseek"
     assert config.get_api_base() == "https://api.deepseek.com"
     assert providers_config({"custom": {}}).resolve_provider() == (None, None)
@@ -417,7 +423,24 @@ def test_cli_config_init_and_show(tmp_path, monkeypatch, capsys):
     assert "Created config at" in capsys.readouterr().out
     saved = json.loads(path.read_text(encoding="utf-8"))
     assert saved["agents"]["defaults"]["maxToolIterations"] == 200
-    assert saved["providers"] == {"custom": {"apiKey": None, "apiBase": None}}
+    # nanobot's ProviderConfig fields (without useProxy), and the new preset fields.
+    assert saved["providers"] == {
+        "custom": {
+            "apiKey": None,
+            "apiBase": None,
+            "extraHeaders": None,
+            "extraBody": None,
+            "extraQuery": None,
+            "thinkingStyle": None,
+        }
+    }
+    assert saved["modelPresets"] == {}
+    defaults = saved["agents"]["defaults"]
+    assert (defaults["modelPreset"], defaults["reasoningEffort"], defaults["dream"]) == (
+        None,
+        None,
+        {"modelOverride": None},
+    )
     assert main(["config", "init", "-c", str(path)]) == 0
     assert "already up to date" in capsys.readouterr().out
 

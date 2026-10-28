@@ -1,22 +1,28 @@
 """The ``config.json`` schema: a subset of nanobot ``config/schema.py``.
 
 Every field here has nanobot's JSON name, nesting and default, except where a
-comment says otherwise. nanobot's other sections (gateway, api, modelPresets,
-mcpServers, the per-channel entries under channels, ...) are not read: unknown
-keys are ignored, so a nanobot ``config.json`` loads unchanged.
+comment says otherwise. nanobot's other sections (gateway, api, the
+per-channel entries under channels, ...) are not read: unknown keys are
+ignored, so a nanobot ``config.json`` loads unchanged.
 
 Layout (camelCase in JSON)::
 
     {
-      "agents": {"defaults": {"workspace", "model", "provider", "maxTokens",
-                              "contextWindowTokens", "temperature",
+      "agents": {"defaults": {"workspace", "modelPreset", "model", "provider",
+                              "maxTokens", "contextWindowTokens", "temperature",
+                              "reasoningEffort", "dream": {"modelOverride"},
                               "maxToolIterations", "maxConcurrentSubagents",
                               "maxToolResultChars", "providerRetryMode",
                               "timezone", "timezoneMode",
                               "compaction"  # NanoClaw only
                               }},
       "channels": {"sendProgress", "sendToolHints", "showReasoning"},
-      "providers": {"<name>": {"apiKey", "apiBase"}, ...},
+      "providers": {"<name>": {"apiKey", "apiBase", "extraHeaders",
+                               "extraBody", "extraQuery", "thinkingStyle"}, ...},
+      "modelPresets": {"<name>": {"model", "provider", "maxTokens",
+                                  "contextWindowTokens", "temperature",
+                                  "reasoningEffort", "extraHeaders",
+                                  "extraQuery", "extraBody"}, ...},
       "tools": {"exec": {"enable", "maxRuntime", "maxRuntimeLimit",
                          "idleTimeout", "idleAction", "pathPrepend",
                          "pathAppend", "sandbox", "sandboxRoBinds",
@@ -34,13 +40,17 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Literal, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import AliasChoices, Field, field_validator, model_validator
+from pydantic.alias_generators import to_camel
 
 from nanoclaw.config.base import Base
 from nanoclaw.config.timezone import detect_system_timezone
+
+if TYPE_CHECKING:
+    from nanoclaw.providers.registry import ProviderSpec
 
 # nanobot's default is ~/.nanobot/workspace (config/home.py:27).
 DEFAULT_WORKSPACE = "~/.nanoclaw/workspace"
@@ -59,30 +69,51 @@ DEFAULT_MAX_TOOL_ITERATIONS = 200
 # schema stays free of agent imports, like nanobot's).
 CompactionMode = Literal["nanobot", "fixed"]
 
-# OpenAI-compatible base URLs nanobot's provider registry fills in when a
-# provider entry has no apiBase (providers/registry.py ``default_api_base``).
-# Only a few common gateways; others need an explicit apiBase. ``openai`` and
-# ``custom`` without an apiBase mean api.openai.com, as in NanoClaw before.
-DEFAULT_API_BASES = {
-    "openrouter": "https://openrouter.ai/api/v1",  # registry.py:280
-    "deepseek": "https://api.deepseek.com",  # registry.py:643
-    "aihubmix": "https://aihubmix.com/v1",  # registry.py:396
-    "siliconflow": "https://api.siliconflow.cn/v1",  # registry.py:409
-    "huggingface": "https://router.huggingface.co/v1",  # registry.py:368
-}
+
+class DreamConfig(Base):
+    """Dream settings (nanobot schema.py:64 ``DreamConfig``, the preset only).
+
+    nanobot also schedules Dream (``enabled``, ``intervalH``, ``cron``);
+    NanoClaw runs Dream on request (``nanoclaw dream``, ``/dream``), so only
+    the model preset is read.
+    """
+
+    model_override: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("modelOverride", "model", "model_override"),
+    )  # Model preset name for Dream runs
 
 
-def _provider_key(name: str) -> str:
-    """``lm_studio``, ``lmStudio`` and ``lm-studio`` name the same provider."""
-    return name.replace("-", "").replace("_", "").lower()
+class RequestOverrides(Base):
+    """Optional request differences; omitted fields inherit connection defaults (schema.py:128)."""
+
+    extra_headers: dict[str, str] | None = Field(default=None, repr=False)
+    extra_query: dict[str, str] | None = Field(default=None, repr=False)
+    extra_body: dict[str, Any] | None = Field(default=None, repr=False)
+
+
+class ModelPresetConfig(RequestOverrides):
+    """A named set of model + generation parameters for quick switching (schema.py:148).
+
+    nanobot's ``api`` (request-API selection) is not read. The default
+    window is NanoClaw's 128,000 (nanobot: 200,000; difference #1 of layer 12).
+    """
+
+    model: str
+    provider: str = "auto"
+    max_tokens: int = 8192
+    context_window_tokens: int = DEFAULT_CONTEXT_WINDOW_TOKENS
+    temperature: float = 0.1
+    reasoning_effort: str | None = None
 
 
 class AgentDefaults(Base):
     """Default agent configuration (nanobot schema.py:167 ``AgentDefaults``, a subset)."""
 
     workspace: str = DEFAULT_WORKSPACE
+    model_preset: str | None = None  # Active preset name; takes precedence over the fields below (schema.py:171)
     model: str = DEFAULT_MODEL
-    provider: str = "auto"  # a key of ``providers``, or "auto" (schema.py:173)
+    provider: str = "auto"  # a provider name ("deepseek", a ``providers`` key), or "auto" (schema.py:173)
     max_tokens: int = 8192
     context_window_tokens: int = DEFAULT_CONTEXT_WINDOW_TOKENS
     temperature: float = 0.1
@@ -91,12 +122,15 @@ class AgentDefaults(Base):
     max_tool_result_chars: int = 16_000
     # Read by provider retries (schema.py:183); stored here, used once retries land.
     provider_retry_mode: Literal["standard", "persistent"] = "standard"
+    # low / medium / high / ... / none; None keeps the provider's default (schema.py:191).
+    reasoning_effort: str | None = None
     # Stored for the time block; NanoClaw's time block still uses the host clock.
     timezone: str = "UTC"
     timezone_mode: Literal["auto", "manual"] = "auto"
     # NanoClaw only (not in nanobot): "nanobot" (default, like upstream) or
     # "fixed" (docs/UPSTREAM_BUGS.md, bug 4). nanobot ignores the key.
     compaction: CompactionMode = "nanobot"
+    dream: DreamConfig = Field(default_factory=DreamConfig)  # schema.py:212
 
     @model_validator(mode="before")
     @classmethod
@@ -134,15 +168,36 @@ class AgentsConfig(Base):
 
 
 class ProviderConfig(Base):
-    """One provider entry (nanobot schema.py:245 ``ProviderConfig``, the two
-    connection fields; extraHeaders, extraBody, ... are ignored)."""
+    """One provider entry (nanobot schema.py:245 ``ProviderConfig``).
 
+    nanobot's ``api`` (request-API declarations) and ``useProxy`` are not read.
+    """
+
+    display_name: str | None = Field(default=None, exclude_if=lambda value: value is None)
     api_key: str | None = Field(default=None, repr=False)
     api_base: str | None = None
+    extra_headers: dict[str, str] | None = None  # Custom headers (e.g. APP-Code for AiHubMix)
+    extra_body: dict[str, Any] | None = None  # Extra request fields, merged into the request body
+    extra_query: dict[str, str] | None = None  # Extra query params (e.g. api-version)
+    thinking_style: str | None = None  # Thinking/reasoning style for custom providers
 
-    @property
-    def is_configured(self) -> bool:
-        return bool(self.api_key or self.api_base)
+    # nanobot schema.py:268: the keys of _THINKING_STYLE_MAP in the
+    # OpenAI-compatible provider (not imported, to keep the schema free of
+    # provider imports).
+    _VALID_THINKING_STYLES: ClassVar[tuple[str, ...]] = ("thinking_type", "enable_thinking", "reasoning_split")
+
+    @field_validator("thinking_style")
+    @classmethod
+    def _validate_thinking_style(cls, v: str | None) -> str | None:
+        if not v:  # None or "" -> no injection
+            return v
+        if v not in cls._VALID_THINKING_STYLES:
+            raise ValueError(
+                f"Invalid thinking_style {v!r}. "
+                f"Must be one of: {', '.join(repr(s) for s in cls._VALID_THINKING_STYLES)} "
+                f"(or empty/omitted)."
+            )
+        return v
 
 
 def _default_providers() -> dict[str, ProviderConfig]:
@@ -248,59 +303,231 @@ class Config(Base):
 
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)  # schema.py:507
-    # nanobot declares ~40 named providers plus extra keys for custom ones
-    # (schema.py:292). NanoClaw has one OpenAI-compatible provider, so any key
-    # is accepted and the active one is picked by ``resolve_provider``.
+    # nanobot declares a field per registry provider plus extra keys for custom
+    # ones (schema.py:292). NanoClaw keeps one dict: a key naming a registry
+    # provider (``deepseek``, ``lmStudio``) configures it, any other key is a
+    # custom OpenAI-compatible provider (nanobot's ``model_extra``).
     providers: dict[str, ProviderConfig] = Field(default_factory=_default_providers)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
+    model_presets: dict[str, ModelPresetConfig] = Field(
+        default_factory=dict,
+        validation_alias=AliasChoices("modelPresets", "model_presets"),
+        serialization_alias="modelPresets",
+    )  # schema.py:514
+
+    @field_validator("providers")
+    @classmethod
+    def _reject_builtin_aliases(cls, providers: dict[str, ProviderConfig]) -> dict[str, ProviderConfig]:
+        """A key spelling a registry name another way is an error (nanobot schema.py:349)."""
+        from nanoclaw.providers.registry import find_by_name
+
+        for key in providers:
+            spec = find_by_name(key)
+            if spec is not None and key not in (spec.name, to_camel(spec.name)):
+                raise ValueError(
+                    f"providers.{key} conflicts with built-in provider {spec.name!r}; "
+                    "use the built-in provider key or choose a different custom provider name"
+                )
+        return providers
+
+    @model_validator(mode="after")
+    def _validate_model_preset(self) -> Config:
+        """nanobot schema.py:550."""
+        if "default" in self.model_presets:
+            raise ValueError("model_preset name 'default' is reserved for agents.defaults")
+        name = self.agents.defaults.model_preset
+        if name and name != "default" and name not in self.model_presets:
+            raise ValueError(f"model_preset {name!r} not found in model_presets")
+        dream_name = self.agents.defaults.dream.model_override
+        if dream_name and dream_name != "default" and dream_name not in self.model_presets:
+            raise ValueError(f"Dream model preset {dream_name!r} not found in model_presets")
+        return self
+
+    def resolve_default_preset(self) -> ModelPresetConfig:
+        """The implicit ``default`` preset from agents.defaults fields (schema.py:567)."""
+        d = self.agents.defaults
+        return ModelPresetConfig(
+            model=d.model,
+            provider=d.provider,
+            max_tokens=d.max_tokens,
+            context_window_tokens=d.context_window_tokens,
+            temperature=d.temperature,
+            reasoning_effort=d.reasoning_effort,
+        )
+
+    def resolve_preset(self, name: str | None = None) -> ModelPresetConfig:
+        """Effective model params from a named preset or the implicit default (schema.py:576)."""
+        name = self.agents.defaults.model_preset if name is None else name
+        if not name or name == "default":
+            return self.resolve_default_preset()
+        if name not in self.model_presets:
+            raise KeyError(f"model_preset {name!r} not found in model_presets")
+        return self.model_presets[name]
 
     @property
     def workspace_path(self) -> Path:
         """Expanded workspace path (nanobot schema.py:584)."""
         return Path(self.agents.defaults.workspace).expanduser()
 
-    def find_provider(self, name: str) -> tuple[str, ProviderConfig] | None:
-        """The entry whose key names ``name`` (ignoring case, ``-`` and ``_``)."""
-        wanted = _provider_key(name)
-        for key, entry in self.providers.items():
-            if _provider_key(key) == wanted:
-                return key, entry
+    # -- provider choice (nanobot schema.py:588-756) ------------------------
+
+    def provider_entry(self, spec_name: str) -> tuple[str, ProviderConfig] | None:
+        """The ``providers`` entry for a registry provider: key ``lm_studio`` or ``lmStudio``."""
+        for key in (spec_name, to_camel(spec_name)):
+            if key in self.providers:
+                return key, self.providers[key]
+        return None
+
+    def custom_providers(self) -> dict[str, ProviderConfig]:
+        """The entries that name no registry provider (nanobot ``providers.model_extra``)."""
+        from nanoclaw.providers.registry import find_by_name
+
+        return {key: entry for key, entry in self.providers.items() if find_by_name(key) is None}
+
+    def _spec_provider(self, spec: ProviderSpec) -> ProviderConfig:
+        # nanobot has a field (an empty ProviderConfig by default) for every
+        # registry provider; a missing key here reads the same way.
+        found = self.provider_entry(spec.name)
+        return found[1] if found else ProviderConfig()
+
+    def _match_provider(
+        self,
+        model: str | None = None,
+        *,
+        preset: ModelPresetConfig | None = None,
+    ) -> tuple[ProviderConfig | None, str | None]:
+        """Match the provider config and its name. Returns ``(config, name)`` (schema.py:588).
+
+        1. A preset/default ``provider`` other than ``auto`` wins (a registry
+           name, else a custom key).
+        2. The model's prefix names a registry provider with a key (local
+           and direct providers need none), or a custom provider.
+        3. A model-name keyword (``claude``, ``deepseek``, ...), in registry order.
+        4. A configured local provider (apiBase set), preferring one whose
+           base matches its port keyword (``11434`` = Ollama).
+        5. The first registry provider with a key, gateways first.
+        6. The first custom provider with an apiBase.
+        """
+        from nanoclaw.providers.registry import PROVIDERS, find_by_name
+
+        resolved = preset or self.resolve_preset()
+        forced = resolved.provider
+        custom = self.custom_providers()
+
+        def _custom_provider_by_name(name: str) -> tuple[ProviderConfig, str] | None:
+            normalized = name.replace("-", "_").lower()
+            for attr_name, provider in custom.items():
+                if attr_name.replace("-", "_").lower() == normalized:
+                    return provider, attr_name
+            return None
+
+        if forced != "auto":
+            spec = find_by_name(forced)
+            if spec:
+                return self._spec_provider(spec), spec.name
+            found = _custom_provider_by_name(forced)
+            if found is not None:
+                return found
+            return None, None
+
+        model_lower = (model or resolved.model).lower()
+        model_normalized = model_lower.replace("-", "_")
+        model_prefix = model_lower.split("/", 1)[0] if "/" in model_lower else ""
+        normalized_prefix = model_prefix.replace("-", "_")
+        prefixed_provider = find_by_name(model_prefix) if model_prefix else None
+
+        def _kw_matches(kw: str) -> bool:
+            kw = kw.lower()
+            return kw in model_lower or kw.replace("-", "_") in model_normalized
+
+        # Explicit provider prefix wins.
+        for spec in PROVIDERS:
+            p = self._spec_provider(spec)
+            if model_prefix and normalized_prefix == spec.name:
+                if spec.is_local or spec.is_direct or p.api_key:
+                    return p, spec.name
+
+        # A custom provider named by the prefix (e.g. "companyProxy/gpt-4"),
+        # even without an apiBase, so a malformed prefix fails instead of
+        # falling through to a different provider.
+        if model_prefix:
+            found = _custom_provider_by_name(normalized_prefix)
+            if found is not None:
+                return found
+
+        # Match by keyword (registry order).
+        for spec in PROVIDERS:
+            p = self._spec_provider(spec)
+            if any(_kw_matches(kw) for kw in spec.keywords):
+                # A local keyword counts only for a configured local endpoint,
+                # and never for a model qualified with another provider.
+                if spec.is_local:
+                    foreign_prefix = bool(prefixed_provider is not None and prefixed_provider.name != spec.name)
+                    if not p.api_base or foreign_prefix:
+                        continue
+                if spec.is_local or spec.is_direct or p.api_key:
+                    return p, spec.name
+
+        # Configured local providers route models without keywords (plain
+        # "llama3.2" on Ollama), preferring a base that matches the port keyword.
+        local_fallback: tuple[ProviderConfig, str] | None = None
+        if prefixed_provider is None:
+            for spec in PROVIDERS:
+                if not spec.is_local:
+                    continue
+                p = self._spec_provider(spec)
+                if not p.api_base:
+                    continue
+                if spec.detect_by_base_keyword and spec.detect_by_base_keyword in p.api_base:
+                    return p, spec.name
+                if local_fallback is None:
+                    local_fallback = (p, spec.name)
+        if local_fallback:
+            return local_fallback
+
+        # Gateways first, then the others (registry order).
+        for spec in PROVIDERS:
+            p = self._spec_provider(spec)
+            if p.api_key:
+                return p, spec.name
+
+        # Any custom provider with an apiBase.
+        for attr_name, p in custom.items():
+            if p.api_base:
+                return p, attr_name
+
+        return None, None
+
+    def get_provider(self, model: str | None = None, *, preset: ModelPresetConfig | None = None) -> ProviderConfig | None:
+        """The matched provider config (schema.py:722)."""
+        p, _ = self._match_provider(model, preset=preset)
+        return p
+
+    def get_provider_name(self, model: str | None = None, *, preset: ModelPresetConfig | None = None) -> str | None:
+        """The registry name (or custom key) of the matched provider (schema.py:732)."""
+        _, name = self._match_provider(model, preset=preset)
+        return name
+
+    def get_api_key(self, model: str | None = None, *, preset: ModelPresetConfig | None = None) -> str | None:
+        """The matched provider's API key (schema.py:742)."""
+        p = self.get_provider(model, preset=preset)
+        return p.api_key if p else None
+
+    def get_api_base(self, model: str | None = None, *, preset: ModelPresetConfig | None = None) -> str | None:
+        """The matched provider's apiBase, else the registry default (schema.py:752)."""
+        from nanoclaw.providers.registry import find_by_name
+
+        p, name = self._match_provider(model, preset=preset)
+        if p and p.api_base:
+            return p.api_base
+        if name:
+            spec = find_by_name(name)
+            if spec and spec.default_api_base:
+                return spec.default_api_base
         return None
 
     def resolve_provider(self) -> tuple[str | None, ProviderConfig | None]:
-        """Pick the provider entry NanoClaw uses. Returns ``(key, entry)``.
-
-        A simplified nanobot ``_match_provider`` (schema.py:588):
-
-        1. ``agents.defaults.provider`` names an entry: that entry (configured
-           or not, as nanobot).
-        2. ``"auto"``: the entry named by the model's prefix
-           (``openrouter/...``), if it has an apiKey or apiBase.
-        3. ``"auto"``: the first entry, in file order, with an apiKey or
-           apiBase. (nanobot uses its registry order, gateways first, and
-           keyword matching; NanoClaw has no registry.)
-        """
-        forced = self.agents.defaults.provider
-        if forced != "auto":
-            found = self.find_provider(forced)
-            return found if found else (None, None)
-        model = self.agents.defaults.model
-        if "/" in model:
-            found = self.find_provider(model.split("/", 1)[0])
-            if found and found[1].is_configured:
-                return found
-        for key, entry in self.providers.items():
-            if entry.is_configured:
-                return key, entry
-        return None, None
-
-    def get_api_key(self) -> str | None:
-        _, entry = self.resolve_provider()
-        return (entry.api_key or None) if entry else None
-
-    def get_api_base(self) -> str | None:
-        """The entry's apiBase, else nanobot's default base for that provider name."""
-        key, entry = self.resolve_provider()
-        if entry and entry.api_base:
-            return entry.api_base
-        return DEFAULT_API_BASES.get(_provider_key(key)) if key else None
+        """``(name, entry)`` of the provider the active preset uses (NanoClaw's
+        shorthand for ``get_provider_name()`` and ``get_provider()``)."""
+        p, name = self._match_provider()
+        return name, p
