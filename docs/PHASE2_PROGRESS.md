@@ -137,10 +137,10 @@ Legend: ⏳ in progress · ✅ done and verified · ⛔ blocked
 
 | Task | Scope (files) | Sub-agent | Verification | Status |
 |---|---|---|---|---|
-| 21.1 Cron | `cron/` (types, service, bound runner), cron tool, `cron_reminder.md`, the Scheduling prompt section, `croniter` | sub-agent (worktree), phase A | | ⏳ |
-| 21.2 Gateway, idle compaction | `nanoclaw gateway` (foreground, signals, `/health`), `gateway` config, `agent/autocompact.py` in `AgentLoop.run()` | sub-agent (worktree), phase A | | ⏳ |
-| 21.3 Memory history, prompt overrides | `utils/gitstore.py` (dulwich), Dream commits, `/dream-log`, `/dream-restore`, `/dream-prompt` and workspace prompt overrides | sub-agent (worktree), phase A | | ⏳ |
-| 21.4 System jobs | Dream every 2 h, heartbeat (`HEARTBEAT.md`, evaluator) in the gateway | sub-agent (worktree), phase B | | |
+| 21.1 Cron | `cron/` (types, service, bound runner), cron tool, `cron_reminder.md`, the Scheduling prompt section, `croniter` | sub-agent (worktree), phase A | 104 cases identical (next runs incl. DST, resume rule, tool, store, execution, bound runner, prompt) | ✅ |
+| 21.2 Gateway, idle compaction | `nanoclaw gateway` (foreground, signals, `/health`), `gateway` config, `agent/autocompact.py` in `AgentLoop.run()` | sub-agent (worktree), phase A | Idle compaction 27/27 identical, `/health` 4/4; real gateway subprocess with SIGTERM/SIGINT | ✅ |
+| 21.3 Memory history, prompt overrides | `utils/gitstore.py` (dulwich), Dream commits, `/dream-log`, `/dream-restore`, `/dream-prompt` and workspace prompt overrides | sub-agent (worktree), phase A | 280 checks: 208 identical, 72 expected (product name, shorter prompts README) | ✅ |
+| 21.4 System jobs | Dream every 2 h, heartbeat (`HEARTBEAT.md`, evaluator) in the gateway | sub-agent (worktree), phase B | | ⏳ |
 | Integration, mutation checks, docs, PR | | | | |
 
 ## Blockers and open items
