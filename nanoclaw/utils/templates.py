@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from jinja2 import Environment, FileSystemLoader
+from loguru import logger
 
 TEMPLATES_ROOT = Path(__file__).resolve().parent.parent / "templates"
 
@@ -49,11 +50,12 @@ def sync_workspace_templates(workspace: Path) -> list[str]:
     """Create any missing starting files in ``workspace``. Never overwrites.
 
     Returns the paths created, relative to the workspace: ``AGENTS.md``,
-    ``SOUL.md``, ``USER.md``, ``memory/MEMORY.md`` and an empty
-    ``memory/history.jsonl``; the ``skills/`` folder is created too (not
-    listed, as in nanobot). nanobot also creates ``HEARTBEAT.md`` and
-    ``prompts/README.md`` (for features NanoClaw doesn't have), and a git
-    repository tracking ``SOUL.md``/``USER.md``/``MEMORY.md``.
+    ``SOUL.md``, ``USER.md``, ``memory/MEMORY.md``, ``prompts/README.md``
+    and an empty ``memory/history.jsonl``; the ``skills/`` folder is created
+    too (not listed, as in nanobot). Then, as nanobot does, a git repository
+    tracking ``SOUL.md``/``USER.md``/``memory/MEMORY.md`` is initialized
+    (skipped when the workspace is already inside a repository; a failure is
+    logged, never raised). nanobot also creates ``HEARTBEAT.md`` (heartbeat).
     """
     workspace.mkdir(parents=True, exist_ok=True)
     added: list[str] = []
@@ -69,6 +71,15 @@ def sync_workspace_templates(workspace: Path) -> list[str]:
     for name in WORKSPACE_FILES:
         write(name, load_bundled_template(name) or "")
     write("memory/MEMORY.md", load_bundled_template("memory/MEMORY.md") or "")
+    write("prompts/README.md", load_bundled_template("prompts/README.md") or "")
     write("memory/history.jsonl", "")
     (workspace / "skills").mkdir(exist_ok=True)
+
+    # Initialize git for memory version control (nanobot helpers.py:922).
+    try:
+        from nanoclaw.utils.gitstore import GitStore
+
+        GitStore(workspace, tracked_files=["SOUL.md", "USER.md", "memory/MEMORY.md"]).init()
+    except Exception:
+        logger.exception("Failed to initialize git store for {}", workspace)
     return added

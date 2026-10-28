@@ -1397,18 +1397,23 @@ class AgentLoop:
 
         Runs one temporary turn with Dream's instructions and restricted file
         tools. The Dream cursor only moves forward if the run completed, so an
-        interrupted run sees the same entries next time.
+        interrupted run sees the same entries next time. Afterwards, as
+        nanobot's ``cmd_dream`` does (builtin.py:513), the memory files are
+        committed to the workspace's git store with ``dream: manual run`` plus
+        the real diff, and `` (commit <sha>)`` is added to the reply. "No
+        memory changes" means the git diff of the three files is empty. The
+        commit also runs on the nothing-to-process path (that reply gets no
+        suffix), as in nanobot. ``nanoclaw dream`` uses this too.
         """
         start = time.monotonic()
-        result = self.memory.build_dream_prompt()
-        if result is None:
-            logger.info("Dream: nothing to process")
-            return DREAM_NO_INPUT_MESSAGE
-        prompt, last_cursor = result
-        # nanobot reads the change from its git store; NanoClaw compares the files.
-        files = (self.memory.memory_file, self.memory.soul_file, self.memory.user_file)
-        before = [MemoryStore.read_file(f) for f in files]
+        content = ""
+        diff_body = ""
         try:
+            result = self.memory.build_dream_prompt()
+            if result is None:
+                logger.info("Dream: nothing to process")
+                return DREAM_NO_INPUT_MESSAGE
+            prompt, last_cursor = result
             response = await self.process_direct(
                 prompt,
                 session_key=MemoryStore.dream_session_key(),
@@ -1419,27 +1424,38 @@ class AgentLoop:
                 runtime=self.dream_runtime(),
             )
             elapsed = time.monotonic() - start
+            # The real file delta grounds the audit record; normal completion
+            # decides whether this history batch has finished processing.
+            diff_body = self.memory.dream_content_diff()
             if response.stop_reason == "completed":
                 self.memory.set_last_dream_cursor(last_cursor)
-                if [MemoryStore.read_file(f) for f in files] != before:
+                if diff_body:
                     logger.info("Dream completed, cursor advanced to {}", last_cursor)
-                    return f"Dream completed in {elapsed:.1f}s."
-                logger.info("Dream completed with no memory changes; cursor advanced to {}", last_cursor)
-                return f"Dream completed in {elapsed:.1f}s; no memory changes."
-            logger.warning(
-                "Dream did not complete ({}); cursor remains at {}",
-                f"stop_reason: {response.stop_reason}",
-                self.memory.get_last_dream_cursor(),
-            )
-            return (
-                f"Dream did not complete after {elapsed:.1f}s (stop_reason: {response.stop_reason}); "
-                "memory cursor was not advanced."
-            )
+                    content = f"Dream completed in {elapsed:.1f}s."
+                else:
+                    logger.info("Dream completed with no memory changes; cursor advanced to {}", last_cursor)
+                    content = f"Dream completed in {elapsed:.1f}s; no memory changes."
+            else:
+                logger.warning(
+                    "Dream did not complete ({}); cursor remains at {}",
+                    f"stop_reason: {response.stop_reason}",
+                    self.memory.get_last_dream_cursor(),
+                )
+                content = (
+                    f"Dream did not complete after {elapsed:.1f}s (stop_reason: {response.stop_reason}); "
+                    "memory cursor was not advanced."
+                )
         except Exception as exc:
             logger.exception("Dream failed")
-            return f"Dream failed after {time.monotonic() - start:.1f}s: {exc}"
+            content = f"Dream failed after {time.monotonic() - start:.1f}s: {exc}"
         finally:
+            if self.memory.git.is_initialized():
+                commit_msg = MemoryStore.build_dream_commit_message("dream: manual run", diff_body)
+                sha = self.memory.git.auto_commit(commit_msg)
+                if sha:
+                    content += f" (commit {sha})"
             self.memory.compact_history()
+        return content
 
     def _get_session_lock(self, session_key: str) -> asyncio.Lock:
         return self._session_locks.setdefault(session_key, asyncio.Lock())

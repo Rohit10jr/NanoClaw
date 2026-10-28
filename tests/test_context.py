@@ -30,7 +30,7 @@ def ws(tmp_path):
 
 def test_sync_creates_missing_files_and_never_overwrites(tmp_path):
     assert sync_workspace_templates(tmp_path) == [
-        "AGENTS.md", "SOUL.md", "USER.md", "memory/MEMORY.md", "memory/history.jsonl"
+        "AGENTS.md", "SOUL.md", "USER.md", "memory/MEMORY.md", "prompts/README.md", "memory/history.jsonl"
     ]
     assert (tmp_path / "memory" / "MEMORY.md").read_text(encoding="utf-8") == load_bundled_template("memory/MEMORY.md")
     assert (tmp_path / "memory" / "history.jsonl").read_text(encoding="utf-8") == ""
@@ -259,7 +259,9 @@ def test_cli_prompt_command_prints_system_prompt_and_creates_files(capsys, tmp_p
     captured = capsys.readouterr()
     assert captured.out.strip() == ContextBuilder(ws).build_system_prompt(channel="cli").strip()
     assert f"[created {ws / 'SOUL.md'}]" in captured.err
-    assert sorted(p.name for p in ws.iterdir()) == ["AGENTS.md", "SOUL.md", "USER.md", "memory", "skills"]
+    assert sorted(p.name for p in ws.iterdir()) == [
+        ".git", ".gitignore", "AGENTS.md", "SOUL.md", "USER.md", "memory", "prompts", "skills"
+    ]
 
 
 def test_cli_ask_sends_edited_soul_to_the_model(tmp_path):
