@@ -168,6 +168,7 @@ def _make_loop(
         # Idle auto-compaction on the bus loop's idle tick (nanobot from_config, loop.py:524).
         session_ttl_minutes=defaults.session_ttl_minutes,
         idle_compact_check_interval_seconds=defaults.idle_compact_check_interval_seconds,
+        disabled_skills=defaults.disabled_skills,
     )
 
 
@@ -409,14 +410,17 @@ async def _compact(
     return 0
 
 
-def _skills(workspace: Path) -> int:
+def _skills(workspace: Path, disabled_skills: list[str] | None = None) -> int:
     """List the skills (nanobot's ``/skill`` command).
 
-    Unlike nanobot, skills whose requirements are missing are marked with what
-    is missing: since nanobot 32f5cc7 the prompt's skill list leaves them out,
-    so this is the one place that says why a skill is not offered.
+    Unlike nanobot, which lists only enabled skills, this lists every skill
+    and marks the ones the agent is not offered: disabled ones
+    (``agents.defaults.disabledSkills``) and ones whose requirements are
+    missing, with what is missing. Since nanobot 32f5cc7 the prompt's skill
+    list leaves both out, so this is the one place that says why.
     """
     loader = ContextBuilder(workspace).skills
+    disabled = set(disabled_skills or ())
     skills = loader.list_skills(filter_unavailable=False)
     if not skills:
         print("No skills available.")
@@ -424,9 +428,14 @@ def _skills(workspace: Path) -> int:
     lines = [f"Available skills ({len(skills)}):", ""]
     for entry in skills:
         line = f"- **{entry['name']}** — {loader.get_skill_description(entry['name'])}"
+        notes: list[str] = []
+        if entry["name"] in disabled:
+            notes.append("disabled")
         available, missing = loader.get_skill_availability(entry["name"])
         if not available:
-            line += f" (unavailable: {missing})" if missing else " (unavailable)"
+            notes.append(f"unavailable: {missing}" if missing else "unavailable")
+        if notes:
+            line += f" ({'; '.join(notes)})"
         lines.append(line)
     print("\n".join(lines))
     return 0
@@ -702,9 +711,9 @@ def main(argv: list[str] | None = None, provider: LLMProvider | None = None) -> 
     if args.command == "dream":
         return asyncio.run(_dream(get_provider(), workspace, config, preset_loader=loader))
     if args.command == "skills":
-        return _skills(workspace)
+        return _skills(workspace, config.agents.defaults.disabled_skills)
     if args.command == "prompt":
-        builder = ContextBuilder(workspace)
+        builder = ContextBuilder(workspace, disabled_skills=config.agents.defaults.disabled_skills)
         builder.include_scheduling = True  # chat and ask have the cron tool
         print(builder.build_system_prompt(channel=CHANNEL, workspace=project))
         return 0

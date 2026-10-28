@@ -18,12 +18,14 @@ The `metadata` field keeps nanobot's `{"nanobot": {...}}` form (for example
 `"requires": {"bins": ["curl"]}`), so skills work in both projects.
 
 A skill in the workspace's `skills/` folder with the same name replaces the
-built-in one.
+built-in one. Skills named in `agents.defaults.disabledSkills` are not offered
+to the agent; `nanoclaw skills` still lists them, marked disabled.
 
 ## Available skills
 
 | Skill | Description |
 |-------|-------------|
+| `cron` | Schedule reminders and recurring tasks with the `cron` tool |
 | `github` | Interact with GitHub using the `gh` CLI |
 | `memory` | Search past conversations in the history log |
 | `skill-creator` | Create new skills |
@@ -31,5 +33,6 @@ built-in one.
 | `tmux` | Remote-control tmux sessions |
 | `weather` | Get weather info using wttr.in and Open-Meteo |
 
-nanobot also bundles `cron`, `image-generation`, `my`, `update-setup` and
-`clawhub`; they need features NanoClaw doesn't have (see `docs/notes/07-skills.md`).
+nanobot also bundles `image-generation`, `my`, `update-setup`, `clawhub` and
+`nanobot-document`; they need features NanoClaw doesn't have (see
+`docs/notes/07-skills.md`).

@@ -15,9 +15,12 @@ and every route answers ``401 Unauthorized`` without a valid API token.
 nanobot runs mutations only through the socket's ``webui_request``; a plain
 HTTP call to a mutation path answers 405 (ws_http.py:483). This module
 registers the ``sidebar.update``, ``automation.enable`` / ``disable`` /
-``delete`` / ``run`` and ``settings.pairing.approve`` / ``deny`` (payload
-``{"code": ...}``, settings_system.py) mutations in ``ctx.mutations`` (the channel owns
-``session.delete``) and answers 405 on the mutation paths it knows.
+``delete`` / ``run``, ``settings.pairing.approve`` / ``deny`` (payload
+``{"code": ...}``, settings_system.py) and ``skill.update`` (payload
+``{"name", "enabled"}``, skills_api.py) mutations in ``ctx.mutations`` (the
+channel owns ``session.delete``) and answers 405 on the mutation paths it
+knows. ``GET /api/webui/skills`` and ``/api/webui/skills/{name}`` come from
+skills_api.py too.
 
 What differs from nanobot (deliberately):
 
@@ -71,6 +74,12 @@ from nanoclaw.webui.session_automations import all_automations_payload, session_
 from nanoclaw.webui.session_identity import is_webui_session_key
 from nanoclaw.webui.session_list_index import webui_sessions_payload
 from nanoclaw.webui.settings_system import pairing_action, pairing_payload
+from nanoclaw.webui.skills_api import (
+    SkillManagementError,
+    set_webui_skill_enabled,
+    webui_skill_detail_payload,
+    webui_skills_payload,
+)
 from nanoclaw.webui.transcript import (
     build_webui_thread_payload,
     build_webui_trace_detail_response,
@@ -1146,40 +1155,78 @@ def _pairing_mutation(ctx: WebUIContext, action: str):
     return pairing_mutation
 
 
-def webui_skills_payload(workspace: Path) -> dict[str, Any]:
-    """nanobot webui/skills_api.py ``webui_skills_payload``: skills without local paths."""
-    from nanoclaw.agent.skills import SkillsLoader
-
-    loader = SkillsLoader(workspace)
-    entries = sorted(loader.list_skills(filter_unavailable=False),
-                     key=lambda entry: (entry.get("source") != "workspace", entry["name"]))
-    skills = []
-    for entry in entries:
-        name = entry["name"]
-        metadata = loader.get_skill_metadata(name)
-        raw_description = metadata.get("description") if metadata else None
-        available, unavailable_reason = loader.get_skill_availability(name)
-        source = entry.get("source", "unknown")
-        skills.append({
-            "name": name,
-            "description": (raw_description.strip() if isinstance(raw_description, str)
-                            and raw_description.strip() else name),
-            "source": source,
-            "enabled": True,
-            "deletable": source == "workspace",
-            "available": available,
-            "unavailable_reason": unavailable_reason,
-        })
-    return {"skills": skills}
+def _disabled_skills(ctx: WebUIContext) -> set[str]:
+    """``agents.defaults.disabledSkills`` (nanobot channels/manager.py:222)."""
+    return set(ctx.config.agents.defaults.disabled_skills)
 
 
 async def _handle_webui_skills(request: web.Request) -> web.Response:
     """GET /api/webui/skills (ws_http.py:1803)."""
     if not _authorized(request):
         return _unauthorized()
-    import asyncio
+    ctx = _ctx(request)
+    return _json_response(
+        await asyncio.to_thread(webui_skills_payload, ctx.workspace, disabled_skills=_disabled_skills(ctx))
+    )
 
-    return _json_response(await asyncio.to_thread(webui_skills_payload, _ctx(request).workspace))
+
+async def _handle_webui_skill_detail(request: web.Request) -> web.Response:
+    """GET /api/webui/skills/{name} (ws_http.py:1960)."""
+    if not _authorized(request):
+        return _unauthorized()
+    name = unquote(request.match_info["name"])
+    if not name or "/" in name or "\\" in name:
+        return _error(400, "invalid skill name")
+    ctx = _ctx(request)
+    payload = await asyncio.to_thread(
+        webui_skill_detail_payload, ctx.workspace, name, disabled_skills=_disabled_skills(ctx)
+    )
+    if payload is None:
+        return _error(404, "skill not found")
+    return _json_response(payload)
+
+
+_SKILL_CONFIG_LOCK = threading.Lock()
+
+
+def _skill_update_mutation(ctx: WebUIContext):
+    async def skill_update(payload: dict[str, Any]) -> web.Response:
+        """``webui_request`` ``skill.update`` (ws_http.py:1901
+        ``_handle_webui_skill_update``): payload ``{"name", "enabled"}``.
+
+        Saves ``agents.defaults.disabledSkills`` to ``config.json`` and
+        applies it to the running agent and its subagents (nanobot
+        gateway_runtime.py:813 ``_webui_skill_state_action``)."""
+        from nanoclaw.config.loader import get_config_path
+
+        name = mutation_query_value(payload, "name") or ""
+        raw_enabled = (mutation_query_value(payload, "enabled") or "").lower()
+        if raw_enabled not in {"true", "false"}:
+            return _error(400, "enabled must be true or false")
+        disabled = _disabled_skills(ctx)
+
+        def update() -> dict[str, Any]:
+            with _SKILL_CONFIG_LOCK:
+                return set_webui_skill_enabled(
+                    ctx.workspace,
+                    name,
+                    enabled=raw_enabled == "true",
+                    disabled_skills=disabled,
+                    config_path=get_config_path(),
+                )
+
+        try:
+            action = await asyncio.to_thread(update)
+        except SkillManagementError as exc:
+            return _error(exc.status, exc.message)
+        ctx.config.agents.defaults.disabled_skills = sorted(disabled)
+        if ctx.loop is not None:
+            ctx.loop.context.skills.disabled_skills = set(disabled)
+            ctx.loop.subagents.disabled_skills = set(disabled)
+        skills = await asyncio.to_thread(webui_skills_payload, ctx.workspace, disabled_skills=set(disabled))
+        return _json_response({**skills, "last_action": action})
+
+    return skill_update
 
 
 async def api_not_found(request: web.Request) -> web.Response:
@@ -1210,6 +1257,7 @@ def register_rest_routes(app: web.Application, ctx: WebUIContext) -> None:
         ctx.mutations[f"automation.{action}"] = _automation_action_mutation(ctx, action)
     for action in ("approve", "deny"):
         ctx.mutations[f"settings.pairing.{action}"] = _pairing_mutation(ctx, action)
+    ctx.mutations["skill.update"] = _skill_update_mutation(ctx)
     for path in (
         "/api/webui/sidebar-state/update",
         "/api/sessions/{key}/delete",
@@ -1218,6 +1266,7 @@ def register_rest_routes(app: web.Application, ctx: WebUIContext) -> None:
         "/api/workspaces/resolve-project",
         "/api/settings/pairing/approve",
         "/api/settings/pairing/deny",
+        "/api/webui/skills/update",
     ):
         app.router.add_route("*", path + _SLASH, _handle_mutation_path)
     routes = (
@@ -1234,6 +1283,7 @@ def register_rest_routes(app: web.Application, ctx: WebUIContext) -> None:
         ("/api/settings", _handle_settings),
         ("/api/settings/pairing", _handle_pairing),
         ("/api/webui/skills", _handle_webui_skills),
+        ("/api/webui/skills/{name}", _handle_webui_skill_detail),
     )
     for path, handler in routes:
         app.router.add_get(path + _SLASH, handler)
