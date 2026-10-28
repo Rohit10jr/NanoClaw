@@ -31,6 +31,7 @@ browser (nanobot web UI) ── GET / , /assets/* ──────────
 | `WebSocketChannel` | aiohttp on one port (default `127.0.0.1:8765`): websocket, bootstrap, REST, static files. Inbound envelopes: `message` (validation, `message_accepted`, dedupe of `(chat_id, turn_id)` for 10 minutes, `user_message` to other subscribers), `new_chat`, `attach`, `webui_request` (`session.delete`, `sidebar.update`). Outbound: layer 22's projector, frames sent per audience, persisted records written to the display history; an active-turn registry; title generation after a turn | `channels/websocket/runtime.py`, `webui/inbound_commands.py`, `session/webui_turns.py` |
 | Bootstrap and tokens | `/webui/bootstrap`: `ws_path`, a one-time websocket token, an API token with a TTL, limits, capabilities. Loopback without a secret by default; `tokenIssueSecret` (sent as `X-Nanobot-Auth`) for remote access; `0.0.0.0` requires a secret | `webui/gateway_tokens.py`, `channels/websocket/ws_http.py:729` |
 | Static files | The built UI at the origin root, SPA fallback, `index.html` no-cache, hashed assets immutable, `.gz` siblings; unknown `/api/*` is a 404, never the page | `ws_http.py:2001` `_serve_static` |
+| Chat automations (`webui/session_automations.py`) | `/api/sessions/<key>/automations` lists a chat's cron jobs; pause, enable, run and delete from the popover; deleting a chat with jobs is blocked unless `delete_automations` is set, then the jobs go too | `webui/session_automations.py` |
 | REST (`webui/rest_api.py`) | `/api/sessions`, `…/webui-thread` (ETag, 304, paging), `…/prompts`, `…/trace-detail`, `…/context`, `/api/commands`, `/api/webui/sidebar-state`, read-only `/api/settings` (model, presets, providers), `/api/workspaces`, `/api/settings/pairing` (empty), `/api/webui/skills`; bearer auth on every route | `channels/websocket/ws_http.py` |
 
 ```json
@@ -59,6 +60,7 @@ chat's automations (task 23.5).
 |---|---|
 | 23.1 Server, websocket channel | 71 observations through both real channels (envelopes, bootstrap with and without secret, loopback vs remote, static files, outbound frames and history records): 64 identical, 7 deliberate (capabilities, no session generations, no upload field) |
 | 23.2 REST | 48 requests through nanobot's real HTTP handler: 41 identical, 7 explained (304 content type, NanoClaw's token estimate, commands NanoClaw lacks, fixed workspace, workspace path); provider rows: the 20 both list identical |
+| 23.5 Chat automations | 31 cases (0/1/2 bound jobs, errors, deletes with and without the flag, actions): identical |
 | 23.4 End to end | 9 scenarios in the real UI: Markdown streaming; reasoning and tool rows live and after reload; two chats and switching; delete; `/stop` and the slash menu; a failed model call; `/status` and `/help`; reload during a streaming turn; the bootstrap secret prompt. All pass. `tests/e2e/` runs them when `NANOCLAW_E2E_WEBUI_DIST` points at a build |
 
 ## Differences from nanobot (deliberate)
@@ -75,9 +77,9 @@ chat's automations (task 23.5).
 
 ## Tests
 
-Layer 23 adds 126 tests (3,497 → 3,623): `test_websocket_channel.py`,
+Layer 23 adds 143 tests (3,497 → 3,640): `test_websocket_channel.py`,
 `test_channel_manager.py`, `test_webui_gateway_e2e.py` (in-process gateway),
-`tests/webui/test_rest_api.py`, and `tests/e2e/` (the browser scenarios,
+`tests/webui/test_rest_api.py`, `tests/webui/test_session_automations.py`, and `tests/e2e/` (the browser scenarios,
 skipped unless a UI build is given).
 
 ### Mutation checks
