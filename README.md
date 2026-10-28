@@ -35,6 +35,7 @@ recovery, governance) for later.
 | 17 | More tools: `apply_patch`, `rg`, unchanged-file reads, MCP servers | done |
 | 18 | Isolation: bubblewrap sandbox, separate project folder (`--project`) | done |
 | 19 | Subagents v2: the `subagent` tool (create, send, cancel, check) | done |
+| 20 | Providers: registry, model presets, `/model`, Anthropic (Claude), fallback models | done |
 
 Phase 1 (the core agent) is complete. Phase 2 builds the production backend
 (layers 11–25; progress in [`docs/PHASE2_PROGRESS.md`](docs/PHASE2_PROGRESS.md)).
