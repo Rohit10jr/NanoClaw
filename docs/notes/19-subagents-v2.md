@@ -70,12 +70,35 @@ reports.
 
 ## Tests
 
-Layer 19 adds 88 tests (2,101 → 2,189): `test_subagent_control.py`,
-`test_subagent_lifecycle.py`, `test_subagent_sessions.py` (adapted from
+Layer 19 adds 125 tests (2,101 → 2,226): `test_subagent_control.py`,
+`test_subagent_lifecycle.py`, `test_subagent_sessions.py`, `test_subagent_gaps.py` (adapted from
 nanobot's subagent tests) and `test_subagents.py` rewritten for the new tool;
 tests using `spawn` elsewhere (chat, bus, cancellation, streaming, logging,
 workspace scope) moved to `subagent`.
 
 ### Mutation checks
 
-MUTATION_RESULTS
+255 rules were broken on purpose:
+
+| Area | Rules | Caught at once | Gaps closed with tests | Equivalent | Result |
+|---|---|---|---|---|---|
+| `SubagentManager` | 146 | 115 | 20 | 11 | 135 caught |
+| Child sessions and status | 56 | 27 | 24 | 5 | 51 caught |
+| Tool, loop, commands | 53 | 37 | 15 | 1 | 52 caught |
+
+37 new tests (`test_subagent_gaps.py`) close the gaps, for example: a task
+cancelled before it starts still reports "cancelled"; a task that resists
+cancellation is saved as `stopping`; delivered receipts are saved before the
+next model request; the result and label limits; a child's own reads don't
+replace the parent's file state; recovery seals only queued, running and
+stopping tasks; temporary children are bounded; `check` without a task lists
+only retained tasks; a report for a child the session doesn't own is not
+injected into its turn.
+
+Equivalent (17): guards covered by another check (a cancelled task can't pass
+the semaphore; two cancellation checks each cover the other, removing both
+would matter); saves that write the same live session object; fields only the
+`subagent` tool reads, which children don't have; and branches only `send` and
+`cancel` can reach. The split `wait_for` test (layer 16) failed once in
+hundreds of parallel runs; it didn't reproduce under load afterwards.
+
