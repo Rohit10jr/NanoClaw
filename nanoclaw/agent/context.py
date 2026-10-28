@@ -41,6 +41,10 @@ class ContextBuilder:
         self.workspace = workspace
         self.memory = MemoryStore(workspace)
         self.skills = SkillsLoader(workspace)
+        # The tool contract's ``## Scheduling`` section; the loop turns it on
+        # when it registers the ``cron`` tool (nanobot: always in the prompt,
+        # where the main agent always has the tool).
+        self.include_scheduling = False
 
     # --- system prompt -------------------------------------------------------
 
@@ -65,7 +69,7 @@ class ContextBuilder:
         bootstrap = self._load_bootstrap_files(root)
         if bootstrap:
             parts.append(bootstrap)
-        parts.append(render_template("agent/tool_contract.md"))
+        parts.append(render_template("agent/tool_contract.md", scheduling=self.include_scheduling))
         project_path = root.expanduser().resolve()
         if project_path != self.workspace.expanduser().resolve():
             parts.append(

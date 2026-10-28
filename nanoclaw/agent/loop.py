@@ -46,8 +46,16 @@ Since layer 20 the provider and model settings live in a
 its session's runtime: the preset picked with ``/model`` (saved in the
 session metadata), else the default (nanobot ``runtime_for_session``).
 
+Since layer 21 a loop given a ``CronService`` registers nanobot's ``cron``
+tool and runs scheduled turns: ``submit_cron_turn`` (called by the bound cron
+runner) queues the job's message in its session's inbox and waits for the
+turn's reply. A cron turn whose session is busy waits until the session's
+other input is done (nanobot ``CronTurnCoordinator``), is never injected into
+a running turn, and is saved as "Scheduled cron job triggered: ..." with
+nanobot's automation markers instead of the prompt the model sees.
+
 Left out of nanobot's loop: unified sessions, goals and turn continuations,
-automation (cron) turns, WebUI recovery admission and follow-up journal,
+local trigger turns, WebUI recovery admission and follow-up journal,
 config hot reload, the global concurrency gate and idle auto-compaction (the
 1 s idle tick of ``run`` is kept).
 """
@@ -69,6 +77,7 @@ from typing import Any
 from loguru import logger
 
 from nanoclaw.agent.context import ContextBuilder
+from nanoclaw.agent.cron_turns import CronTurnCoordinator
 from nanoclaw.agent.context_governance import (
     CONTEXT_SAFETY_BUFFER,
     ContextWindowExceededError,
@@ -90,6 +99,7 @@ from nanoclaw.agent.tools import ToolRegistry, build_default_tools
 from nanoclaw.agent.tools.exec_session import ExecSessionManager
 from nanoclaw.agent.tools.context import RequestContext, bind_request_context, reset_request_context
 from nanoclaw.agent.tools.file_state import FileStateStore, bind_file_states, reset_file_states
+from nanoclaw.agent.tools.cron import CronTool
 from nanoclaw.agent.tools.subagent import SubagentTool
 from nanoclaw.agent.turn_delivery import TurnDelivery, TurnDeliveryFactory
 from nanoclaw.agent.turn_hooks import AgentTurnHookSpec, build_agent_turn_hook
@@ -98,6 +108,8 @@ from nanoclaw.bus.outbound_events import StreamDeltaEvent, StreamedResponseEvent
 from nanoclaw.bus.queue import MessageBus
 from nanoclaw.command import CommandContext, CommandRouter, command_text, register_builtin_commands
 from nanoclaw.config.schema import ExecToolConfig, ModelPresetConfig
+from nanoclaw.cron.service import CronService
+from nanoclaw.cron.session_turns import CRON_AUTOMATION_SPEC
 from nanoclaw.events import NO_EVENTS, AgentEvent, EventSink
 from nanoclaw.providers import LLMProvider
 from nanoclaw.runtime_context import (
@@ -119,6 +131,7 @@ from nanoclaw.security.workspace_access import (
 )
 from nanoclaw.session import Session, SessionManager
 from nanoclaw.session.manager import SESSION_CACHE_MAX_SIZE
+from nanoclaw.session.automation_spec import automation_history_overrides_for_spec
 from nanoclaw.session.model_selection import SESSION_MODEL_PRESET_METADATA_KEY, model_preset_from_metadata
 from nanoclaw.session.recovery import (
     PENDING_USER_TURN_KEY,
@@ -219,6 +232,8 @@ class AgentLoop:
         model_preset: str | None = None,
         dream_model_preset: str | None = None,
         preset_runtime_loader: PresetRuntimeLoader | None = None,
+        cron_service: CronService | None = None,
+        timezone: str = "UTC",
     ) -> None:
         # ``model_presets`` include "default" (nanobot ``configured_model_presets``);
         # without one, "default" is these constructor settings.
@@ -294,8 +309,18 @@ class AgentLoop:
                 exec_config=self.exec_config,
             )
             tools.register(SubagentTool(self.subagents))
+            if cron_service is not None:
+                tools.register(CronTool(cron_service, default_timezone=timezone or "UTC"))
             logger.info("Registered {} tools: {}", len(tools.tool_names), tools.tool_names)
+        elif cron_service is not None and not tools.has("cron"):
+            tools.register(CronTool(cron_service, default_timezone=timezone or "UTC"))
         self.tools = tools
+        # nanobot ``cron_service`` / ``context.timezone``: the store the cron
+        # tool edits and the default timezone of its schedules.
+        self.cron_service = cron_service
+        self.timezone = timezone
+        # The tool contract's ``## Scheduling`` section names the cron tool.
+        self.context.include_scheduling = tools.has("cron")
         # One file-read/write tracker per session (nanobot loop.py:389). The
         # tool registry is shared by this loop, so tools resolve the active
         # state via contextvars; ``read_file`` uses it to answer a repeat read
@@ -322,6 +347,15 @@ class AgentLoop:
         self._pending_queues: dict[str, asyncio.Queue[InboundMessage]] = {}
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._close_lock: asyncio.Lock | None = None
+        # Cron turns waiting for their busy session to go idle (nanobot
+        # ``_deferred_automation_turns``), and the coordinator that matches
+        # each submitted cron turn with its reply (loop.py:437).
+        self._deferred_automation_turns: dict[str, list[InboundMessage]] = {}
+        self._cron_turns = CronTurnCoordinator(
+            enqueue=self._enqueue_session_message,
+            deferred_queues=self._deferred_automation_turns,
+        )
+        self._automation_turn_coordinators = (self._cron_turns,)
 
     # -- model selection (nanobot loop.py:230-290, 560-640) ------------------
 
@@ -546,6 +580,18 @@ class AgentLoop:
             # A subagent publishes its report before its task ends.
             await asyncio.wait(running, return_when=asyncio.FIRST_COMPLETED)
 
+    async def submit_cron_turn(self, msg: InboundMessage) -> OutboundMessage | None:
+        """Run a scheduled turn in its session and wait for its reply. (nanobot loop.py:700)
+
+        Needs ``run`` to be serving the session workers; the turn waits
+        behind the session's queued input.
+        """
+        return await self._cron_turns.submit(msg)
+
+    def pending_cron_job_ids_for_session(self, session_key: str) -> set[str]:
+        """Cron jobs waiting for or running in the session. (nanobot loop.py:706)"""
+        return self._cron_turns.pending_job_ids_for_session(session_key)
+
     # -- the bus ------------------------------------------------------------
 
     async def run(self) -> None:
@@ -636,6 +682,10 @@ class AgentLoop:
         key = msg.session_key
         if not self.subagents.accepts_result(msg, key):
             return
+        # A cron turn for a busy session waits until the session is idle.
+        for coordinator in self._automation_turn_coordinators:
+            if coordinator.defer_if_active(msg, session_key=key, active_session_keys=self._pending_queues.keys()):
+                return
         pending = self._pending_queues.get(key)
         if pending is not None:
             pending.put_nowait(msg)
@@ -654,25 +704,45 @@ class AgentLoop:
                 try:
                     msg = pending.get_nowait()
                 except asyncio.QueueEmpty:
-                    break
+                    # Idle-only automation follows all accepted user input on
+                    # this same worker (nanobot loop.py:1604).
+                    deferred = self._deferred_automation_turns.get(session_key)
+                    if not deferred:
+                        break
+                    msg = deferred.pop(0)
+                    if not deferred:
+                        self._deferred_automation_turns.pop(session_key)
                 try:
                     await self._dispatch_one(msg, pending)
-                except asyncio.CancelledError:
+                except asyncio.CancelledError as exc:
+                    for coordinator in self._automation_turn_coordinators:
+                        coordinator.complete(msg, error=exc)
                     raise
                 except Exception:
                     logger.exception("Session worker failed one message for {}; continuing FIFO", session_key)
-        except asyncio.CancelledError:
-            await self._cancel_pending_messages(session_key, pending)
+        except asyncio.CancelledError as exc:
+            await self._cancel_pending_messages(session_key, pending, exc)
             raise
         finally:
             if self._pending_queues.get(session_key) is pending:
                 self._pending_queues.pop(session_key, None)
 
-    async def _cancel_pending_messages(self, session_key: str, pending: asyncio.Queue[InboundMessage]) -> None:
+    async def _cancel_pending_messages(
+        self,
+        session_key: str,
+        pending: asyncio.Queue[InboundMessage],
+        error: asyncio.CancelledError | None = None,
+    ) -> None:
         """Drop queued input after its worker stopped; queued session commands
-        still get their (empty) completion. (nanobot loop.py:1636)"""
+        still get their (empty) completion, and queued or deferred cron turns
+        fail with the cancellation. (nanobot loop.py:1636)"""
+        error = error if error is not None else asyncio.CancelledError()
+        for msg in self._deferred_automation_turns.pop(session_key, []):
+            pending.put_nowait(msg)
         while not pending.empty():
             msg = pending.get_nowait()
+            for coordinator in self._automation_turn_coordinators:
+                coordinator.complete(msg, error=error)
             if msg.channel != "system" and self.commands.requires_session_queue(command_text(msg)):
                 delivery = self.turn_delivery_factory.unrouted(msg, session_key)
                 await delivery.complete(None, publish_completion=True)
@@ -697,6 +767,8 @@ class AgentLoop:
                     )
                     await delivery.complete(ctx.outbound, publish_completion=True)
                     completion_published = True
+                    for coordinator in self._automation_turn_coordinators:
+                        coordinator.complete(msg, response=ctx.outbound)
                 except asyncio.CancelledError:
                     logger.info("Task cancelled for session {}", session_key)
                     try:
@@ -714,9 +786,11 @@ class AgentLoop:
                     except Exception:
                         logger.opt(exception=True).debug("Could not finalize cancelled turn for session {}", session_key)
                     raise
-                except Exception:
+                except Exception as exc:
                     logger.exception("Error processing message for session {}", session_key)
                     await delivery.fail(publish_completion=True)
+                    for coordinator in self._automation_turn_coordinators:
+                        coordinator.complete(msg, error=exc)
                 finally:
                     await delivery.idle()
         except asyncio.CancelledError:
@@ -787,6 +861,7 @@ class AgentLoop:
         return bool(
             self.bus.inbound_size
             or self._pending_queues
+            or self._deferred_automation_turns
             or self.bus.has_pending_events
             or self._active_tasks
             or self._background_tasks
@@ -1029,7 +1104,14 @@ class AgentLoop:
             persisted_early = True
         else:
             blocks = self._runtime_blocks(content, session, ephemeral=ephemeral, scope=ctx.workspace_scope)
-            persisted_early = not ephemeral and self._persist_user_message_early(content, session, blocks)
+            # A cron turn is saved as its trigger record, with nanobot's
+            # automation markers, not as the prompt (nanobot loop.py:747).
+            text_override, automation_extra = automation_history_overrides_for_spec(
+                msg.metadata, CRON_AUTOMATION_SPEC
+            )
+            persisted_early = not ephemeral and self._persist_user_message_early(
+                content if text_override is None else text_override, session, blocks, **automation_extra
+            )
         # [system, *history, new message], the new message never merged into
         # the history (nanobot ``ContextBuilder.build_transcript``): system
         # prompt + history are what the model has already accepted, so they
@@ -1170,6 +1252,7 @@ class AgentLoop:
                 log_content=not ephemeral,
                 persist_session=not ephemeral,
                 can_receive_background_results=self._running,
+                metadata=dict(ctx.msg.metadata or {}),
             )
         )
         # nanobot loop.py:1310-1328: the progress hook first, then this
@@ -1242,7 +1325,9 @@ class AgentLoop:
         return result
 
     def _can_inject_message(self, msg: InboundMessage) -> bool:
-        """Commands stay out of injected batches. (nanobot loop.py:1007)"""
+        """Commands and cron turns stay out of injected batches. (nanobot loop.py:1007)"""
+        if any(coordinator.owns_turn(msg) for coordinator in self._automation_turn_coordinators):
+            return False
         return msg.channel == "system" or not self.commands.is_dispatchable_command(command_text(msg))
 
     def _injected_user_message(
