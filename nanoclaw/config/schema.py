@@ -20,7 +20,19 @@ Layout (camelCase in JSON)::
                               "idleCompactCheckIntervalSeconds",
                               "compaction"  # NanoClaw only
                               }},
-      "channels": {"sendProgress", "sendToolHints", "showReasoning"},
+      "channels": {"sendProgress", "sendToolHints", "showReasoning",
+                   "sendMaxRetries",
+                   "websocket": {"enabled", "host", "port", "path",
+                                 "publicWsUrl", "token", "tokenIssuePath",
+                                 "tokenIssueSecret", "tokenTtlS",
+                                 "websocketRequiresToken", "allowFrom",
+                                 "streaming", "maxMessageBytes",
+                                 "pingIntervalS", "pingTimeoutS",
+                                 "sslCertfile", "sslKeyfile",
+                                 "sendProgress", "sendToolHints",
+                                 "showReasoning",
+                                 "webuiDist"  # NanoClaw only
+                                 }},
       "gateway": {"host", "port", "heartbeat": {"enabled", "intervalS"}},
       "providers": {"<name>": {"apiKey", "apiBase", "extraHeaders",
                                "extraBody", "extraQuery", "thinkingStyle"}, ...},
@@ -268,16 +280,123 @@ def _default_providers() -> dict[str, ProviderConfig]:
     return {"custom": ProviderConfig()}
 
 
-class ChannelsConfig(Base):
-    """What the terminal shows while a turn works (nanobot schema.py:33 ``ChannelsConfig``, a subset).
+def _normalize_config_path(path: str) -> str:
+    """nanobot webui/http_utils.py ``normalize_config_path``: no trailing slash."""
+    if len(path) > 1 and path.endswith("/"):
+        return path.rstrip("/") or "/"
+    return path or "/"
 
-    nanobot's CLI reads these three (cli/agent.py:222-245); the per-channel
-    entries (telegram, slack, ...) and delivery settings are not read.
+
+class WebSocketConfig(Base):
+    """``channels.websocket``: the web UI server (nanobot
+    channels/websocket/runtime.py:180 ``WebSocketConfig``, a subset).
+
+    One listener serves the built web UI, ``GET /webui/bootstrap``, the
+    ``/api/*`` routes and the WebSocket (upgrade on ``path``). Without a
+    ``token``/``tokenIssueSecret`` only loopback browsers may bootstrap; with
+    one, a remote browser sends it as ``X-Nanobot-Auth`` (or
+    ``Authorization: Bearer``).
+
+    Differences: ``enabled`` defaults to False (nanobot enables the channel
+    by default; NanoClaw ships no frontend build, so the web UI is opt-in);
+    ``webuiDist`` is NanoClaw's (nanobot serves the build bundled in its
+    package, ``nanobot/web/dist``); ``unixSocketPath`` and
+    ``trustedProxyAuth`` are not supported. The per-channel
+    ``sendProgress`` / ``sendToolHints`` / ``showReasoning`` overrides are
+    nanobot's (channels/manager.py ``_resolve_bool_override``).
+    """
+
+    enabled: bool = False  # nanobot: True
+    host: str = "127.0.0.1"
+    port: int = 8765
+    path: str = "/"
+    public_ws_url: str = ""
+    token: str = ""
+    token_issue_path: str = ""
+    token_issue_secret: str = ""
+    token_ttl_s: int = Field(default=300, ge=30, le=86_400)
+    websocket_requires_token: bool = True
+    allow_from: list[str] = Field(default_factory=lambda: ["*"])
+    streaming: bool = True
+    max_message_bytes: int = Field(default=37_748_736, ge=1024, le=41_943_040)
+    ping_interval_s: float = Field(default=20.0, ge=5.0, le=300.0)
+    ping_timeout_s: float = Field(default=20.0, ge=5.0, le=300.0)
+    ssl_certfile: str = ""
+    ssl_keyfile: str = ""
+    send_progress: bool | None = None
+    send_tool_hints: bool | None = None
+    show_reasoning: bool | None = None
+    # NanoClaw only: the directory holding the built frontend (index.html and
+    # assets/); empty: ``NANOCLAW_WEBUI_DIST``, else no static files.
+    webui_dist: str = ""
+
+    @field_validator("path")
+    @classmethod
+    def _path_must_start_with_slash(cls, value: str) -> str:
+        if not value.startswith("/"):
+            raise ValueError('path must start with "/"')
+        return _normalize_config_path(value)
+
+    @field_validator("token_issue_path")
+    @classmethod
+    def _token_issue_path_format(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            return ""
+        if not value.startswith("/"):
+            raise ValueError('token_issue_path must start with "/"')
+        return _normalize_config_path(value)
+
+    @field_validator("public_ws_url")
+    @classmethod
+    def _public_ws_url_format(cls, value: str) -> str:
+        from urllib.parse import urlsplit, urlunsplit
+
+        value = value.strip()
+        if not value:
+            return ""
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme not in {"ws", "wss"}
+            or not parsed.netloc
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError("public_ws_url must be an absolute ws:// or wss:// URL without credentials")
+        return urlunsplit((parsed.scheme, parsed.netloc, _normalize_config_path(parsed.path or "/"), "", ""))
+
+    @model_validator(mode="after")
+    def _check_paths_and_auth(self) -> WebSocketConfig:
+        from urllib.parse import urlsplit
+
+        if self.public_ws_url and urlsplit(self.public_ws_url).path != self.path:
+            raise ValueError("public_ws_url path must match path")
+        if self.token_issue_path and self.token_issue_path == self.path:
+            raise ValueError("token_issue_path must differ from path (the WebSocket upgrade path)")
+        if self.host in ("0.0.0.0", "::") and not (self.token.strip() or self.token_issue_secret.strip()):
+            raise ValueError(
+                "host is 0.0.0.0 (all interfaces) but neither token nor token_issue_secret "
+                "is set — set one to prevent unauthenticated access"
+            )
+        return self
+
+
+class ChannelsConfig(Base):
+    """Chat channel settings (nanobot schema.py:33 ``ChannelsConfig``, a subset).
+
+    The first three also decide what the terminal shows while a turn works
+    (nanobot cli/agent.py:222-245). ``websocket`` is the web UI server
+    (nanobot keeps it as an extra key the channel parses). Other channels
+    (telegram, slack, ...) are not read.
     """
 
     send_progress: bool = True  # schema.py:43, the model's text before tool calls
     send_tool_hints: bool = True  # schema.py:44, e.g. read notes.txt
     show_reasoning: bool = True  # schema.py:45, the model's reasoning
+    send_max_retries: int = Field(default=3, ge=0, le=10)  # schema.py:48, delivery attempts
+    websocket: WebSocketConfig = Field(default_factory=WebSocketConfig)
 
 
 class ExecToolConfig(Base):

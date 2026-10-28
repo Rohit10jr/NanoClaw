@@ -125,3 +125,8 @@ def fake_dns(monkeypatch):
     for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy", "NO_PROXY", "no_proxy"):
         monkeypatch.delenv(name, raising=False)
     return table
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    # tests/test_websocket_channel.py: overrides of the channel config per test.
+    config.addinivalue_line("markers", "ws_config(overrides): channels.websocket overrides for the harness")

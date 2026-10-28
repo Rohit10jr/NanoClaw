@@ -67,26 +67,10 @@ class WebUIContext:
 
 
 def default_workspace_scope_payload(workspace: Path, *, restrict_to_workspace: bool) -> dict[str, Any]:
-    """The workspace scope nanobot reports for a chat with no chosen project
-    (``WorkspaceScope.payload()``, security/workspace_access.py:86). NanoClaw
-    has one project folder, the workspace, so every chat has this scope."""
-    path = str(workspace)
-    return {
-        "project_path": path,
-        "access_mode": "restricted" if restrict_to_workspace else "full",
-        "project_name": workspace.name or path,
-        "restrict_to_workspace": restrict_to_workspace,
-        "sandbox_status": {
-            "restrict_to_workspace": restrict_to_workspace,
-            "workspace_root": path,
-            "level": "application" if restrict_to_workspace else "off",
-            "enforced": False,
-            "provider": "none",
-            "provider_label": "None",
-            "summary": (
-                "Workspace restriction uses nanoclaw application-level guards."
-                if restrict_to_workspace
-                else "Workspace restriction is disabled."
-            ),
-        },
-    }
+    """The workspace scope payload of a chat (nanobot ``WorkspaceScope.payload()``,
+    security/workspace_access.py:86) when the project is the workspace.
+    With a loop at hand prefer ``loop.workspace_scope.payload()``: the
+    gateway's project folder (``--project``), which every web UI chat uses."""
+    from nanoclaw.security.workspace_access import default_workspace_scope
+
+    return default_workspace_scope(workspace, restrict_to_workspace).payload()
