@@ -478,7 +478,9 @@ class AgentRunner:
             context.response = response
             context.tool_calls = list(response.tool_calls)
             # Reasoning out, inline <think> stripped (nanobot runner.py:516-531).
-            reasoning_text, response.content = extract_reasoning(response.reasoning_content, response.content)
+            reasoning_text, response.content = extract_reasoning(
+                response.reasoning_content, response.thinking_blocks, response.content
+            )
             context.usage = raw_usage
             usage = _add_usage(usage, raw_usage)
             if reasoning_text and not context.streamed_reasoning:
@@ -494,6 +496,7 @@ class AgentRunner:
                     response.content,
                     tool_calls=[tc.to_openai_tool_call() for tc in response.tool_calls],
                     reasoning_content=response.reasoning_content,
+                    thinking_blocks=response.thinking_blocks,
                 )
                 messages.append(assistant_message)
                 await self._emit_checkpoint(
@@ -594,7 +597,9 @@ class AgentRunner:
 
             final_message: dict[str, Any] | None = None
             if not response.is_error and not is_blank(clean):
-                final_message = build_assistant_message(clean, reasoning_content=response.reasoning_content)
+                final_message = build_assistant_message(
+                    clean, reasoning_content=response.reasoning_content, thinking_blocks=response.thinking_blocks
+                )
 
             # Input that arrived during the answer continues the turn. It is
             # checked BEFORE the stream is closed, so a streaming channel keeps
