@@ -781,3 +781,142 @@ def test_banner_shows_the_preset(tmp_path):
     )
     chat.banner()
     assert "(fast-model) (preset: fast)" in buffer.getvalue()
+
+
+# --- gaps found by mutation testing (layer 20) -----------------------------------------------------
+
+
+def test_static_preset_runtime_carries_the_reasoning_effort():
+    presets = {**PRESETS, "deep": ModelPresetConfig(model="d", reasoning_effort="high")}
+    resolver = ModelRuntimeResolver(_runtime(FakeProvider()), model_presets=presets)
+    assert resolver.resolve_preset("deep").reasoning_effort == "high"
+
+
+def test_normalize_preset_name_refuses_an_ambiguous_case_insensitive_match():
+    presets = {"Fast": ModelPresetConfig(model="a"), "FAST": ModelPresetConfig(model="b")}
+    with pytest.raises(KeyError, match="model_preset 'fast' not found"):
+        normalize_preset_name("fast", presets)
+
+
+def test_resolver_closes_a_provider_set_on_the_default():
+    base, replacement = ClosingProvider("base"), ClosingProvider("new")
+    resolver = ModelRuntimeResolver(_runtime(base), model_presets=PRESETS)
+    resolver.update_default(provider=replacement)
+    asyncio.run(resolver.aclose())
+    assert (base.closed, replacement.closed) == (1, 1)
+
+
+def test_resolver_aclose_keeps_the_current_provider_and_drops_cached_presets():
+    base = ClosingProvider("base")
+    built: list[str] = []
+
+    def loader(name):
+        built.append(name)
+        return LLMRuntime(ClosingProvider(name), PRESETS[name].model, 1, 0.1, 2)
+
+    resolver = ModelRuntimeResolver(_runtime(base), model_presets=PRESETS, preset_runtime_loader=loader)
+    resolver.resolve_preset("fast")
+    asyncio.run(resolver.aclose())
+    # The default provider stays owned (a closed client reopens lazily) ...
+    asyncio.run(resolver.aclose())
+    assert base.closed == 2
+    # ... and a preset resolved after closing gets a fresh provider.
+    resolver.resolve_preset("fast")
+    assert built == ["fast", "fast"]
+
+
+def test_resolver_aclose_reports_close_errors_after_closing_the_rest():
+    class FailingClose(ClosingProvider):
+        async def aclose(self) -> None:
+            raise RuntimeError("close failed")
+
+    good = ClosingProvider("good")
+    resolver = ModelRuntimeResolver(_runtime(FailingClose("bad")), model_presets=PRESETS)
+    resolver.update_default(provider=good)
+    with pytest.raises(BaseExceptionGroup, match="failed to close model providers"):
+        asyncio.run(resolver.aclose())
+    assert good.closed == 1
+
+
+def test_session_preset_key_is_nanobots():
+    # nanobot's key, so a session file keeps its /model choice in either project.
+    assert model_preset_from_metadata({"_nanobot_model_preset": "fast"}) == "fast"
+
+
+async def test_model_command_saves_the_choice_to_disk(tmp_path):
+    loop = _make_loop_with_presets(tmp_path)
+    await cmd_model(_ctx(loop, "/model fast", args="fast"))
+    loop.sessions.invalidate("cli:direct")
+    assert _saved_model_preset(loop) == "fast"
+
+
+async def test_runtime_for_session_saves_the_dropped_removed_preset(tmp_path):
+    loop = _make_loop_with_presets(tmp_path)
+    session = loop.sessions.get_or_create("cli:direct")
+    session.metadata[SESSION_MODEL_PRESET_METADATA_KEY] = "removed"
+    loop.sessions.save(session)
+    runtime = await loop.runtime_for_session(session)
+    assert runtime is loop.runtime
+    loop.sessions.invalidate("cli:direct")
+    assert _saved_model_preset(loop) is None
+
+
+async def test_compact_uses_the_session_preset(tmp_path):
+    from nanoclaw.utils.templates import sync_workspace_templates
+
+    sync_workspace_templates(tmp_path)
+    fast_provider = ClosingProvider("fast", ["from fast", "- [durable] summary from fast"])
+
+    def loader(name):
+        p = PRESETS[name]
+        return LLMRuntime(fast_provider, p.model, p.max_tokens, p.temperature, p.context_window_tokens)
+
+    loop = _make_loop_with_presets(tmp_path, preset_runtime_loader=loader)
+    await loop.process_direct("/model fast")
+    await loop.process_direct("hi")
+    assert await loop.compact_session("cli:direct") == "- [durable] summary from fast"
+    assert loop.provider.calls == []
+    await loop.aclose()
+
+
+async def test_model_command_lists_default_first_then_sorted(tmp_path):
+    presets = {**PRESETS, "alpha": ModelPresetConfig(model="a"), "zeta": ModelPresetConfig(model="z")}
+    out = await cmd_model(_ctx(_make_loop_with_presets(tmp_path, model_presets=presets), "/model"))
+    assert "- Available presets: `default`, `alpha`, `fast`, `zeta`" in out.content
+
+
+def test_cli_preset_default_means_agents_defaults():
+    from nanoclaw.__main__ import _with_preset
+
+    config = Config.model_validate({**PRESET_CONFIG, "agents": {"defaults": {"modelPreset": "fast"}}})
+    assert _with_preset(config, "DEFAULT").agents.defaults.model_preset is None
+    assert _with_preset(config, "Fast").agents.defaults.model_preset == "fast"
+
+
+def test_cli_builds_a_preset_loader_from_the_config(tmp_path, monkeypatch):
+    import nanoclaw.__main__ as cli
+
+    for key in ("NANOCLAW_API_KEY", "NANOCLAW_API_BASE", "NANOCLAW_MODEL"):
+        monkeypatch.delenv(key, raising=False)
+    seen: dict = {}
+
+    async def fake_ask(*args, preset_loader=None, **kwargs):
+        seen["loader"] = preset_loader
+        return 0
+
+    monkeypatch.setattr(cli, "_ask", fake_ask)
+    path = _write(tmp_path / "config.json", PRESET_CONFIG)
+    assert main(["ask", "hello", "-c", str(path), "-w", str(tmp_path / "ws")]) == 0
+    runtime = seen["loader"]("fast")
+    assert (runtime.model, runtime.max_tokens, runtime.model_preset) == ("fast-model", 2048, "fast")
+    # A provider handed in (tests, embedding) has no config to build presets from.
+    assert main(["ask", "hello", "-c", str(path), "-w", str(tmp_path / "ws")], provider=FakeProvider([])) == 0
+    assert seen["loader"] is None
+
+
+def test_build_preset_runtime_names_the_active_preset():
+    from nanoclaw.providers.factory import build_preset_runtime
+
+    config = Config.model_validate({**PRESET_CONFIG, "agents": {"defaults": {"modelPreset": "fast"}}})
+    runtime = build_preset_runtime(config)
+    assert (runtime.model, runtime.model_preset) == ("fast-model", "fast")

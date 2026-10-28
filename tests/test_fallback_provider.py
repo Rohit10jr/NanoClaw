@@ -1257,3 +1257,129 @@ def test_fallback_model_event_reaches_user_turns_only() -> None:
 
     assert notification_is_deliverable(TurnModelUpdatedEvent, channel="cli", publish_lifecycle=True)
     assert not notification_is_deliverable(TurnModelUpdatedEvent, channel="cli", publish_lifecycle=False)
+
+
+# --- gaps found by mutation testing (layer 20) -----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "response, expected",
+    [
+        # OAuth credential codes fall back even on a 400 (nanobot oauth_catalog_auth_rejected).
+        (_make_response("bad", "error", error_status_code=400, error_code="invalid_grant"), True),
+        # Authentication kinds fall back without a status code.
+        (_make_response("nope", "error", error_kind="permission"), True),
+        # A structured invalid-request error does not, even with a 5xx status.
+        (_make_response("bad", "error", error_status_code=500, error_type="invalid_request_error"), False),
+        # A plain 403 is treated like bad credentials for this model.
+        (_make_response("forbidden", "error", error_status_code=403), True),
+        # x-should-retry: false wins over a 5xx status ...
+        (_make_response("down", "error", error_status_code=503, error_should_retry=False), False),
+        # ... and true falls back without any other signal.
+        (_make_response("odd", "error", error_should_retry=True), True),
+        # 422 is the request's fault, whatever the error kind says.
+        (_make_response("bad", "error", error_status_code=422, error_kind="timeout"), False),
+        (_make_response("conflict", "error", error_status_code=409), True),
+        (_make_response("request took too long", "error", error_status_code=408), True),
+        (_make_response("Your account balance is too low", "error"), True),
+    ],
+)
+def test_should_fallback_rules(response: LLMResponse, expected: bool) -> None:
+    assert FallbackProvider._should_fallback(response) is expected
+
+
+async def test_streamed_non_timeout_error_is_returned_untouched() -> None:
+    primary = _FakeProvider("primary", _error_response("broken mid-stream"))
+    fb = FallbackProvider(primary, [_fallback("fallback-a")], MagicMock())
+
+    async def _delta(text: str) -> None:
+        pass
+
+    result = await fb.chat_stream(messages=HI, on_content_delta=_delta)
+    assert result.content == "broken mid-stream"
+    assert result.primary_error_kind is None  # not a chain failure
+    assert fb._primary_failures == 0  # nor a circuit-breaker failure
+
+
+async def test_fallback_that_streamed_then_failed_stops_the_chain() -> None:
+    primary = _FakeProvider("primary", _make_response("p", finish_reason="error", error_kind="timeout"))
+    first = _FakeProvider("a", _make_response("partial", finish_reason="error", error_kind="server_error"))
+    second = _FakeProvider("b", _make_response("from b"))
+    built: list[str] = []
+
+    def factory(preset: ModelPresetConfig) -> LLMProvider:
+        built.append(preset.model)
+        return {"fallback-a": first, "fallback-b": second}[preset.model]
+
+    fb = FallbackProvider(primary, [_fallback("fallback-a"), _fallback("fallback-b")], factory)
+
+    async def _delta(text: str) -> None:
+        pass
+
+    async def _recover() -> None:
+        pass
+
+    result = await fb.chat_stream(messages=HI, on_content_delta=_delta, on_stream_recover=_recover)
+    assert result.content == "partial"
+    assert built == ["fallback-a"]
+
+
+def test_setting_the_default_model_sets_the_primarys() -> None:
+    primary = _FakeProvider("primary")
+    fb = FallbackProvider(primary, [_fallback("a")], MagicMock())
+    fb.default_model = "other"
+    assert primary.default_model == "other" and fb.get_default_model() == "other"
+
+
+async def test_stream_retry_reports_giving_up_to_on_retry_wait_without_an_exhausted_callback() -> None:
+    provider = _FakeProvider("solo", _retryable_error("down"))
+    waits = AsyncMock()
+    with patch(SLEEP, new_callable=AsyncMock):
+        await provider.chat_stream_with_retry(messages=HI, on_retry_wait=waits)
+    assert waits.await_args_list[-1].args[0] == "Model request failed after 4 attempts, giving up."
+
+
+def test_public_error_kind_categories() -> None:
+    assert LLMProvider.public_error_kind(_make_response("slow down", "error", error_status_code=429)) == "rate_limit"
+    assert LLMProvider.public_error_kind(_make_response("boom", "error", error_status_code=502)) == "server"
+
+
+async def test_fallback_model_event_names_the_preset_of_the_request() -> None:
+    from nanoclaw.agent.runner import _request_events
+    from nanoclaw.agent.tools.context import RequestContext, request_context
+
+    events: list[Any] = []
+
+    async def publish(event: Any) -> None:
+        events.append(event)
+
+    runtime = LLMRuntime(
+        provider=_FakeProvider("p"),
+        model="m",
+        max_tokens=1,
+        temperature=0.1,
+        context_window_tokens=1,
+        model_preset="fast",
+    )
+    token = _request_events.set(EventSink(publish))
+    try:
+        with request_context(RequestContext(channel="cli", runtime=runtime)):
+            await publish_fallback_model(FallbackModelSelection("backup"))
+    finally:
+        _request_events.reset(token)
+    assert events == [TurnModelUpdatedEvent(model="backup", model_preset="fast", fallback=True)]
+
+
+def test_fallback_preset_refs_keep_their_order() -> None:
+    config = Config.model_validate(
+        {
+            "agents": {"defaults": {"model": "m", "provider": "custom", "fallbackModels": ["b", "a"]}},
+            "providers": {"custom": {"apiBase": "http://x/v1"}},
+            "modelPresets": {
+                "a": {"model": "model-a", "provider": "custom"},
+                "b": {"model": "model-b", "provider": "custom"},
+            },
+        }
+    )
+    provider = make_provider(config)
+    assert [preset.model for preset in provider.fallback_presets] == ["model-b", "model-a"]

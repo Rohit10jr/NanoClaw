@@ -124,6 +124,22 @@ async def test_reasoning_content_is_kept_in_history():
     assert result.messages[-1] == {"role": "assistant", "content": "42", "reasoning_content": "thinking"}
 
 
+async def test_anthropic_thinking_blocks_are_shown_as_reasoning():
+    # Mutation-testing gap (layer 20): thinking blocks are a reasoning source too.
+    from nanoclaw.agent.hook import AgentHook
+
+    seen: list[str | None] = []
+
+    class Capture(AgentHook):
+        async def emit_reasoning(self, reasoning_content):
+            seen.append(reasoning_content)
+
+    blocks = [{"type": "thinking", "thinking": "step one", "signature": "sig"}]
+    result = await run(FakeProvider([LLMResponse(content="42", thinking_blocks=blocks)]), hook=Capture())
+    assert seen == ["step one"]
+    assert result.messages[-1]["thinking_blocks"] == blocks
+
+
 async def test_no_tools_sent_when_registry_is_empty():
     fake = FakeProvider(["hi"])
     await AgentRunner().run(AgentRunSpec(initial_messages=[USER], tools=ToolRegistry(), provider=fake))

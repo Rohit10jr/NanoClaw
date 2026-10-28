@@ -255,6 +255,22 @@ async def test_tool_calls_are_refused_once_then_raw(ws, store):
     assert summary.startswith("[RAW]")
 
 
+async def test_refused_tool_call_replays_its_thinking_blocks(ws, store):
+    # Mutation-testing gap (layer 20): Anthropic needs the signed thinking
+    # blocks back ahead of the tool calls on the retry request.
+    blocks = [{"type": "thinking", "thinking": "hmm", "signature": "sig"}]
+    call = LLMResponse(
+        content=None,
+        tool_calls=[ToolCallRequest(id="c1", name="read_file", arguments={"path": "x"})],
+        finish_reason="tool_calls",
+        thinking_blocks=blocks,
+    )
+    fake = FakeProvider([call, "- [durable] summary"])
+    await archiver(ws, store).archive(SOURCE, runtime=runtime(fake), session_key="k", history=HISTORY, request_tools=[{"x": 1}])
+    assistant = fake.calls[1].messages[-2]
+    assert assistant["role"] == "assistant" and assistant["thinking_blocks"] == blocks
+
+
 async def test_archive_that_does_not_fit_goes_raw_without_calling_the_model(ws, store):
     fake = FakeProvider(["unused"])
     summary = await archiver(ws, store).archive(
