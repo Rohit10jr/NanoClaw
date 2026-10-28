@@ -59,12 +59,21 @@ def build_assistant_message(
     content: str | None,
     tool_calls: list[dict[str, Any]] | None = None,
     reasoning_content: str | None = None,
+    thinking_blocks: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    """An assistant message for history (nanobot utils/helpers.py:686).
+
+    Anthropic ``thinking_blocks`` are kept so the next request can replay
+    them (with their signatures) ahead of the tool calls; a message carrying
+    them always has a ``reasoning_content`` key ("" when there was none).
+    """
     msg: dict[str, Any] = {"role": "assistant", "content": content or ""}
     if tool_calls:
         msg["tool_calls"] = tool_calls
-    if reasoning_content is not None:
-        msg["reasoning_content"] = reasoning_content
+    if reasoning_content is not None or thinking_blocks:
+        msg["reasoning_content"] = reasoning_content if reasoning_content is not None else ""
+    if thinking_blocks:
+        msg["thinking_blocks"] = thinking_blocks
     return msg
 
 
@@ -171,16 +180,28 @@ def extract_think(text: str) -> tuple[str | None, str]:
     return thinking, strip_think(text)
 
 
-def extract_reasoning(reasoning_content: str | None, content: str | None) -> tuple[str | None, str | None]:
+def extract_reasoning(
+    reasoning_content: str | None,
+    thinking_blocks: list[dict[str, Any]] | None,
+    content: str | None,
+) -> tuple[str | None, str | None]:
     """``(reasoning_text, cleaned_content)`` from one model response.
 
-    A dedicated ``reasoning_content`` field wins; otherwise closed inline
-    ``<think>`` blocks in ``content`` are the reasoning. Inline tags are
-    always stripped from the answer. (nanobot utils/helpers.py:297, without
-    Anthropic ``thinking_blocks``, which NanoClaw's provider never returns.)
+    Sources, first match wins: a dedicated ``reasoning_content`` field, then
+    Anthropic ``thinking_blocks``, then closed inline ``<think>`` blocks in
+    ``content``. Inline tags are always stripped from the answer.
+    (nanobot utils/helpers.py:297)
     """
     if reasoning_content:
         return strip_reasoning_tags(reasoning_content), strip_think(content) if content else content
+    if thinking_blocks:
+        parts = [
+            strip_reasoning_tags(block.get("thinking", ""))
+            for block in thinking_blocks
+            if block.get("type") == "thinking"
+        ]
+        joined = "\n\n".join(part for part in parts if part)
+        return (joined or None), strip_think(content) if content else content
     if content:
         return extract_think(content)
     return None, content

@@ -114,7 +114,7 @@ slow on some systems.
 | Tool-call ID normalization on replay | `_sanitize_messages` `map_id` / `unique_tool_id` | Providers with strict ID formats (Mistral) |
 | Role-alternation safety nets | `_enforce_role_alternation` | Synthetic user message for GLM-style providers; merging list (image) content |
 | Provider registry, presets, fallback, OAuth | `registry.py`, `factory.py`, `fallback_provider.py`, `*_oauth.py` | ~30 providers, named model setups, backup models, Copilot/Codex logins |
-| Anthropic / Bedrock / Azure adapters | `anthropic_provider.py`, … | Non-OpenAI wire formats |
+| Bedrock / Azure adapters | `bedrock_provider.py`, … | Non-OpenAI wire formats (Anthropic: see "Since layer 20") |
 
 ## Try it
 
@@ -139,3 +139,60 @@ Error calling LLM: HTTP 401: Incorrect API key provided: no-key. ...
   transport: the exact request body sent, text and tool-call parsing, malformed
   arguments, duplicate IDs, reasoning text, HTTP and connection errors.
 - `tests/test_fake_provider_and_cli.py` — the fake provider and `nanoclaw ask`.
+
+## Since layer 20: Anthropic
+
+`providers/anthropic_provider.py` ports nanobot's `AnthropicProvider`
+(`anthropic_provider.py`, nanobot `c4dac64`) over the official `anthropic` SDK
+(`anthropic>=0.100.0,<1.0.0`, nanobot's constraint), with the SDK's retries off
+(`max_retries=0`) so `chat_with_retry` stays the one retry policy.
+
+- **Out**: the system message becomes `system`; tool results become
+  `tool_result` blocks in a user turn; assistant tool calls become `tool_use`
+  blocks, preceded by the turn's `thinking_blocks` (with signatures — the API
+  requires them back while thinking). Same-role turns are merged, a trailing
+  assistant turn is dropped (no prefill), a leading one gets a
+  `(conversation continued)` opener. Tool ids are sanitized to
+  `[a-zA-Z0-9_-]` and de-duplicated, results follow their call's new id.
+  Tools get `input_schema`; `tool_choice` maps to `auto`/`any`/`tool` and is
+  forced to `auto` while thinking. Prompt-cache markers go on the system
+  prompt, the second-to-last message, the last built-in tool and the last tool.
+- **Thinking** (`reasoning_effort`): unset = off; `"none"` = off, or
+  `{"type": "disabled"}` for models that think by default (Opus/Sonnet 5);
+  `"adaptive"` = adaptive thinking at temperature 1.0; on adaptive-only models
+  (Opus ≥ 4.7, Sonnet/Fable/Mythos 5) any effort = adaptive +
+  `output_config.effort` and never a temperature; otherwise a token budget
+  (low 1024, medium 4096, high max(8192, max_tokens)) with `max_tokens` raised
+  to budget + 4096 and temperature 1.0. NanoClaw's base `chat` has no
+  `reasoning_effort` parameter, so the adapter takes a default in its
+  constructor (`reasoning_effort=`, nanobot's `provider.generation`) and
+  `chat`/`chat_stream` accept an explicit override.
+- **Back**: text, `tool_use` (duplicate ids re-minted), `thinking` blocks →
+  `LLMResponse.thinking_blocks`; `end_turn`/`tool_use`/`max_tokens` →
+  `stop`/`tool_calls`/`length` (others pass through); usage counts cache reads
+  and writes into `input_tokens` (Anthropic reports them separately).
+  Errors carry status, error type, Retry-After / retry-after-ms and
+  `x-should-retry` for the retry classification.
+- **Streaming** is native: text, thinking and tool-input JSON deltas reach the
+  layer-13 callbacks; the idle timeout covers every SSE event; a stream ending
+  without a stop reason is a retryable connection error. When the SDK refuses a
+  non-stream request as too long ("Streaming is required…", large
+  `max_tokens`), `chat` streams instead.
+- **`thinking_blocks` everywhere**: `LLMResponse.thinking_blocks`;
+  `build_assistant_message` stores them (and `reasoning_content=""`) on
+  assistant messages in the runner and memory archive; `extract_reasoning`
+  shows them as reasoning when there is no `reasoning_content`; session replay
+  already kept the key, and transcript repair copies whole messages. The
+  OpenAI adapter drops the key.
+
+Deliberate differences: malformed replayed tool arguments become `{}` (nanobot
+repairs them with `json_repair`, which NanoClaw doesn't use); no
+`prepare_message_images` (NanoClaw sends no images; `image_url` blocks are
+still converted); no surrogate scrubbing in `_sanitize_empty_content` (the
+terminal already removes them). Registration in the factory is layer 20's
+integration step.
+
+Tests: `tests/test_anthropic_provider.py` (nanobot's Anthropic tests, ported)
+and `tests/test_anthropic_sdk.py` (the real SDK over an httpx `MockTransport`:
+request bodies, SSE streams, error metadata, the long-request fallback;
+`thinking_blocks` through runner, session and replay).

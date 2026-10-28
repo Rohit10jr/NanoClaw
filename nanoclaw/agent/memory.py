@@ -624,6 +624,7 @@ class MemoryArchiver:
                     response.content,
                     tool_calls=[call.to_openai_tool_call() for call in response.tool_calls],
                     reasoning_content=response.reasoning_content,
+                    thinking_blocks=response.thinking_blocks,
                 ),
                 *[
                     {"role": "tool", "tool_call_id": call.id, "name": call.name, "content": _ARCHIVE_TOOL_RESULT}

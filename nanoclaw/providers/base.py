@@ -300,6 +300,9 @@ class LLMResponse:
     usage: LLMUsage | None = None
     # Thinking text some models return separately (DeepSeek-R1, Kimi, ...).
     reasoning_content: str | None = None
+    # Anthropic extended-thinking blocks ({"type": "thinking", "thinking",
+    # "signature"}), replayed on the next request (nanobot base.py:299).
+    thinking_blocks: list[dict[str, Any]] | None = None
     # Seconds the provider asked us to wait before retrying.
     retry_after: float | None = None
     # Error details the retry policy reads when finish_reason == "error"
@@ -325,23 +328,29 @@ class LLMResponse:
         return self.finish_reason == "error"
 
 
-def tool_arguments_json_for_replay(arguments: Any) -> str:
-    """JSON object string for a tool call being *replayed* from history.
+def tool_arguments_object_for_replay(arguments: Any) -> dict[str, Any]:
+    """Object-shaped arguments for a tool call being *replayed* from history.
 
     Unlike :func:`parse_tool_arguments` (used for calls about to run), this may
-    replace bad arguments: malformed JSON or a non-object becomes ``"{}"`` so
+    replace bad arguments: malformed JSON or a non-object becomes ``{}`` so
     the request isn't rejected. nanobot first tries ``json_repair``.
+    (nanobot base.py:144)
     """
     if isinstance(arguments, dict):
-        return json.dumps(arguments, ensure_ascii=False)
+        return arguments
     if isinstance(arguments, str) and arguments.strip():
         try:
             parsed = json.loads(arguments)
         except json.JSONDecodeError:
-            return "{}"
+            return {}
         if isinstance(parsed, dict):
-            return json.dumps(parsed, ensure_ascii=False)
-    return "{}"
+            return parsed
+    return {}
+
+
+def tool_arguments_json_for_replay(arguments: Any) -> str:
+    """:func:`tool_arguments_object_for_replay` as a JSON string (nanobot base.py:172)."""
+    return json.dumps(tool_arguments_object_for_replay(arguments), ensure_ascii=False)
 
 
 def enforce_role_alternation(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1012,8 +1021,10 @@ class LLMProvider(ABC):
         assistant: dict[str, Any] = {"role": "assistant", "content": response.content or ""}
         if response.tool_calls:
             assistant["tool_calls"] = [call.to_openai_tool_call() for call in response.tool_calls]
-        if response.reasoning_content is not None:
-            assistant["reasoning_content"] = response.reasoning_content
+        if response.reasoning_content is not None or response.thinking_blocks:
+            assistant["reasoning_content"] = response.reasoning_content or ""
+        if response.thinking_blocks:
+            assistant["thinking_blocks"] = response.thinking_blocks
         return LLMUsage.estimated(
             input_tokens=max(0, input_tokens),
             output_tokens=max(0, estimate_message_tokens(assistant)),
