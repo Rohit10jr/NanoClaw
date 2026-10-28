@@ -161,10 +161,10 @@ Legend: ⏳ in progress · ✅ done and verified · ⛔ blocked
 
 | Task | Scope (files) | Sub-agent | Verification | Status |
 |---|---|---|---|---|
-| 23.1 Server and websocket channel | aiohttp app in the gateway (static frontend, SPA fallback, WS upgrade), tokens and `/webui/bootstrap`, `channels.websocket` config, the websocket channel (inbound envelopes, outbound frames via the layer 22 projector, transcript recording), channel manager | sub-agent (worktree), phase A | | ⏳ |
-| 23.2 REST endpoints | `/api/sessions`, `webui-thread`, `/api/commands`, sidebar state, minimal `/api/settings`, `/api/workspaces` | sub-agent (worktree), phase A | | ⏳ |
+| 23.1 Server and websocket channel | aiohttp app in the gateway (static frontend, SPA fallback, WS upgrade), tokens and `/webui/bootstrap`, `channels.websocket` config, the websocket channel (inbound envelopes, outbound frames via the layer 22 projector, transcript recording), channel manager | sub-agent (worktree), phase A | 71 observations through both real channels: 64 identical, 7 deliberate (capabilities, no session generations, no uploads); real UI in Chromium: send, streamed reply, reload, title | ✅ |
+| 23.2 REST endpoints | `/api/sessions`, `webui-thread`, `/api/commands`, sidebar state, minimal `/api/settings`, `/api/workspaces` | sub-agent (worktree), phase A | 48 requests through nanobot's real handler: 41 identical, 7 explained; fix: provider rows in `/api/settings` (the real UI couldn't send without them) | ✅ |
 | 23.3 Frontend build | nanobot's `webui/` built in the scratchpad (not vendored) for testing | sub-agent (scratchpad), phase A | Built unchanged with bun (556 files, `.gz` siblings); its first-load calls and bootstrap contract read from source and passed to 23.1/23.2 | ✅ |
-| 23.4 End to end | the real frontend in a browser (Playwright) against `nanoclaw gateway`: chat, streaming, tools, reload, history, delete | sub-agent (worktree), phase B | | |
+| 23.4 End to end | the real frontend in a browser (Playwright) against `nanoclaw gateway`: chat, streaming, tools, reload, history, delete | sub-agent (worktree), phase B | | ⏳ |
 | Integration, mutation checks, docs, PR | | | | |
 
 ## Blockers and open items
