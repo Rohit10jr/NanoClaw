@@ -77,11 +77,34 @@ chat's automations (task 23.5).
 
 ## Tests
 
-Layer 23 adds 143 tests (3,497 → 3,640): `test_websocket_channel.py`,
+Layer 23 adds 277 tests (3,497 → 3,774): `test_websocket_channel.py`,
 `test_channel_manager.py`, `test_webui_gateway_e2e.py` (in-process gateway),
-`tests/webui/test_rest_api.py`, `tests/webui/test_session_automations.py`, and `tests/e2e/` (the browser scenarios,
+`tests/webui/test_rest_api.py`, `tests/webui/test_session_automations.py`, `test_layer23_gaps.py`, and `tests/e2e/` (the browser scenarios,
 skipped unless a UI build is given).
 
 ### Mutation checks
 
-MUTATION_RESULTS
+636 rules were broken on purpose (each run against the layer 23 tests and
+then every other test file touching these modules):
+
+| Area | Rules | Caught at once | Gaps closed with tests | Equivalent | Result |
+|---|---|---|---|---|---|
+| Channels, manager, websocket channel, inbound messages, turn registry | 223 | 107 | 108 | 8 | 215 caught |
+| Gateway HTTP, tokens, ingress, static files, config | 137 | 58 | 73 | 6 | 131 caught |
+| REST, automations, web UI requests, deletion | 276 | 148 | 123 | 5 | 271 caught |
+
+134 new tests (`test_layer23_gaps.py`) close the gaps, for example: stopping
+the manager cancels sends in flight and one failing channel doesn't abort the
+others; per-chat send order; the outbound queue's frame and 8 MiB limits and
+closing a slow socket once with 1013; disconnect releasing subscriptions; two
+sockets retrying the same turn dispatching once; `tokenTtlS` for all three
+tokens; a symlink out of the build refused; session keys decoded once (a
+double-encoded colon stays invalid); gzip from exactly 4 KiB; provider
+`configured` rules and secret redaction in settings; request replays waiting
+behind a running change; deleting a chat cancelling its tasks.
+
+Equivalent (19): values checked or normalized again later (model names,
+loopback hosts, mime types, sidebar fields), errors caught by the same handler,
+tokens purged before their expiry check, and branches only one provider or
+channel can reach.
+

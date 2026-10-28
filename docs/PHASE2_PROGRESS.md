@@ -157,7 +157,7 @@ Legend: ⏳ in progress · ✅ done and verified · ⛔ blocked
 | Docs | note 22, CODE_MAP, README, ROADMAP | main session | — | ✅ |
 | PR | `p2/layer-22` → `main` | main session | PR #14 | ✅ |
 
-## Layer 23 — web UI backend: aiohttp server, websocket channel, `webui.core.v1` (`p2/layer-23`) ⏳
+## Layer 23 — web UI backend: aiohttp server, websocket channel, `webui.core.v1` (`p2/layer-23`) ✅
 
 | Task | Scope (files) | Sub-agent | Verification | Status |
 |---|---|---|---|---|
@@ -167,9 +167,9 @@ Legend: ⏳ in progress · ✅ done and verified · ⛔ blocked
 | 23.4 End to end | the real frontend in a browser (Playwright) against `nanoclaw gateway`: chat, streaming, tools, reload, history, delete | sub-agent (worktree), phase B | 9 scenarios pass in Chromium (no backend bug found beyond 23.2's); `tests/e2e/` | ✅ |
 | 23.5 Chat automations | `/api/sessions/<key>/automations`, delete check for bound cron jobs, popover actions | sub-agent (worktree) | 31 cases identical; e2e scenario added (12 scenarios pass) | ✅ |
 | Integration | merges, comparisons re-run, e2e re-run by main session | main session | 3,640 passed, 7 skipped; browser e2e 1 passed | ✅ |
-| Mutation checks | | sub-agent (worktree) | | ⏳ |
+| Mutation checks | 636 rules | sub-agent (worktree) | 617 caught, 19 equivalent (134 tests added); 3,774 passed | ✅ |
 | Docs | note 23, CODE_MAP, README, ROADMAP | main session | — | ✅ |
-| PR | `p2/layer-23` → `main` | main session | | |
+| PR | `p2/layer-23` → `main` | main session | PR #15 | ✅ |
 
 ## Blockers and open items
 
