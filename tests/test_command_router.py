@@ -149,6 +149,7 @@ def test_specs_match_nanobot():
         "/compact": ("Compact context", "archive", "", "side_channel", False),
         "/stop": ("Stop current task", "square", "", "stop_active_turn", False),
         "/status": ("Show status", "activity", "", "side_channel", False),
+        "/model": ("Switch model preset", "brain", "[preset]", "side_channel", True),
         "/history": ("Show conversation history", "history", "[n]", "side_channel", True),
         "/dream": ("Run Dream", "sparkles", "", "side_channel", False),
         "/skill": ("List skills", "wrench", "", "side_channel", False),

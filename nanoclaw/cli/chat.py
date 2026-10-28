@@ -176,10 +176,12 @@ class Chat:
         return f"{BOT_NAME} is working… type /stop to cancel" if self.busy else ""
 
     def banner(self) -> None:
-        """nanobot agent.py:288 (with the model name)."""
+        """nanobot agent.py:288 (with the model name and preset, cli/runtime_config.py:30)."""
         model = self.loop.model or self.loop.provider.default_model
+        preset = self.loop.model_preset
+        preset_tag = f" (preset: {preset})" if preset else ""
         self.console.print(
-            f"{BOT_NAME} Interactive mode [bold blue]({model})[/bold blue] "
+            f"{BOT_NAME} Interactive mode [bold blue]({model})[/bold blue]{preset_tag} "
             "— type [bold]exit[/bold] or [bold]Ctrl+C[/bold] to quit\n"
         )
 

@@ -104,6 +104,33 @@ uv run nanoclaw config path      # where the file is (-c FILE or NANOCLAW_CONFIG
 }
 ```
 
+The provider is chosen as nanobot does: `agents.defaults.provider` if set,
+else the model's prefix or name (`deepseek-chat` → DeepSeek, `claude-…` →
+Anthropic), else the first provider with a key (gateways such as OpenRouter
+first). Known providers (OpenRouter, OpenAI, Anthropic, DeepSeek, Gemini,
+Groq, Moonshot, Mistral, Ollama, vLLM, LM Studio, …) need only an `apiKey`
+(local ones an `apiBase`); any other name under `providers` is a custom
+OpenAI-compatible endpoint with its own `apiBase`. `extraHeaders`,
+`extraBody` and `extraQuery` are sent with every request.
+
+Model presets name a model and its settings; `agents.defaults.modelPreset`
+picks one, `--preset NAME` (on `chat` and `ask`) overrides it for a run, and
+`/model NAME` switches the current conversation (`/model` lists them;
+`/model default` goes back to `agents.defaults`):
+
+```json
+{
+  "agents": { "defaults": { "model": "deepseek-chat", "modelPreset": "fast" } },
+  "providers": { "deepseek": { "apiKey": "${DEEPSEEK_API_KEY}" },
+                 "openrouter": { "apiKey": "${OPENROUTER_API_KEY}" } },
+  "modelPresets": {
+    "fast": { "model": "deepseek-chat", "maxTokens": 4096, "temperature": 0.3 },
+    "deep": { "model": "anthropic/claude-opus-4-5", "provider": "openrouter",
+              "reasoningEffort": "high", "contextWindowTokens": 200000 }
+  }
+}
+```
+
 Failed model requests are retried (rate limits, timeouts, server errors; 1, 2,
 4 seconds or the server's Retry-After); quota and authentication errors stop
 at once. `"providerRetryMode": "persistent"` keeps retrying. Add `--logs` to
@@ -121,7 +148,7 @@ Replies stream word by word, with the model's reasoning shown as dim `✻` lines
 
 In the chat, slash commands: `/new` (start over), `/compact`, `/stop` (cancel
 the running turn and background subagents; finished work is kept), `/status`,
-`/history [n]`, `/dream`, `/skill`, `/help`. While the agent works you see what
+`/model [preset]`, `/history [n]`, `/dream`, `/skill`, `/help`. While the agent works you see what
 it does (`↳ $ ls`, `↳ read notes.txt`), and you can keep typing: a new message
 is folded into the running turn, as in nanobot.
 

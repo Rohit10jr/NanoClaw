@@ -444,6 +444,10 @@ class LLMProvider(ABC):
             tool_choice: "auto", "required", "none" or a specific tool dict.
         """
 
+    async def aclose(self) -> None:
+        """Release network resources (nanobot base.py ``aclose``). Nothing by default."""
+        return None
+
     async def safe_chat(self, **kwargs: Any) -> LLMResponse:
         """Call :meth:`chat`, turning any unexpected exception into an error response.
 

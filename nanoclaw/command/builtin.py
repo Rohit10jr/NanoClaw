@@ -1,10 +1,10 @@
 """Built-in slash commands: their specs and handlers.
 
 Mirrors nanobot/command/builtin.py for the commands NanoClaw has (/new,
-/compact, /stop, /status, /history, /dream, /skill, /help), with nanobot's
-spec fields and texts. Handlers return an :class:`OutboundMessage` instead of
+/compact, /stop, /status, /model, /history, /dream, /skill, /help), with
+nanobot's spec fields and texts. Handlers return an :class:`OutboundMessage` instead of
 printing, so any channel can show them. nanobot's other commands (/restart,
-/model, /goal, /trigger, /dream-log, /dream-restore, /dream-prompt,
+/goal, /trigger, /dream-log, /dream-restore, /dream-prompt,
 /evaluator-prompt, /pairing, the ``!`` shell) need features NanoClaw does not
 have yet.
 """
@@ -103,6 +103,14 @@ BUILTIN_COMMAND_SPECS: tuple[BuiltinCommandSpec, ...] = (
         "Show status",
         "Display runtime, provider, and channel status.",
         "activity",
+    ),
+    BuiltinCommandSpec(
+        "/model",
+        "Switch model preset",
+        "Show or switch the active model preset.",
+        "brain",
+        "[preset]",
+        accepts_args=True,
     ),
     BuiltinCommandSpec(
         "/history",
@@ -238,7 +246,7 @@ async def cmd_status(ctx: CommandContext) -> OutboundMessage:
 
     loop = ctx.loop
     session = _session(ctx)
-    runtime = ctx.runtime or loop.runtime
+    runtime = ctx.runtime or await loop.runtime_for_session(session)
     estimate = 0
     with suppress(Exception):
         estimate, _ = loop.consolidator.estimate_session_prompt_tokens(session, runtime=runtime)
@@ -389,6 +397,76 @@ def build_help_text() -> str:
     return "\n".join(lines)
 
 
+def _format_preset_names(names: list[str]) -> str:
+    return ", ".join(f"`{name}`" for name in names) if names else "(none configured)"
+
+
+def _model_preset_names(loop: AgentLoop) -> list[str]:
+    names = set(loop.model_presets)
+    names.add("default")
+    return ["default", *sorted(name for name in names if name != "default")]
+
+
+def _command_error_message(exc: Exception) -> str:
+    return str(exc.args[0]) if isinstance(exc, KeyError) and exc.args else str(exc)
+
+
+async def _model_command_status(loop: AgentLoop, session: Session) -> str:
+    """nanobot builtin.py:386."""
+    names = _model_preset_names(loop)
+    try:
+        runtime = await loop.runtime_for_session(session, recover_removed=False)
+    except (KeyError, ValueError) as exc:
+        return "\n".join(
+            [
+                "## Model",
+                f"- Current selection error: {_command_error_message(exc)}",
+                f"- Available presets: {_format_preset_names(names)}",
+                "- Switch with `/model <preset>`.",
+            ]
+        )
+    active = runtime.model_preset or "default"
+    return "\n".join(
+        [
+            "## Model",
+            f"- Current model: `{runtime.model or runtime.provider.default_model}`",
+            f"- Current preset: `{active}`",
+            f"- Available presets: {_format_preset_names(names)}",
+        ]
+    )
+
+
+async def cmd_model(ctx: CommandContext) -> OutboundMessage:
+    """Show or switch the session's model preset. (nanobot builtin.py:406)
+
+    The choice is saved in the session (it survives /new and restarts) and
+    applies from the next turn; other sessions keep theirs. A preset builds
+    its own provider once; the loop closes them all when it closes.
+    """
+    loop = ctx.loop
+    args = ctx.args.strip()
+    if not args:
+        return _reply(ctx, await _model_command_status(loop, _session(ctx)), as_text=True)
+    try:
+        runtime = await loop.set_session_model_preset(ctx.key, args, session=ctx.session)
+    except (KeyError, ValueError) as exc:
+        names = _model_preset_names(loop)
+        return _reply(
+            ctx,
+            f"Could not switch model preset: {_command_error_message(exc)}\n\n"
+            f"Available presets: {_format_preset_names(names)}",
+            as_text=True,
+        )
+    lines = [
+        f"Switched model preset to `{runtime.model_preset}`.",
+        "- Scope: current session",
+        f"- Model: `{runtime.model or runtime.provider.default_model}`",
+        f"- Context window: {runtime.context_window_tokens}",
+        f"- Max output tokens: {runtime.max_tokens}",
+    ]
+    return _reply(ctx, "\n".join(lines), as_text=True)
+
+
 def register_builtin_commands(router: CommandRouter) -> None:
     """Register NanoClaw's slash commands, as nanobot does (builtin.py:1069)."""
     router.priority("/stop", cmd_stop)
@@ -396,6 +474,8 @@ def register_builtin_commands(router: CommandRouter) -> None:
     router.exact("/new", cmd_new)
     router.exact("/compact", cmd_compact, session_queue=True)
     router.exact("/status", cmd_status)
+    router.exact("/model", cmd_model)
+    router.prefix("/model ", cmd_model)
     router.exact("/history", cmd_history)
     router.prefix("/history ", cmd_history)
     router.exact("/dream", cmd_dream)
