@@ -40,6 +40,7 @@ recovery, governance) for later.
 | 22 | Session history for the web UI (wire events, per-chat display history) | done |
 | 23 | Web UI backend: nanobot's own web UI works against `nanoclaw gateway` | done |
 | 24 | Telegram channel, pairing | done |
+| 25 | Skills catch-up (`disabledSkills`, `cron`), Agent Plugins, the `my` tool | done |
 
 Phase 1 (the core agent) is complete. Phase 2 builds the production backend
 (layers 11–25; progress in [`docs/PHASE2_PROGRESS.md`](docs/PHASE2_PROGRESS.md)).
@@ -93,7 +94,7 @@ A folder in `<workspace>/plugins/` with an Agent Plugins v1 `plugin.json` can
 bring skills and local (stdio) MCP servers. It is ignored until you review and
 enable it with `nanoclaw plugins enable NAME`; any later change to the package
 disables it again. `nanoclaw plugins list` shows what is installed. See
-[docs/notes/25-agent-plugins.md](docs/notes/25-agent-plugins.md) for the
+[docs/notes/25-skills-plugins.md](docs/notes/25-skills-plugins.md) for the
 layout and the trust model.
 
 ## Configuration

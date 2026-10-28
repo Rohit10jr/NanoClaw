@@ -186,10 +186,13 @@ Legend: ⏳ in progress · ✅ done and verified · ⛔ blocked
 
 | Task | Scope (files) | Sub-agent | Verification | Status |
 |---|---|---|---|---|
-| 25.1 Skills catch-up | `skill_metadata.py`, per-prompt skill snapshot, `disabledSkills`, skills shown as disabled (CLI, web UI), the built-in `cron` skill | sub-agent (worktree), parallel | | ⏳ |
-| 25.2 Agent plugins | `agent/plugins.py` (packages in `plugins/`, approval bound to content), plugin skills, `read_file` allowance, plugin MCP servers, `nanoclaw plugins` | sub-agent (worktree), parallel | | ⏳ |
-| 25.3 `my` tool and skill | nanobot's `my` tool (inspect the agent's own setup), the `my` skill | sub-agent (worktree), parallel | | ⏳ |
-| Integration, mutation checks, docs, PR | | | | |
+| 25.1 Skills catch-up | `skill_metadata.py`, per-prompt skill snapshot, `disabledSkills`, skills shown as disabled (CLI, web UI), the built-in `cron` skill | sub-agent (worktree), parallel; sent back once (config toggle dropped unknown keys; cron skill named missing tools) | 390 checks identical | ✅ |
+| 25.2 Agent plugins | `agent/plugins.py` (packages in `plugins/`, approval bound to content), plugin skills, `read_file` allowance, plugin MCP servers, `nanoclaw plugins` | sub-agent (worktree), parallel | 26 cases identical; end-to-end enable/revoke with real `ask` runs | ✅ |
+| 25.3 `my` tool and skill | nanobot's `my` tool (inspect the agent's own setup), the `my` skill | sub-agent (worktree), parallel | 80 calls identical; no action writes config, restarts or touches security settings | ✅ |
+| Integration | conflicts (keep both); plugin skills wired into the snapshot as nanobot | main session | comparisons re-run; 4,411 passed, 7 skipped | ✅ |
+| Mutation checks | | sub-agent (worktree) | | ⏳ |
+| Docs | note 25, CODE_MAP, README, ROADMAP, note 07 | main session | — | ✅ |
+| PR | `p2/layer-25` → `main` | main session | | |
 
 ## Blockers and open items
 

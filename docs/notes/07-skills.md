@@ -83,7 +83,8 @@ Copied from nanobot; `nanobot` in the text renamed (the `"nanobot"` key in
 Left out (they need features NanoClaw doesn't have): `cron` (cron tool),
 `image-generation` (image tool), `my` (nanobot's self-inspection tool),
 `update-setup` (nanobot's upgrade flow), `clawhub` (installs third-party skills
-from a public registry; see "What we left out").
+from a public registry; see "What we left out"). *(Layer 25: `cron` and `my`
+added; see [`25-skills-plugins.md`](25-skills-plugins.md).)*
 
 ## Dream writes skills
 
@@ -122,9 +123,9 @@ order the folders are listed by the file system, unsorted, as in nanobot).
 
 | nanobot feature | Where | What it does | Later phase |
 |---|---|---|---|
-| Plugin skills | `agent/plugins.py`, `list_skills` | Skills bundled in installable plugins ("Agent Plugin skills" group) | **Phase 2: Plugins** |
+| Plugin skills | `agent/plugins.py`, `list_skills` | Skills bundled in installable plugins ("Agent Plugin skills" group) | **Phase 2: Plugins** *(layer 25: done)* |
 | CLI-app skill aliases | `apps/cli`, `_skill_aliases` | Old skill names mapped to installed CLI apps | **Phase 2** (with CLI apps) |
-| Disabling skills | `disabled_skills` config, web UI toggles | Hide chosen skills | **Phase 2: configuration / Web UI** |
+| Disabling skills | `disabled_skills` config, web UI toggles | Hide chosen skills | **Phase 2: configuration / Web UI** *(layer 25: done, `disabledSkills`)* |
 | ClawHub | `skills/clawhub` | Search and install community skills | **Phase 2**, after layer 9 (installing third-party code is a safety question) |
 | Separate project folder | `build_skills_summary(workspace=)` | Absolute skill roots when the project folder differs from the agent's home | **Phase 2: Separate project folder** |
 
@@ -133,7 +134,7 @@ order the folders are listed by the file system, unsorted, as in nanobot).
 | File | Contents |
 |---|---|
 | `nanoclaw/agent/skills.py` | `SkillsLoader`, `parse_skill_metadata`, `valid_skill_metadata`, `BUILTIN_SKILLS_DIR` |
-| `nanoclaw/skills/` | The 6 built-in skills and a README |
+| `nanoclaw/skills/` | The 6 built-in skills and a README *(8 since layer 25: `cron`, `my`)* |
 | `nanoclaw/templates/agent/skills_section.md` | The `# Skills` section text |
 | `nanoclaw/agent/context.py` | `# Active Skills` and `# Skills` sections; `$skill` block on the current message |
 | `nanoclaw/agent/loop.py` | Adds the `$skill` block before saving the user message |

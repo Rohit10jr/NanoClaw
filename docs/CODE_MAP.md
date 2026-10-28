@@ -385,7 +385,7 @@ Note: [`notes/07-skills.md`](notes/07-skills.md)
 |---|---|---|
 | [`BUILTIN_SKILLS_DIR`](../nanoclaw/agent/skills.py#L27) | [`agent/skills.py:15`][nb-l7-builtin] | Same idea: `nanoclaw/skills/` |
 | [`parse_skill_metadata`](../nanoclaw/agent/skills.py#L35), [`valid_skill_metadata`](../nanoclaw/agent/skills.py#L48) | [`skills.py:26`][nb-l7-parse], [`:39`][nb-l7-valid] | Same (PyYAML `safe_load`) |
-| [`SkillsLoader`](../nanoclaw/agent/skills.py#L60) | [`skills.py:51`][nb-l7-loader] | Simplified: no CLI-app aliases or `disabled_skills`; plugin skills since layer 25 |
+| [`SkillsLoader`](../nanoclaw/agent/skills.py#L60) | [`skills.py:51`][nb-l7-loader] | Simplified: no CLI-app aliases; `disabled_skills`, snapshot and plugin skills since layer 25 |
 | ↳ [`list_skills()`](../nanoclaw/agent/skills.py#L84), [`_skill_entries_from_dir()`](../nanoclaw/agent/skills.py#L69) | [`:90`][nb-l7-list], [`:74`][nb-l7-entries] | Same order and precedence (workspace wins), unsorted as in nanobot |
 | ↳ [`load_skill()`](../nanoclaw/agent/skills.py#L99), [`load_skills_for_context()`](../nanoclaw/agent/skills.py#L104) | [`:132`][nb-l7-load], [`:148`][nb-l7-loadctx] | Same |
 | ↳ [`get_explicitly_invoked_skills()`](../nanoclaw/agent/skills.py#L113), [`build_explicit_skill_runtime_context()`](../nanoclaw/agent/skills.py#L125) | [`:165`][nb-l7-explicit], [`:182`][nb-l7-block] | Same (`$name`, word start, available only, always-on excluded) |
@@ -812,9 +812,9 @@ Note: [`notes/24-telegram.md`](notes/24-telegram.md). Links point at nanobot `c4
 | `BaseChannel.is_allowed`, `_handle_message` pairing branch; `/pairing` | [`channels/base.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/channels/base.py), [`command/builtin.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/command/builtin.py) | Same |
 | `nanoclaw/webui/settings_system.py` pairing payload and actions | [`webui/settings_system.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/webui/settings_system.py) | Plain functions |
 
-## Layer 25.2 — Agent Plugins
+## Layer 25 — Skills, Agent Plugins, the `my` tool
 
-Note: [`notes/25-agent-plugins.md`](notes/25-agent-plugins.md). Links point at nanobot `c4dac64`.
+Note: [`notes/25-skills-plugins.md`](notes/25-skills-plugins.md). Links point at nanobot `c4dac64`.
 
 | NanoClaw | nanobot (`c4dac64`) | How it compares |
 |---|---|---|
@@ -822,6 +822,10 @@ Note: [`notes/25-agent-plugins.md`](notes/25-agent-plugins.md). Links point at n
 | `SkillsLoader._discover_skills`, "Agent Plugin skills" summary group | [`agent/skills.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/skills.py) | Same order and group |
 | `_FsTool._resolve_read` plugin skill dirs | [`agent/tools/filesystem.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/tools/filesystem.py) | Same |
 | `mcp.configured_servers` → `MCPProvider` (gateway, chat, ask) | [`agent/tools/mcp.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/tools/mcp.py) `_configured_servers` | Same merge; no hot reload |
+| `nanoclaw/agent/skill_metadata.py`; `SkillsLoader.snapshot()`, `_SkillSnapshot`, `disabled_skills` | [`agent/skill_metadata.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/skill_metadata.py), [`agent/skills.py:32-67`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/skills.py#L32) | 390 checks identical; no CLI-app aliases |
+| `nanoclaw/webui/skills_api.py` (skills list, detail, `skill.update`) | [`webui/skills_api.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/webui/skills_api.py) | Toggle edits only `disabledSkills` in the stored JSON |
+| `nanoclaw/skills/cron/`, `nanoclaw/skills/my/` | [`skills/cron`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/skills/cron), [`skills/my`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/skills/my) | `cron` text adapted (no `message` tool) |
+| `nanoclaw/agent/tools/self.py` (`my`), `runtime_control.py`, `self_config.py` | [`agent/tools/self.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/tools/self.py), [`agent/tools/self_config.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/tools/self_config.py) | 80 calls identical; `set` off by default |
 | `nanoclaw/cli/plugins.py` (`nanoclaw plugins`) | web UI Apps page ([`webui/mcp_presets_api.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/webui/mcp_presets_api.py)) | CLI with review and confirmation instead of the web UI |
 
 [nb-pta]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/providers/base.py#L118
