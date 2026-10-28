@@ -228,14 +228,33 @@ and the heartbeat every 30 minutes (`gateway.heartbeat`: `intervalS`,
 workspace's `HEARTBEAT.md`, runs them, and lets a small model call decide
 whether the result is worth sending to your most recent chat
 (`/evaluator-prompt init` copies that decision's instructions to
-`prompts/evaluator.md`). No channels exist yet, so nothing reaches the gateway
-from outside and the heartbeat has nowhere to deliver (it then does nothing,
-as nanobot does with only the CLI); Telegram and the web UI build on it.
+`prompts/evaluator.md`). Without a channel nothing reaches the gateway from
+outside and the heartbeat has nowhere to deliver (it then does nothing, as
+nanobot does with only the CLI).
 
 ```bash
 uv run nanoclaw gateway            # logs on stderr (--no-logs to hide, -v for debug)
 curl http://127.0.0.1:18790/health
 ```
+
+The web UI: the gateway can serve nanobot's own React web UI (nanobot's
+`webui/`, built unchanged with `bun run build`; its output is
+`nanobot/web/dist`). Turn it on in `config.json` and point it at the build:
+
+```json
+{"channels": {"websocket": {"enabled": true, "webuiDist": "/path/to/nanobot/web/dist"}}}
+```
+
+(or set `NANOCLAW_WEBUI_DIST` instead of `webuiDist`), then open
+`http://127.0.0.1:8765` (`host`, `port`). One port serves the page, its
+`/api` routes and the WebSocket; chats are saved as `websocket:<id>` sessions
+and the heartbeat can deliver to them. By default only browsers on this
+machine are let in. For remote access set a secret, `"tokenIssueSecret": "..."`
+(and `"host": "0.0.0.0"` or a reverse proxy); the page then asks for it once.
+The UI shows nanobot's core chat (`webui.core.v1`): streaming replies, tool
+activity, history, titles, delete. Settings, skills, apps, automations,
+channels, attachments and subagent panels are nanobot features NanoClaw does
+not serve; those pages show empty or error states.
 
 Subagents, as in nanobot: the agent can hand a task to a child agent with the
 `subagent` tool (`action=create`). With `wait=true` it waits for the answer;
