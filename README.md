@@ -133,7 +133,20 @@ picks one, `--preset NAME` (on `chat` and `ask`) overrides it for a run, and
 
 Failed model requests are retried (rate limits, timeouts, server errors; 1, 2,
 4 seconds or the server's Retry-After); quota and authentication errors stop
-at once. `"providerRetryMode": "persistent"` keeps retrying. Add `--logs` to
+at once. `"providerRetryMode": "persistent"` keeps retrying.
+
+`fallbackModels` lists backup models, tried in order once the model's retries
+run out (timeouts, server errors, rate limits, quota and authentication
+errors; not content-filter, context-length or other bad-request errors). Each
+entry is a preset name or an inline model; omitted limits come from the
+active model, and the context budget is the smallest window of the chain.
+After 3 failed requests in a row the model is skipped for 60 seconds. The
+chat shows `↳ Using fallback model …` when a backup answered:
+
+```json
+{ "agents": { "defaults": { "modelPreset": "fast", "fallbackModels": [
+    "deep", { "provider": "deepseek", "model": "deepseek-reasoner", "maxTokens": 4096 } ] } } }
+``` Add `--logs` to
 `chat`, `ask`, `compact` or `dream` to see what the agent does internally.
 
 Conversations are saved in `~/.nanoclaw/sessions/`, outside the workspace, so

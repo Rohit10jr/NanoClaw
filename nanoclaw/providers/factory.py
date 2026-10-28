@@ -8,7 +8,10 @@ when a route needs it). nanobot's provider snapshots and signatures (used
 for config hot reload) are left out; ``build_preset_runtime`` gives the
 per-preset ``LLMRuntime`` instead.
 
-Fallback models (``agents.defaults.fallbackModels``) are not wrapped here yet.
+With ``agents.defaults.fallbackModels`` set, ``make_provider`` wraps the
+provider in a ``FallbackProvider`` whose factory builds plain providers for the
+fallback presets (``_resolve_fallback_presets``, ``_inline_fallback_preset``),
+and ``build_preset_runtime`` uses the smallest context window of the chain.
 """
 
 from __future__ import annotations
@@ -25,10 +28,12 @@ from nanoclaw.config.loader import (
 from nanoclaw.config.schema import (
     DEFAULT_MODEL,
     Config,
+    InlineFallbackConfig,
     ModelPresetConfig,
     ProviderConfig,
 )
 from nanoclaw.providers.base import LLMProvider
+from nanoclaw.providers.fallback_provider import FallbackProvider
 from nanoclaw.providers.openai_compat import OpenAICompatProvider
 from nanoclaw.providers.registry import ProviderSpec
 from nanoclaw.providers.routing import ProviderRoute, resolve_provider_route
@@ -40,6 +45,7 @@ __all__ = [
     "ENV_API_KEY",
     "ENV_MODEL",
     "build_preset_runtime",
+    "chain_context_window_tokens",
     "make_provider",
     "provider_from_config",
     "provider_from_env",
@@ -127,6 +133,36 @@ def _make_provider_core(
     )
 
 
+def _inline_fallback_preset(primary: ModelPresetConfig, fallback: InlineFallbackConfig) -> ModelPresetConfig:
+    """An inline fallback as a preset; unset limits come from the primary (factory.py:174)."""
+    return ModelPresetConfig(
+        model=fallback.model,
+        provider=fallback.provider,
+        max_tokens=fallback.max_tokens if fallback.max_tokens is not None else primary.max_tokens,
+        context_window_tokens=(
+            fallback.context_window_tokens
+            if fallback.context_window_tokens is not None
+            else primary.context_window_tokens
+        ),
+        temperature=fallback.temperature if fallback.temperature is not None else primary.temperature,
+        reasoning_effort=fallback.reasoning_effort,
+        extra_headers=fallback.extra_headers,
+        extra_query=fallback.extra_query,
+        extra_body=fallback.extra_body,
+    )
+
+
+def _resolve_fallback_presets(config: Config, primary: ModelPresetConfig) -> list[ModelPresetConfig]:
+    """``agents.defaults.fallbackModels`` as presets, in order (factory.py:193)."""
+    presets: list[ModelPresetConfig] = []
+    for fallback in config.agents.defaults.fallback_models:
+        if isinstance(fallback, str):
+            presets.append(config.model_presets[fallback])
+        else:
+            presets.append(_inline_fallback_preset(primary, fallback))
+    return presets
+
+
 def make_provider(
     config: Config,
     *,
@@ -136,10 +172,38 @@ def make_provider(
 ) -> LLMProvider:
     """The provider the config (its active preset, or ``preset_name``) implies (factory.py:202).
 
-    ``model`` overrides the preset's model.
+    ``model`` overrides the preset's model. With fallback models configured
+    the provider is a ``FallbackProvider``; its fallback providers are built
+    when a request needs them, so a fallback with a bad setup fails then
+    (and is skipped), not here.
     """
     resolved = _resolve_model_preset(config, preset_name=preset_name, preset=preset)
-    return _make_provider_core(config, preset=resolved, model=model)
+    provider = _make_provider_core(config, preset=resolved, model=model)
+    fallback_presets = _resolve_fallback_presets(config, resolved)
+
+    if fallback_presets:
+        provider = FallbackProvider(
+            primary=provider,
+            fallback_presets=fallback_presets,
+            provider_factory=lambda fb: _make_provider_core(config, preset=fb),
+            primary_context_window_tokens=resolved.context_window_tokens,
+            fallback_preset_names=[
+                fallback if isinstance(fallback, str) else None
+                for fallback in config.agents.defaults.fallback_models
+            ],
+        )
+
+    return provider
+
+
+def chain_context_window_tokens(config: Config, preset: ModelPresetConfig) -> int:
+    """The smallest context window of ``preset`` and its fallbacks.
+
+    A fallback may answer any request, so the context budget must fit every
+    model of the chain (nanobot ``build_provider_snapshot``, factory.py:296).
+    """
+    fallback_windows = [fallback.context_window_tokens for fallback in _resolve_fallback_presets(config, preset)]
+    return min([preset.context_window_tokens, *fallback_windows])
 
 
 def build_preset_runtime(
@@ -164,7 +228,7 @@ def build_preset_runtime(
         model=resolved.model,
         max_tokens=resolved.max_tokens,
         temperature=resolved.temperature,
-        context_window_tokens=resolved.context_window_tokens,
+        context_window_tokens=chain_context_window_tokens(config, resolved),
         reasoning_effort=resolved.reasoning_effort,
         model_preset=selected,
     )

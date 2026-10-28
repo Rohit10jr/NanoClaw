@@ -133,7 +133,8 @@ token-counter and violation log calls.
 ## Left for later
 
 Model presets, fallback models and `/model` (layer 20; presets and `/model`
-done in task 20.1); showing retry waits in
+done in task 20.1, fallback models (`agents.defaults.fallbackModels`,
+`providers/fallback_provider.py`) in task 20.3); showing retry waits in
 the chat (layer 13); the timezone in the time block; the usage store.
 
 ## Tests

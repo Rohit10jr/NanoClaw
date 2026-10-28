@@ -33,7 +33,7 @@ from nanoclaw.agent.model_presets import (
     normalize_preset_name,
 )
 from nanoclaw.providers import LLMProvider
-from nanoclaw.providers.factory import provider_from_config
+from nanoclaw.providers.factory import chain_context_window_tokens, provider_from_config
 from nanoclaw.security.network import configure_ssrf_whitelist
 from nanoclaw.security.workspace_access import WorkspaceScopeError, project_workspace_scope
 from nanoclaw.utils.templates import sync_workspace_templates
@@ -144,7 +144,8 @@ def _make_loop(
         max_concurrent_subagents=defaults.max_concurrent_subagents,
         temperature=preset.temperature,
         max_tokens=preset.max_tokens,
-        context_window_tokens=preset.context_window_tokens,
+        # The smallest window of the model and its fallbacks (nanobot build_provider_snapshot).
+        context_window_tokens=chain_context_window_tokens(config, preset),
         restrict_to_workspace=restrict or config.tools.restrict_to_workspace,
         compaction=defaults.compaction,
         provider_retry_mode=defaults.provider_retry_mode,

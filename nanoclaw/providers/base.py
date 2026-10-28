@@ -313,6 +313,11 @@ class LLMResponse:
     error_code: str | None = None  # the API's error code, e.g. "rate_limit_exceeded"
     error_retry_after_s: float | None = None  # from the Retry-After headers
     error_should_retry: bool | None = None  # from the x-should-retry header
+    # Set by FallbackProvider (nanobot base.py:331-332): the public error kind
+    # of the primary model when every candidate failed, and whether a
+    # fallback model produced this response.
+    primary_error_kind: str | None = field(default=None, repr=False)
+    is_fallback: bool = field(default=False, repr=False)
 
     @property
     def has_tool_calls(self) -> bool:
@@ -522,6 +527,7 @@ class LLMProvider(ABC):
         on_stream_recover: StreamRecoverCallback | None = None,
         retry_mode: str = "standard",
         on_retry_wait: RetryWaitCallback | None = None,
+        on_retry_exhausted: RetryWaitCallback | None = None,
     ) -> LLMResponse:
         """:meth:`chat_stream` under the :meth:`chat_with_retry` policy (nanobot base.py:1230).
 
@@ -560,11 +566,12 @@ class LLMProvider(ABC):
         )
         if on_stream_recover and self.supports_stream_recover_callback:
             kwargs["on_stream_recover"] = _recover_stream
-        return await self._run_with_retry(
+        return await self._run_chat_with_retry(
             kwargs,
+            stream=True,
             retry_mode=retry_mode,
             on_retry_wait=on_retry_wait,
-            call=self.safe_chat_stream,
+            on_retry_exhausted=on_retry_exhausted or on_retry_wait,
             should_retry_guard=lambda: not has_streamed_content,
             on_stream_recover=_recover_stream if on_stream_recover else None,
         )
@@ -683,6 +690,7 @@ class LLMProvider(ABC):
         tool_choice: str | dict[str, Any] | None = None,
         retry_mode: str = "standard",
         on_retry_wait: RetryWaitCallback | None = None,
+        on_retry_exhausted: RetryWaitCallback | None = None,
     ) -> LLMResponse:
         """:meth:`chat`, retried on transient failures (nanobot base.py:1299).
 
@@ -691,7 +699,8 @@ class LLMProvider(ABC):
         going, with waits capped at 60s, until the same error has come back 10
         times in a row. Auth (401/403) and billing/quota errors stop at once.
         ``on_retry_wait(text)``, if given, hears about each wait and about
-        giving up (nanobot's ``on_retry_wait`` / ``on_retry_exhausted``).
+        giving up (nanobot's ``on_retry_wait`` / ``on_retry_exhausted``);
+        ``on_retry_exhausted``, if given, hears about giving up instead.
         """
         kwargs: dict[str, Any] = dict(
             messages=messages,
@@ -701,7 +710,39 @@ class LLMProvider(ABC):
             temperature=temperature,
             tool_choice=tool_choice,
         )
-        return await self._run_with_retry(kwargs, retry_mode=retry_mode, on_retry_wait=on_retry_wait)
+        return await self._run_chat_with_retry(
+            kwargs,
+            stream=False,
+            retry_mode=retry_mode,
+            on_retry_wait=on_retry_wait,
+            on_retry_exhausted=on_retry_exhausted or on_retry_wait,
+        )
+
+    async def _run_chat_with_retry(
+        self,
+        kwargs: dict[str, Any],
+        *,
+        stream: bool,
+        retry_mode: str,
+        on_retry_wait: RetryWaitCallback | None,
+        on_retry_exhausted: RetryWaitCallback | None,
+        should_retry_guard: Callable[[], bool] | None = None,
+        on_stream_recover: StreamRecoverCallback | None = None,
+    ) -> LLMResponse:
+        """Run one retrying entry point through this provider's retry policy.
+
+        (nanobot base.py:1374.) ``FallbackProvider`` overrides it to retry
+        each model of its chain in turn.
+        """
+        return await self._run_with_retry(
+            kwargs,
+            retry_mode=retry_mode,
+            on_retry_wait=on_retry_wait,
+            on_retry_exhausted=on_retry_exhausted,
+            call=self.safe_chat_stream if stream else None,
+            should_retry_guard=should_retry_guard,
+            on_stream_recover=on_stream_recover,
+        )
 
     async def _run_with_retry(
         self,
@@ -709,6 +750,7 @@ class LLMProvider(ABC):
         *,
         retry_mode: str,
         on_retry_wait: RetryWaitCallback | None,
+        on_retry_exhausted: RetryWaitCallback | None = None,
         call: Callable[..., Awaitable[LLMResponse]] | None = None,
         should_retry_guard: Callable[[], bool] | None = None,
         on_stream_recover: StreamRecoverCallback | None = None,
@@ -770,8 +812,8 @@ class LLMProvider(ABC):
                     identical_error_count,
                     (response.content or "")[:120].lower(),
                 )
-                if on_retry_wait:
-                    await on_retry_wait(f"Persistent retry stopped after {identical_error_count} identical errors.")
+                if on_retry_exhausted:
+                    await on_retry_exhausted(f"Persistent retry stopped after {identical_error_count} identical errors.")
                 return response
             if not persistent and attempt > len(delays):
                 logger.warning(
@@ -779,8 +821,8 @@ class LLMProvider(ABC):
                     attempt,
                     (response.content or "")[:120].lower(),
                 )
-                if on_retry_wait:
-                    await on_retry_wait(f"Model request failed after {attempt} attempts, giving up.")
+                if on_retry_exhausted:
+                    await on_retry_exhausted(f"Model request failed after {attempt} attempts, giving up.")
                 return response
 
             retry_after = self._extract_retry_after_from_response(response)
@@ -849,6 +891,25 @@ class LLMProvider(ABC):
         if kind in cls._TRANSIENT_ERROR_KINDS:
             return True
         return cls._is_transient_error(response.content)
+
+    @classmethod
+    def public_error_kind(cls, response: LLMResponse) -> str:
+        """A stable public category without provider details (nanobot base.py:1562)."""
+        if response.primary_error_kind is not None:
+            return response.primary_error_kind
+        if cls.is_arrearage_response(response):
+            return "billing"
+        kind = (response.error_kind or "").strip().lower()
+        # A plain 403 can be a policy or permission rejection, not bad credentials.
+        if kind in {"authentication", "oauth_auth_required"} or response.error_status_code == 401:
+            return "authentication"
+        if kind in {"connection", "timeout"}:
+            return kind
+        if response.error_status_code == 429:
+            return "rate_limit"
+        if response.error_status_code is not None and response.error_status_code >= 500:
+            return "server"
+        return "unknown"
 
     @classmethod
     def is_arrearage_response(cls, response: LLMResponse) -> bool:
