@@ -129,6 +129,6 @@ def test_webui_scenarios_in_browser(tmp_path: Path) -> None:
     print(report)
     assert not failed, report
     assert {r["scenario"] for r in results} >= {
-        "s1_markdown", "s2_reasoning_tools", "s3_two_chats", "s4_delete", "s5_stop_and_slash",
+        "s1_markdown", "s2_reasoning_tools", "s3_two_chats", "s4_delete", "s4c_automations", "s5_stop_and_slash",
         "s6_failed_turn", "s7_commands", "s8_reload_midstream", "s9_secret",
     }

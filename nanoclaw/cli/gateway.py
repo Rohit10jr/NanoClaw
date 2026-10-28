@@ -473,6 +473,11 @@ class Gateway:
             cron = CronService(agent.workspace / "cron" / "jobs.json")
         self.cron: CronService = cron
         self.cron.on_job = self.on_cron_job
+        # The web UI lists and manages the jobs of this same store.
+        ws = self.channels.get_channel("websocket")
+        ws_context = getattr(ws, "context", None)
+        if ws_context is not None:
+            ws_context.cron = self.cron
         # Extra long-running coroutines to run beside the loop (named tasks).
         self.extra_tasks: list[tuple[str, Callable[[], Awaitable[Any]]]] = []
         self.crashed = False

@@ -12,6 +12,7 @@ script can drive every scenario without a fixed script order:
 - ``sleepy``     -> an ``exec`` call running ``sleep 8`` in the foreground (for ``/stop``)
 - ``explode``    -> the model call raises (a failed turn)
 - ``slowstream`` -> a reply streamed over ~6 s (for reload during a turn)
+- ``schedule``   -> a ``cron`` call adding an hourly job bound to the chat, then "Scheduled."
 - anything else  -> ``Echo: <text>``
 
 Title requests get ``<first three words> topic``.
@@ -85,6 +86,12 @@ class RoutingProvider(FakeProvider):
             if after_tool:
                 return ["Slept well."], LLMResponse(content="Slept well."), 0.0
             call = ToolCallRequest(call_id, "exec", {"command": "sleep 8", "yield_time_ms": 15000})
+            return [], LLMResponse(content="", tool_calls=[call], finish_reason="tool_calls"), 0.0
+        if "schedule" in lowered:
+            if after_tool:
+                return ["Scheduled."], LLMResponse(content="Scheduled."), 0.0
+            args = {"action": "add", "name": "Hourly repo check", "message": "Check the repo", "every_seconds": 3600}
+            call = ToolCallRequest(call_id, "cron", args)
             return [], LLMResponse(content="", tool_calls=[call], finish_reason="tool_calls"), 0.0
         if "explode" in lowered:
             raise RuntimeError("scripted provider failure")

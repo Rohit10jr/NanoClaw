@@ -252,7 +252,10 @@ and the heartbeat can deliver to them. By default only browsers on this
 machine are let in. For remote access set a secret, `"tokenIssueSecret": "..."`
 (and `"host": "0.0.0.0"` or a reverse proxy); the page then asks for it once.
 The UI shows nanobot's core chat (`webui.core.v1`): streaming replies, tool
-activity, history, titles, delete. Settings, skills, apps, automations,
+activity, history, titles, delete, and a chat's scheduled jobs (the cron
+jobs the agent bound to it) in the Session details popover, where they can be
+paused, run or removed; deleting such a chat also deletes its jobs, after the
+confirm dialog lists them. Settings, skills, apps, editing automations,
 channels, attachments and subagent panels are nanobot features NanoClaw does
 not serve; those pages show empty or error states.
 

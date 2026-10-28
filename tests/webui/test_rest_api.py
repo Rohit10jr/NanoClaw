@@ -4,7 +4,7 @@ Ported from nanobot channels/websocket/tests/test_websocket_http_routes.py
 (the session, thread, commands, workspaces and sidebar routes),
 tests/utils/test_webui_sidebar_state.py and tests/webui/test_session_context.py.
 Left out: bootstrap/token tests (task 23.1's server), session delete (the
-channel's ``session.delete`` mutation), automations, skills management,
+channel's ``session.delete`` mutation), automations (tests/webui/test_session_automations.py), skills management,
 settings mutations, remote instances and media, which NanoClaw does not serve.
 """
 

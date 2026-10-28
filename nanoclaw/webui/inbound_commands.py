@@ -466,3 +466,19 @@ def mutation_json(data: Any, *, status: int = 200) -> web.Response:
 
 def mutation_error(status: int, message: str) -> web.Response:
     return web.Response(status=status, text=message, content_type="text/plain")
+
+
+def mutation_query_value(payload: dict[str, Any], key: str) -> str | None:
+    """A mutation payload field as nanobot's handlers read it: the payload
+    becomes the internal request's query (ws_http.py:304 ``_request_query``),
+    so ``True`` reads ``"true"``, ``None`` ``""``, an object its JSON."""
+    if key not in payload:
+        return None
+    value = payload[key]
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return str(value)
