@@ -11,7 +11,10 @@ Mirrors nanobot/agent/memory.py:
   checkpoint so the next request fits the model's context window.
 
 Dream (``AgentLoop.run_dream``) later reads new journal entries and edits
-``MEMORY.md``, ``USER.md`` and ``SOUL.md`` with restricted file tools.
+``MEMORY.md``, ``USER.md`` and ``SOUL.md`` with restricted file tools. Those
+files are versioned in a git repository in the workspace (``MemoryStore.git``,
+nanoclaw/utils/gitstore.py); Dream's instructions can be replaced per
+workspace with ``prompts/dream.md`` (nanoclaw/utils/workspace_prompts.py).
 """
 
 from __future__ import annotations
@@ -38,7 +41,14 @@ from nanoclaw.runtime_context import public_history_message
 from nanoclaw.session.manager import Session, SessionManager
 from nanoclaw.session.summary import is_summary_checkpoint, session_summary_from_metadata
 from nanoclaw.utils.llm_runtime import LLMRuntime
+from nanoclaw.utils.gitstore import GitStore
 from nanoclaw.utils.templates import render_template
+from nanoclaw.utils.workspace_prompts import (
+    WORKSPACE_PROMPT_MAX_CHARS,
+    has_workspace_prompt_override,
+    load_workspace_prompt_override,
+    workspace_prompt_file,
+)
 from nanoclaw.security.workspace_policy import WORKSPACE_BOUNDARY_NOTE
 from nanoclaw.utils.tokens import (
     estimate_message_tokens,
@@ -67,6 +77,10 @@ class MemoryStore:
     """File I/O for ``memory/MEMORY.md`` and ``memory/history.jsonl``."""
 
     _DEFAULT_MAX_HISTORY = 1000
+    # Durable files whose real working-tree delta grounds Dream commit messages.
+    # Deliberately excludes memory/.dream_cursor so progress bookkeeping never
+    # appears as a durable-memory edit in the audit record. (nanobot memory.py:61)
+    _DREAM_CONTENT_PATHS = ("SOUL.md", "USER.md", "memory/MEMORY.md")
 
     def __init__(self, workspace: Path, max_history_entries: int = _DEFAULT_MAX_HISTORY) -> None:
         self.workspace = workspace
@@ -83,6 +97,17 @@ class MemoryStore:
         self._oversize_logged = False
         self._corruption_logged = False
         self._malformed_entry_logged = False
+        self._dream_prompt_oversize_logged = False
+        # nanobot memory.py:88. ``.dream_cursor`` is listed but ``.gitignore``
+        # (written by ``sync_workspace_templates`` from the other three) keeps
+        # it out of the commits.
+        self._git = GitStore(workspace, tracked_files=[
+            "SOUL.md", "USER.md", "memory/MEMORY.md", "memory/.dream_cursor",
+        ])
+
+    @property
+    def git(self) -> GitStore:
+        return self._git
 
     @staticmethod
     def read_file(path: Path) -> str:
@@ -303,7 +328,7 @@ class MemoryStore:
             return None
         batch = entries[:max_entries]
         history_text = "\n".join(f"[{e['timestamp']}] {truncate_text(e['content'], 1000)}" for e in batch)
-        template = self.default_dream_prompt()
+        template = self._dream_template()
         return f"{template}\n\n## Conversation History\n{history_text}", batch[-1]["cursor"]
 
     def build_dream_tools(self) -> ToolRegistry:
@@ -351,6 +376,53 @@ class MemoryStore:
         return render_template(
             "agent/dream.md", strip=True, skill_creator_path=str(BUILTIN_SKILLS_DIR / "skill-creator" / "SKILL.md")
         )
+
+    @property
+    def dream_prompt_file(self) -> Path:
+        """``prompts/dream.md``: this workspace's replacement for Dream's instructions."""
+        return workspace_prompt_file(self.workspace, "dream")
+
+    def has_dream_prompt_override(self) -> bool:
+        return has_workspace_prompt_override(self.dream_prompt_file)
+
+    def _dream_template(self) -> str:
+        """The workspace override if non-empty (capped), else the default. (nanobot memory.py:510)"""
+        text, original_chars = load_workspace_prompt_override(self.dream_prompt_file)
+        if text is not None:
+            if original_chars > WORKSPACE_PROMPT_MAX_CHARS and not self._dream_prompt_oversize_logged:
+                self._dream_prompt_oversize_logged = True
+                logger.warning(
+                    "workspace Dream prompt exceeds {} chars ({}); truncating. "
+                    "Further occurrences suppressed.",
+                    WORKSPACE_PROMPT_MAX_CHARS, original_chars,
+                )
+            return text
+        return self.default_dream_prompt()
+
+    def dream_content_diff(self) -> str:
+        """Structured summary of uncommitted changes to the durable memory files.
+
+        Returns "" when git is unavailable or no content file changed. This is
+        the ground-truth input for diff-grounded Dream commit messages.
+        (nanobot memory.py:551)
+        """
+        if not self._git.is_initialized():
+            return ""
+        return self._git.summarize_working_tree(list(self._DREAM_CONTENT_PATHS))
+
+    @staticmethod
+    def build_dream_commit_message(prefix: str, diff_body: str) -> str:
+        """A Dream commit message grounded in the real working-tree diff. (nanobot memory.py:706)
+
+        *diff_body* comes from :meth:`dream_content_diff`; the model's own
+        narrative is left out so ``/dream-log`` shows what really changed. An
+        empty *diff_body* gives the bare *prefix*, which ``auto_commit``
+        turns into a no-op when there is nothing to stage.
+        """
+        diff_body = (diff_body or "").strip()
+        if not diff_body:
+            return prefix
+        return f"{prefix}\n\n{diff_body}"
 
     @staticmethod
     def dream_session_key() -> str:
@@ -894,3 +966,24 @@ class Consolidator:
             bool(summary),
         )
         return summary
+
+
+def commit_dream_changes(memory: MemoryStore) -> str | None:
+    """Commit durable Dream edits, without entering the commit path for a no-op run.
+
+    nanobot ``_commit_dream_changes`` (cli/gateway_runtime.py:231), used after
+    the scheduled Dream job: message ``dream: periodic memory consolidation``
+    plus the real diff. Returns the short SHA, or ``None`` when git is not set
+    up or none of the three files changed. (``/dream`` and ``nanoclaw dream``
+    commit in ``AgentLoop.run_dream`` with ``dream: manual run`` instead.)
+    """
+    if not memory.git.is_initialized():
+        return None
+    diff_body = memory.dream_content_diff()
+    if not diff_body:
+        return None
+    message = memory.build_dream_commit_message(
+        "dream: periodic memory consolidation",
+        diff_body,
+    )
+    return memory.git.auto_commit(message)

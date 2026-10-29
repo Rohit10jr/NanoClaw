@@ -36,6 +36,7 @@ recovery, governance) for later.
 | 18 | Isolation: bubblewrap sandbox, separate project folder (`--project`) | done |
 | 19 | Subagents v2: the `subagent` tool (create, send, cancel, check) | done |
 | 20 | Providers: registry, model presets, `/model`, Anthropic (Claude), fallback models | done |
+| 21 | Runtime: `nanoclaw gateway`, cron, heartbeat, scheduled Dream, idle compaction, memory history | done |
 
 Phase 1 (the core agent) is complete. Phase 2 builds the production backend
 (layers 11–25; progress in [`docs/PHASE2_PROGRESS.md`](docs/PHASE2_PROGRESS.md)).
@@ -70,6 +71,18 @@ inside the project, though they can still read the agent's skills and
 `memory/history.jsonl`. `nanoclaw prompt --project DIR` shows the system
 prompt with its `# Current Project` section. The choice lasts for one run; it
 is not saved with the session.
+
+## Scheduled tasks
+
+Since layer 21 the agent has nanobot's `cron` tool: "remind me every day at
+8am" becomes a job in `~/.nanoclaw/workspace/cron/jobs.json`, bound to the chat
+session it was created in (`every_seconds`, a cron expression with an IANA
+timezone, defaulting to `agents.defaults.timezone`, or a one-time `at`). The
+tool also lists, updates, enables, disables and removes jobs and shows their
+run history. As in nanobot, jobs fire only while the long-running gateway
+process runs; `nanoclaw chat` and `ask` only edit them. When a job is due, its
+message runs as a normal turn of its session, and the reply goes back to that
+chat.
 
 ## Configuration
 
@@ -162,7 +175,7 @@ Replies stream word by word, with the model's reasoning shown as dim `✻` lines
 
 In the chat, slash commands: `/new` (start over), `/compact`, `/stop` (cancel
 the running turn and background subagents; finished work is kept), `/status`,
-`/model [preset]`, `/history [n]`, `/dream`, `/skill`, `/help`. While the agent works you see what
+`/model [preset]`, `/history [n]`, `/dream`, `/dream-log`, `/dream-restore`, `/dream-prompt`, `/evaluator-prompt`, `/skill`, `/help`. While the agent works you see what
 it does (`↳ $ ls`, `↳ read notes.txt`), and you can keep typing: a new message
 is folded into the running turn, as in nanobot.
 
@@ -189,6 +202,39 @@ uv run nanoclaw ask 'What is the $weather in Paris?'     # use a skill now
 Summaries are kept in a journal, `memory/history.jsonl` in the workspace;
 `nanoclaw dream` reads the new entries and updates the memory files, which the
 agent sees in every system prompt.
+
+Memory history, as in nanobot: the workspace is a small git repository
+(dulwich, no `git` program needed) that tracks only `SOUL.md`, `USER.md` and
+`memory/MEMORY.md`. Every Dream run (`/dream`, `nanoclaw dream`) commits what
+really changed, and its reply names the commit. In the chat, `/dream-log
+[sha]` shows a Dream change as a diff, `/dream-restore` lists Dream versions
+and `/dream-restore <sha>` undoes one (as a new commit, so it can be undone
+too). `/dream-prompt init` copies Dream's instructions to `prompts/dream.md`,
+where you can change how Dream organizes memory; delete or empty the file to
+go back to the default. A workspace that is already inside a git repository
+gets no memory repository.
+
+The gateway, as in nanobot: `nanoclaw gateway` keeps the agent running in the
+foreground until Ctrl+C or SIGTERM. It answers `GET /health` on
+`gateway.host`:`gateway.port` (default `127.0.0.1:18790`, `--port` to change)
+and summarizes conversations idle for `agents.defaults.idleCompactAfterMinutes`
+(default 15, 0 = off) in the background; `nanoclaw chat` does that too while
+it runs. It also runs the scheduled jobs: your `cron` jobs, Dream every 2 hours
+(`agents.defaults.dream`: `intervalH`, a legacy `cron` expression, or
+`enabled: false`; each run commits as `dream: periodic memory consolidation`)
+and the heartbeat every 30 minutes (`gateway.heartbeat`: `intervalS`,
+`enabled`). The heartbeat reads the tasks under `## Active Tasks` in the
+workspace's `HEARTBEAT.md`, runs them, and lets a small model call decide
+whether the result is worth sending to your most recent chat
+(`/evaluator-prompt init` copies that decision's instructions to
+`prompts/evaluator.md`). No channels exist yet, so nothing reaches the gateway
+from outside and the heartbeat has nowhere to deliver (it then does nothing,
+as nanobot does with only the CLI); Telegram and the web UI build on it.
+
+```bash
+uv run nanoclaw gateway            # logs on stderr (--no-logs to hide, -v for debug)
+curl http://127.0.0.1:18790/health
+```
 
 Subagents, as in nanobot: the agent can hand a task to a child agent with the
 `subagent` tool (`action=create`). With `wait=true` it waits for the answer;

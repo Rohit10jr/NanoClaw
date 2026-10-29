@@ -47,6 +47,7 @@ from nanoclaw.events import (
     RetryStatusEvent,
     RetryWaitEvent,
 )
+from nanoclaw.session.keys import is_internal_session
 
 # Which operation events a channel gets (nanobot bus/notification_delivery.py:21):
 # "lifecycle" only for routes that publish a turn's lifecycle (user turns),
@@ -144,6 +145,23 @@ class TurnDeliveryFactory:
             session_key=session_key,
             route=TurnRoute(channel=msg.channel, chat_id=msg.chat_id, metadata=dict(msg.metadata or {})),
         )
+
+    def session_events(self, session_key: str) -> EventSink:
+        """Bind idle-compaction notices to a session's chat. (nanobot :142)
+
+        nanobot reads a saved ``_compaction_route`` (written by channel turns)
+        and otherwise only routes keys that are delivery addresses of direct
+        clients (``websocket:`` and ``cli:``). NanoClaw has no channel routes
+        yet, so only that fallback; maintenance sessions (Dream, heartbeat)
+        get no notices.
+        """
+        if is_internal_session(session_key):
+            return EventSink()
+        route = tuple(session_key.split(":", 1))
+        if len(route) != 2 or route[0] not in {"websocket", "cli"}:
+            return EventSink()
+        channel, chat_id = route
+        return _bind_events(self.bus, TurnRoute(channel, chat_id, {}))
 
     @staticmethod
     def _default_route(msg: InboundMessage) -> TurnRoute:

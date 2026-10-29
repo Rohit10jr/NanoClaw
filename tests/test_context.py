@@ -3,6 +3,8 @@
 import platform
 from datetime import datetime, timedelta, timezone
 
+from pathlib import Path
+
 import pytest
 
 from nanoclaw.__main__ import main
@@ -30,7 +32,7 @@ def ws(tmp_path):
 
 def test_sync_creates_missing_files_and_never_overwrites(tmp_path):
     assert sync_workspace_templates(tmp_path) == [
-        "AGENTS.md", "SOUL.md", "USER.md", "memory/MEMORY.md", "memory/history.jsonl"
+        "AGENTS.md", "HEARTBEAT.md", "SOUL.md", "USER.md", "memory/MEMORY.md", "prompts/README.md", "memory/history.jsonl"
     ]
     assert (tmp_path / "memory" / "MEMORY.md").read_text(encoding="utf-8") == load_bundled_template("memory/MEMORY.md")
     assert (tmp_path / "memory" / "history.jsonl").read_text(encoding="utf-8") == ""
@@ -150,6 +152,17 @@ def test_edited_files_are_included_and_whitespace_only_edits_dont_count(ws):
     assert "- Always run tests." in prompt
 
 
+def test_an_earlier_bundled_agents_md_still_counts_as_unedited(ws):
+    # Workspaces created before layer 21 hold the shorter AGENTS.md (no cron
+    # or heartbeat sections); it must not start appearing in the prompt.
+    old = (Path(__file__).parent / "fixtures" / "agents_md_layer4.md").read_text(encoding="utf-8")
+    assert old.strip() != load_bundled_template("AGENTS.md").strip()
+    (ws / "AGENTS.md").write_text(old, encoding="utf-8")
+    assert "## AGENTS.md" not in ContextBuilder(ws).build_system_prompt()
+    (ws / "AGENTS.md").write_text(old + "\n- Always run tests.\n", encoding="utf-8")
+    assert "- Always run tests." in ContextBuilder(ws).build_system_prompt()
+
+
 def test_empty_and_missing_files_are_skipped(tmp_path):
     (tmp_path / "SOUL.md").write_text("   \n", encoding="utf-8")
     prompt = ContextBuilder(tmp_path).build_system_prompt()
@@ -257,9 +270,14 @@ def test_cli_prompt_command_prints_system_prompt_and_creates_files(capsys, tmp_p
     ws = tmp_path / "ws"
     assert main(["prompt", "-w", str(ws)]) == 0
     captured = capsys.readouterr()
-    assert captured.out.strip() == ContextBuilder(ws).build_system_prompt(channel="cli").strip()
+    builder = ContextBuilder(ws)
+    builder.include_scheduling = True  # chat and ask have the cron tool (layer 21)
+    assert captured.out.strip() == builder.build_system_prompt(channel="cli").strip()
+    assert "## Scheduling" in captured.out
     assert f"[created {ws / 'SOUL.md'}]" in captured.err
-    assert sorted(p.name for p in ws.iterdir()) == ["AGENTS.md", "SOUL.md", "USER.md", "memory", "skills"]
+    assert sorted(p.name for p in ws.iterdir()) == [
+        ".git", ".gitignore", "AGENTS.md", "HEARTBEAT.md", "SOUL.md", "USER.md", "memory", "prompts", "skills"
+    ]
 
 
 def test_cli_ask_sends_edited_soul_to_the_model(tmp_path):

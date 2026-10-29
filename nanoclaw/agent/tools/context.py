@@ -7,7 +7,7 @@ conversation with the same model, without that being passed through every
 call. Since layer 14 it also carries the chat id, so a background subagent's
 report can be addressed to the chat on the message bus. nanobot's context
 also carries message IDs, the workspace scope and other routing data, which
-NanoClaw doesn't have.
+NanoClaw doesn't have. Since layer 21 it carries the inbound metadata.
 """
 
 from __future__ import annotations
@@ -15,7 +15,8 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 from nanoclaw.utils.llm_runtime import LLMRuntime
 
@@ -43,6 +44,10 @@ class RequestContext:
     # The host can consume completion messages after this request returns.
     can_receive_background_results: bool = True
     persist_session: bool = True
+    # The inbound message's metadata (nanobot ``RequestContext.metadata``):
+    # the ``cron`` tool saves it as a job's routing and refuses ``add``
+    # inside a cron turn (since layer 21).
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 _current: ContextVar[RequestContext | None] = ContextVar("nanoclaw_request_context", default=None)

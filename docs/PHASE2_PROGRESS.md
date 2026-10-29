@@ -133,11 +133,24 @@ Legend: ⏳ in progress · ✅ done and verified · ⛔ blocked
 | Docs | note 20, CODE_MAP, README, ROADMAP, notes 01/12 | main session | — | ✅ |
 | PR | `p2/layer-20` → `main` | main session | PR #12 | ✅ |
 
+## Layer 21 — runtime: gateway, cron, heartbeat, scheduled Dream, idle compaction, memory history, prompt overrides (`p2/layer-21`) ✅
+
+| Task | Scope (files) | Sub-agent | Verification | Status |
+|---|---|---|---|---|
+| 21.1 Cron | `cron/` (types, service, bound runner), cron tool, `cron_reminder.md`, the Scheduling prompt section, `croniter` | sub-agent (worktree), phase A | 104 cases identical (next runs incl. DST, resume rule, tool, store, execution, bound runner, prompt) | ✅ |
+| 21.2 Gateway, idle compaction | `nanoclaw gateway` (foreground, signals, `/health`), `gateway` config, `agent/autocompact.py` in `AgentLoop.run()` | sub-agent (worktree), phase A | Idle compaction 27/27 identical, `/health` 4/4; real gateway subprocess with SIGTERM/SIGINT | ✅ |
+| 21.3 Memory history, prompt overrides | `utils/gitstore.py` (dulwich), Dream commits, `/dream-log`, `/dream-restore`, `/dream-prompt` and workspace prompt overrides | sub-agent (worktree), phase A | 280 checks: 208 identical, 72 expected (product name, shorter prompts README) | ✅ |
+| 21.4 System jobs | Dream every 2 h, heartbeat (`HEARTBEAT.md`, evaluator) in the gateway | sub-agent (worktree), phase B | 1,061 checks identical, 5 expected (product name) | ✅ |
+| Integration | 3 conflicts (keep both), `uv.lock` regenerated, earlier `AGENTS.md` template still unedited | main session | 3,150 passed, 6 skipped | ✅ |
+| Mutation checks | 420 rules | sub-agent (worktree) | 413 caught, 7 equivalent (69 tests added); 3,219 passed | ✅ |
+| Docs | note 21, CODE_MAP, README, ROADMAP, notes 04/06/11/14 | main session | — | ✅ |
+| PR | `p2/layer-21` → `main` | main session | PR #13 | ✅ |
+
 ## Blockers and open items
 
 | Item | Status |
 |---|---|
 | Real-model tests need API keys as environment secrets | Open; FakeProvider only until then |
 | Windows shell (16.4) not yet run on Windows | Needs a run of `uv run pytest` on Windows by the user |
-| PRs #2–#4 merged; #5–#11 (layers 13–19) open; later layers stacked on them | — |
+| PRs #2–#4 merged; #5–#12 (layers 13–20) open; later layers stacked on them | — |
 | Rewrite earlier commits to the user's author | After phase 2 (user decision) |

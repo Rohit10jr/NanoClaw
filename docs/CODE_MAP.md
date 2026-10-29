@@ -246,7 +246,7 @@ Note: [`notes/04-context.md`](notes/04-context.md)
 |---|---|---|
 | [`render_template`](../nanoclaw/utils/templates.py#L36), `_environment` | [`utils/prompt_templates.py:28`][nb-l4-render], `:18` | Same Jinja2 settings |
 | [`load_bundled_template`](../nanoclaw/utils/templates.py#L42) | [`utils/helpers.py:1010`][nb-l4-loadtpl] | Same (reads from the package folder) |
-| [`sync_workspace_templates`](../nanoclaw/utils/templates.py#L48) | [`utils/helpers.py:956`][nb-l4-sync] | Simplified: `AGENTS.md`, `SOUL.md`, `USER.md`, `memory/MEMORY.md`, `memory/history.jsonl`, `skills/`; no `HEARTBEAT.md`, `prompts/` or git store |
+| [`sync_workspace_templates`](../nanoclaw/utils/templates.py#L48) | [`utils/helpers.py:956`][nb-l4-sync] | Simplified: `AGENTS.md`, `SOUL.md`, `USER.md`, `memory/MEMORY.md`, `prompts/README.md`, `memory/history.jsonl`, `skills/`, then the memory git store (since layer 21.3); no `HEARTBEAT.md` |
 | `templates/agent/identity.md`, `platform_policy.md`, `tool_contract.md`, `_snippets/untrusted_content.md` | `templates/agent/` (same names) | Same text except: name, image line removed ("Dream" wording restored in layer 6) |
 | `templates/SOUL.md`, `USER.md` | `templates/` (same names) | Same text, renamed |
 | `templates/AGENTS.md` | `templates/AGENTS.md` | Same opening; cron/heartbeat/`apply_patch` guidance replaced by `edit_file`/`write_file` guidance |
@@ -315,7 +315,7 @@ Note: [`notes/06-memory.md`](notes/06-memory.md)
 | ↳ [`append_history()`](../nanoclaw/agent/memory.py#L100), [`_normalize_history_entry()`](../nanoclaw/agent/memory.py#L94) | [`:283`][nb-l6-append], [`:260`][nb-l6-norm] | Same: `<think>` removed, 64,000-char cap, cursor + `.cursor` file |
 | ↳ [`_next_cursor()`](../nanoclaw/agent/memory.py#L148), [`read_unprocessed_history()`](../nanoclaw/agent/memory.py#L161) | [`:384`][nb-l6-next], [`:402`][nb-l6-unproc] | Same (checked) |
 | ↳ [`compact_history()`](../nanoclaw/agent/memory.py#L164) | [`:406`][nb-l6-compacth] | Same: keep 1,000, never drop entries Dream hasn't read |
-| ↳ [`build_dream_prompt()`](../nanoclaw/agent/memory.py#L238) | [`:528`][nb-l6-dreamprompt] | Same (20 entries, 1,000 chars each); no `prompts/dream.md` override |
+| ↳ [`build_dream_prompt()`](../nanoclaw/agent/memory.py#L238) | [`:528`][nb-l6-dreamprompt] | Same (20 entries, 1,000 chars each); `prompts/dream.md` override since layer 21.3 (`_dream_template`, `utils/workspace_prompts.py`) |
 | ↳ [`build_dream_tools()`](../nanoclaw/agent/memory.py#L252) + [`_PathGuard`](../nanoclaw/agent/memory.py#L357) | [`:560`][nb-l6-dreamtools] | Same since layer 7: read the workspace and built-in skills; write `skills/` and `MEMORY.md`/`SOUL.md`/`USER.md`; nanobot's error text. No `apply_patch` |
 | ↳ [`raw_archive()`](../nanoclaw/agent/memory.py#L318), [`_build_raw_checkpoint()`](../nanoclaw/agent/memory.py#L340), [`_format_messages()`](../nanoclaw/agent/memory.py#L303) | [`:650`][nb-l6-raw], [`:685`][nb-l6-rawcp], [`:628`][nb-l6-fmt] | Same output (checked); no image breadcrumbs |
 | ↳ [`dream_session_key()`](../nanoclaw/agent/memory.py#L296) | [`:704`][nb-l6-dreamkey] | Same |
@@ -357,7 +357,7 @@ being A/B tested (`docs/notes/06-memory.md`, "Compaction A/B").
 | `DEFAULT_CONTEXT_WINDOW_TOKENS` | [`config/schema.py:127`][nb-l6-window] | **Different:** 128,000 instead of 200,000 (difference #2) |
 | ↳ [`new_session()`](../nanoclaw/agent/loop.py#L355) | [`command/builtin.py:314`][nb-l5-new] `cmd_new` | Same request and journal entry (checked); waits instead of running in the background |
 | ↳ [`compact_session()`](../nanoclaw/agent/loop.py#L381) | [`command/builtin.py:349`][nb-l6-compact] `cmd_compact` | Same |
-| ↳ [`run_dream()`](../nanoclaw/agent/loop.py#L389) | [`command/builtin.py:453`][nb-l6-dream] `cmd_dream` | Same flow and messages; file comparison instead of a git diff; no schedule |
+| ↳ [`run_dream()`](../nanoclaw/agent/loop.py#L389) | [`command/builtin.py:453`][nb-l6-dream] `cmd_dream` | Same flow and messages; since layer 21.3 the git diff and the `dream: manual run` commit (`utils/gitstore.py`); no schedule |
 | ↳ `process_direct(ephemeral=, tools=)` | [`loop.py:2498`][nb-l5-pd] | Same: a temporary turn saves nothing, writes no spill files, and is checked against the context window without journaling |
 
 ### Sessions, prompt and helpers
@@ -753,6 +753,22 @@ Note: [`notes/20-providers.md`](notes/20-providers.md). Links point at nanobot `
 | `nanoclaw/providers/anthropic_provider.py` `AnthropicProvider` | [`providers/anthropic_provider.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/providers/anthropic_provider.py) | 132 of 134 comparisons identical (2: no `json_repair`) |
 | `LLMResponse.thinking_blocks`, `build_assistant_message(thinking_blocks=)` | [`providers/base.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/providers/base.py), [`agent/runner.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/runner.py) | Same |
 | `nanoclaw/providers/fallback_provider.py` `FallbackProvider`; `on_retry_exhausted`; `TurnModelUpdatedEvent` line | [`providers/fallback_provider.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/providers/fallback_provider.py) | 72 scenarios identical |
+
+## Layer 21 — Runtime: gateway, cron, heartbeat, scheduled Dream, memory history
+
+Note: [`notes/21-runtime.md`](notes/21-runtime.md). Links point at nanobot `c4dac64`.
+
+| NanoClaw | nanobot (`c4dac64`) | How it compares |
+|---|---|---|
+| `nanoclaw/cron/` `CronService`, types, `bound_runner`, `session_turns`, `binding` | [`cron/`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/cron) | 104 cases identical; no runtime admission or web UI branches |
+| `nanoclaw/agent/tools/cron.py` `CronTool` | [`agent/tools/cron.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/tools/cron.py) | Same |
+| `nanoclaw/agent/cron_turns.py` `CronTurnCoordinator`, `automation_turns.py`; `AgentLoop.submit_cron_turn` | [`agent/cron_turns.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/cron_turns.py), [`agent/loop.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/loop.py) | Same |
+| `nanoclaw/cli/gateway.py` `Gateway`, `run_gateway`, health server, shutdown handlers | [`cli/gateway_runtime.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/cli/gateway_runtime.py), [`cli/gateway.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/cli/gateway.py) | Foreground subset; `/health` 4/4 identical |
+| `nanoclaw/agent/autocompact.py` `AutoCompact`; `AgentLoop._check_expired_sessions_if_due` | [`agent/autocompact.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/autocompact.py) | 27/27 identical |
+| `nanoclaw/utils/gitstore.py` `GitStore`; `commit_dream_changes`, `dream_content_diff` (`agent/memory.py`) | [`utils/gitstore.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/utils/gitstore.py) | Same; product name |
+| `nanoclaw/utils/workspace_prompts.py`; `/dream-log`, `/dream-restore`, `/dream-prompt`, `/evaluator-prompt` | [`utils/workspace_prompts.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/utils/workspace_prompts.py), [`command/builtin.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/command/builtin.py) | Same |
+| Heartbeat (`cli/gateway.py`), `nanoclaw/utils/evaluator.py`, `templates/HEARTBEAT.md`, `templates/agent/evaluator.md`; `session/keys.py` | [`cli/gateway_runtime.py:244-800`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/cli/gateway_runtime.py#L244), [`utils/evaluator.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/utils/evaluator.py) | 1,061 checks identical |
+| `DreamConfig`, `GatewayConfig`, `HeartbeatConfig` (`config/schema.py`) | [`config/schema.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/config/schema.py) | Same names and defaults |
 
 [nb-pta]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/providers/base.py#L118
 [nb-tcr]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/providers/base.py#L72

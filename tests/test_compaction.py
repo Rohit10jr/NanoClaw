@@ -1,5 +1,7 @@
 """Compaction in the AgentLoop, /compact, /new archiving, Dream and the CLI."""
 
+import re
+
 import pytest
 
 from nanoclaw.__main__ import main
@@ -232,8 +234,13 @@ async def test_dream_updates_memory_and_advances_the_cursor(ws, tmp_path):
 async def test_dream_reports_no_changes(ws, tmp_path):
     loop, _ = make_loop(ws, tmp_path, "Memory is already current.")
     loop.memory.append_history("- small talk")
-    assert (await loop.run_dream()).endswith("; no memory changes.")
+    message = await loop.run_dream()
+    # "No memory changes" comes from the git diff of the three files. The
+    # moved .dream_cursor is still committed (nanobot stages it by name, past
+    # .gitignore), so the reply names a commit, as nanobot's /dream does.
+    assert re.fullmatch(r"Dream completed in \d+\.\ds; no memory changes\. \(commit [0-9a-f]{8}\)", message)
     assert loop.memory.get_last_dream_cursor() == 1
+    assert [c.message for c in loop.memory.git.log()] == ["dream: manual run", "init: nanoclaw memory store"]
 
 
 async def test_incomplete_dream_keeps_the_cursor(ws, tmp_path):

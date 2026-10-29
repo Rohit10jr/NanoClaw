@@ -756,7 +756,7 @@ def test_cli_config_show_lists_presets_with_masked_headers(tmp_path, capsys):
     out = capsys.readouterr().out
     shown = json.loads(out)
     assert shown["modelPresets"]["fast"]["model"] == "fast-model"
-    assert shown["agents"]["defaults"]["dream"] == {"modelOverride": "dream"}
+    assert shown["agents"]["defaults"]["dream"] == {"enabled": True, "intervalH": 2, "modelOverride": "dream"}
     assert shown["providers"]["custom"]["extraHeaders"] == {"Authorization": "****9876"}
     assert "secret-token" not in out
 

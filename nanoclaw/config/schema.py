@@ -1,7 +1,7 @@
 """The ``config.json`` schema: a subset of nanobot ``config/schema.py``.
 
 Every field here has nanobot's JSON name, nesting and default, except where a
-comment says otherwise. nanobot's other sections (gateway, api, the
+comment says otherwise. nanobot's other sections (api, the
 per-channel entries under channels, ...) are not read: unknown keys are
 ignored, so a nanobot ``config.json`` loads unchanged.
 
@@ -11,13 +11,17 @@ Layout (camelCase in JSON)::
       "agents": {"defaults": {"workspace", "modelPreset", "model", "provider",
                               "maxTokens", "contextWindowTokens", "temperature",
                               "reasoningEffort", "fallbackModels",
-                              "dream": {"modelOverride"},
+                              "dream": {"enabled", "intervalH", "cron",
+                                        "modelOverride"},
                               "maxToolIterations", "maxConcurrentSubagents",
                               "maxToolResultChars", "providerRetryMode",
                               "timezone", "timezoneMode",
+                              "idleCompactAfterMinutes",
+                              "idleCompactCheckIntervalSeconds",
                               "compaction"  # NanoClaw only
                               }},
       "channels": {"sendProgress", "sendToolHints", "showReasoning"},
+      "gateway": {"host", "port", "heartbeat": {"enabled", "intervalS"}},
       "providers": {"<name>": {"apiKey", "apiBase", "extraHeaders",
                                "extraBody", "extraQuery", "thinkingStyle"}, ...},
       "modelPresets": {"<name>": {"model", "provider", "maxTokens",
@@ -51,6 +55,7 @@ from nanoclaw.config.base import Base
 from nanoclaw.config.timezone import detect_system_timezone
 
 if TYPE_CHECKING:
+    from nanoclaw.cron.types import CronSchedule
     from nanoclaw.providers.registry import ProviderSpec
 
 # nanobot's default is ~/.nanobot/workspace (config/home.py:27).
@@ -72,17 +77,41 @@ CompactionMode = Literal["nanobot", "fixed"]
 
 
 class DreamConfig(Base):
-    """Dream settings (nanobot schema.py:64 ``DreamConfig``, the preset only).
+    """Dream settings (nanobot schema.py:64 ``DreamConfig``): the schedule of
+    the gateway's protected ``dream`` system job and the model preset.
 
-    nanobot also schedules Dream (``enabled``, ``intervalH``, ``cron``);
-    NanoClaw runs Dream on request (``nanoclaw dream``, ``/dream``), so only
-    the model preset is read.
+    ``enabled`` registers the job when ``nanoclaw gateway`` starts (default
+    every ``intervalH`` = 2 hours; a legacy ``cron`` expression wins over the
+    interval). ``nanoclaw dream`` and ``/dream`` run Dream on request either way.
     """
 
+    _HOUR_MS: ClassVar[int] = 3_600_000
+
+    enabled: bool = True  # Register the periodic Dream consolidation job on startup
+    interval_h: int = Field(default=2, ge=1)  # Every 2 hours by default
+    cron: str | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )  # Legacy cron expression override
     model_override: str | None = Field(
         default=None,
         validation_alias=AliasChoices("modelOverride", "model", "model_override"),
     )  # Model preset name for Dream runs
+
+    def build_schedule(self, timezone: str) -> CronSchedule:
+        """Build the runtime schedule, preferring the legacy cron override if present."""
+        from nanoclaw.cron.types import CronSchedule
+
+        if self.cron:
+            return CronSchedule(kind="cron", expr=self.cron, tz=timezone)
+        return CronSchedule(kind="every", every_ms=self.interval_h * self._HOUR_MS)
+
+    def describe_schedule(self) -> str:
+        """Return a human-readable summary for logs and startup output."""
+        if self.cron:
+            return f"cron {self.cron} (legacy)"
+        hours = self.interval_h
+        return f"every {hours}h"
 
 
 class RequestOverrides(Base):
@@ -153,6 +182,16 @@ class AgentDefaults(Base):
     # NanoClaw only (not in nanobot): "nanobot" (default, like upstream) or
     # "fixed" (docs/UPSTREAM_BUGS.md, bug 4). nanobot ignores the key.
     compaction: CompactionMode = "nanobot"
+    # Idle auto-compaction threshold in minutes, 0 = off (schema.py:199;
+    # JSON ``idleCompactAfterMinutes``, legacy ``sessionTtlMinutes``).
+    session_ttl_minutes: int = Field(
+        default=15,
+        ge=0,
+        validation_alias=AliasChoices("idleCompactAfterMinutes", "sessionTtlMinutes", "session_ttl_minutes"),
+        serialization_alias="idleCompactAfterMinutes",
+    )
+    # Minimum seconds between scans for idle sessions (schema.py:205).
+    idle_compact_check_interval_seconds: int = Field(default=60, ge=0)
     dream: DreamConfig = Field(default_factory=DreamConfig)  # schema.py:212
 
     @model_validator(mode="before")
@@ -321,11 +360,29 @@ class ToolsConfig(Base):
     ssrf_whitelist: list[str] = Field(default_factory=list)  # schema.py:460, CIDR ranges
 
 
+class HeartbeatConfig(Base):
+    """Heartbeat settings (nanobot schema.py:378): the gateway's protected
+    ``heartbeat`` system job, every ``intervalS`` seconds."""
+
+    enabled: bool = True
+    interval_s: int = 30 * 60  # 30 minutes
+
+
+class GatewayConfig(Base):
+    """``nanoclaw gateway`` settings (nanobot schema.py:405 ``GatewayConfig``,
+    without ``restartMode``: NanoClaw has no ``/restart``)."""
+
+    host: str = "127.0.0.1"  # local-only bind by default
+    port: int = 18790  # the /health endpoint
+    heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
+
+
 class Config(Base):
     """Root configuration (nanobot schema.py:501, a subset)."""
 
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)  # schema.py:507
+    gateway: GatewayConfig = Field(default_factory=GatewayConfig)  # schema.py:512
     # nanobot declares a field per registry provider plus extra keys for custom
     # ones (schema.py:292). NanoClaw keeps one dict: a key naming a registry
     # provider (``deepseek``, ``lmStudio``) configures it, any other key is a

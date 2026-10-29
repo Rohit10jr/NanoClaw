@@ -152,6 +152,10 @@ def test_specs_match_nanobot():
         "/model": ("Switch model preset", "brain", "[preset]", "side_channel", True),
         "/history": ("Show conversation history", "history", "[n]", "side_channel", True),
         "/dream": ("Run Dream", "sparkles", "", "side_channel", False),
+        "/dream-log": ("Show Dream log", "book-open", "", "side_channel", True),
+        "/dream-restore": ("Restore memory", "undo-2", "", "side_channel", True),
+        "/dream-prompt": ("Dream memory", "file-text", "[init]", "side_channel", True),
+        "/evaluator-prompt": ("Heartbeat evaluator", "file-text", "[init]", "side_channel", True),
         "/skill": ("List skills", "wrench", "", "side_channel", False),
         "/help": ("Show help", "circle-help", "", "side_channel", False),
     }

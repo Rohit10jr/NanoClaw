@@ -10,6 +10,8 @@ summary of compacted conversation. The project is the workspace unless
 
 from __future__ import annotations
 
+import hashlib
+
 import platform
 from collections.abc import Sequence
 from pathlib import Path
@@ -41,6 +43,10 @@ class ContextBuilder:
         self.workspace = workspace
         self.memory = MemoryStore(workspace)
         self.skills = SkillsLoader(workspace)
+        # The tool contract's ``## Scheduling`` section; the loop turns it on
+        # when it registers the ``cron`` tool (nanobot: always in the prompt,
+        # where the main agent always has the tool).
+        self.include_scheduling = False
 
     # --- system prompt -------------------------------------------------------
 
@@ -65,7 +71,7 @@ class ContextBuilder:
         bootstrap = self._load_bootstrap_files(root)
         if bootstrap:
             parts.append(bootstrap)
-        parts.append(render_template("agent/tool_contract.md"))
+        parts.append(render_template("agent/tool_contract.md", scheduling=self.include_scheduling))
         project_path = root.expanduser().resolve()
         if project_path != self.workspace.expanduser().resolve():
             parts.append(
@@ -129,11 +135,22 @@ class ContextBuilder:
             parts.append(f"## {filename}\n\n{content}")
         return "\n\n".join(parts)
 
-    @staticmethod
-    def _is_template_content(content: str, template_name: str) -> bool:
-        """True if ``content`` is still the unedited starting template."""
+    # SHA-256 of earlier bundled versions (stripped), still unedited starting
+    # templates in older workspaces. NanoClaw only: AGENTS.md lacked nanobot's
+    # cron and heartbeat sections until layer 21.
+    _PREVIOUS_TEMPLATE_SHA256 = {
+        "AGENTS.md": {"44fbc0f752e15cdb8fdc8a0a310f3d323b400f9092d5fb826692392473bde5f5"},
+    }
+
+    @classmethod
+    def _is_template_content(cls, content: str, template_name: str) -> bool:
+        """True if ``content`` is still the unedited starting template (this
+        version or an earlier bundled one)."""
         template = load_bundled_template(template_name)
-        return template is not None and content.strip() == template.strip()
+        if template is not None and content.strip() == template.strip():
+            return True
+        digest = hashlib.sha256(content.strip().encode("utf-8")).hexdigest()
+        return digest in cls._PREVIOUS_TEMPLATE_SHA256.get(template_name, set())
 
     # --- messages ---------------------------------------------------------------
 

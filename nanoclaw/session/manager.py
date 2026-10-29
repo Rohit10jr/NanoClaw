@@ -153,16 +153,22 @@ class Session:
         """The messages to replay to the model, in OpenAI chat format.
 
         Starts after the last summary and at the first user message (never
-        mid-turn), drops tool results whose call is missing, skips empty
-        assistant messages and the summary marker, and keeps only the keys the
-        model needs. A positive ``max_tokens`` keeps only the most recent
+        mid-turn; a recorded heartbeat delivery right before it is kept),
+        drops tool results whose call is missing, skips empty assistant
+        messages and the summary marker, and keeps only the keys the model
+        needs. A positive ``max_tokens`` keeps only the most recent
         messages that fit. ``include_runtime_context=False`` removes the
         appended runtime context (the time block), as shown to the user.
         """
         sliced = self.messages[self.last_archived:]
+        # Avoid starting mid-turn, except for a proactive assistant delivery
+        # (heartbeat) the user may be replying to (nanobot manager.py:241).
         for i, message in enumerate(sliced):
             if message.get("role") == "user":
-                sliced = sliced[i:]
+                start = i
+                if i > 0 and sliced[i - 1].get("_channel_delivery"):
+                    start = i - 1
+                sliced = sliced[start:]
                 break
         sliced = sliced[find_legal_message_start(sliced):]
 
@@ -318,6 +324,32 @@ class SessionManager:
             if header is not None and isinstance(header.get("key"), str):
                 headers.append(header)
         return headers
+
+    def list_sessions(self) -> list[dict[str, Any]]:
+        """Every saved session as ``{"key", "created_at", "updated_at"}``, the
+        cached copy's times when it is newer. (nanobot ``list_sessions``; the
+        idle-compaction scan reads it.)"""
+        out = []
+        for header in self.list_session_headers():
+            key = header["key"]
+            cached = self._cache.get(key)
+            if cached is not None:
+                out.append(
+                    {"key": key, "created_at": cached.created_at.isoformat(), "updated_at": cached.updated_at.isoformat()}
+                )
+            else:
+                out.append({"key": key, "created_at": header.get("created_at"), "updated_at": header.get("updated_at")})
+        return out
+
+    def has_unarchived_messages(self, key: str) -> bool:
+        """Whether the session has messages after ``last_archived`` that are not
+        command records or the summary marker. (nanobot sqlite_store.py:271)"""
+        session = self.get_existing(key)
+        if session is None:
+            return False
+        return any(
+            not m.get("_command") and not is_summary_checkpoint(m) for m in session.messages[session.last_archived:]
+        )
 
     @staticmethod
     def _read_header(path: Path) -> dict[str, Any] | None:
