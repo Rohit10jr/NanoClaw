@@ -2,10 +2,10 @@
 
 Mirrors nanobot/command/builtin.py for the commands NanoClaw has (/new,
 /compact, /stop, /status, /model, /history, /dream, /dream-log,
-/dream-restore, /dream-prompt, /evaluator-prompt, /skill, /help), with nanobot's spec fields and
-texts. Handlers return an :class:`OutboundMessage` instead of
+/dream-restore, /dream-prompt, /evaluator-prompt, /skill, /help, /pairing), with nanobot's spec
+fields and texts. Handlers return an :class:`OutboundMessage` instead of
 printing, so any channel can show them. nanobot's other commands (/restart,
-/goal, /trigger, /pairing, the ``!`` shell) need features
+/goal, /trigger, the ``!`` shell) need features
 NanoClaw does not have yet.
 """
 
@@ -171,6 +171,14 @@ BUILTIN_COMMAND_SPECS: tuple[BuiltinCommandSpec, ...] = (
         "Show help",
         "List available slash commands.",
         "circle-help",
+    ),
+    BuiltinCommandSpec(
+        "/pairing",
+        "Manage pairing",
+        "List, approve, deny or revoke pairing requests.",
+        "shield",
+        "[list|approve <code>|deny <code>|revoke <user_id>]",
+        accepts_args=True,
     ),
 )
 
@@ -725,6 +733,26 @@ async def cmd_help(ctx: CommandContext) -> OutboundMessage:
     return _reply(ctx, build_help_text(), as_text=True)
 
 
+async def cmd_pairing(ctx: CommandContext) -> OutboundMessage:
+    """List, approve, deny or revoke pairing requests. (nanobot builtin.py:939)
+
+    The reply keeps the message's routing metadata, like NanoClaw's other
+    commands, and adds nanobot's ``_pairing_command`` marker.
+    """
+    from nanoclaw.pairing import PAIRING_COMMAND_META_KEY, handle_pairing_command
+    from nanoclaw.pairing.events import PairingChanged
+
+    def changed() -> None:
+        bus = ctx.bus or getattr(ctx.loop, "bus", None)
+        if bus is not None:
+            bus.publish_nowait(PairingChanged())
+
+    reply = handle_pairing_command(ctx.msg.channel, ctx.args, on_change=changed)
+    out = _reply(ctx, reply)
+    out.metadata[PAIRING_COMMAND_META_KEY] = True
+    return out
+
+
 def build_help_text() -> str:
     """Help text shared by all channels. (nanobot builtin.py:1058)"""
     lines = [f"{BOT_LABEL} commands:"]
@@ -826,3 +854,5 @@ def register_builtin_commands(router: CommandRouter) -> None:
     router.prefix("/evaluator-prompt ", cmd_evaluator_prompt)
     router.exact("/skill", cmd_skill)
     router.exact("/help", cmd_help)
+    router.exact("/pairing", cmd_pairing)
+    router.prefix("/pairing ", cmd_pairing)

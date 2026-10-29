@@ -171,11 +171,23 @@ Legend: ⏳ in progress · ✅ done and verified · ⛔ blocked
 | Docs | note 23, CODE_MAP, README, ROADMAP | main session | — | ✅ |
 | PR | `p2/layer-23` → `main` | main session | PR #15 | ✅ |
 
+## Layer 24 — Telegram (`p2/layer-24`) ✅
+
+| Task | Scope (files) | Sub-agent | Verification | Status |
+|---|---|---|---|---|
+| 24.1 Telegram channel | `channels/telegram/` (polling, Markdown → Telegram HTML, splitting, `allowFrom`, group policy and mentions, forum topics, streaming by edits, typing, `/start` `/help`, ordered updates, retries), `channels.telegram` config, token validation | sub-agent (worktree), parallel | 100 cases identical; nanobot's 142 Telegram tests ported; fake-bot gateway tests | ✅ |
+| 24.2 Pairing | `pairing/` store and events, DM pairing codes, `/pairing` command, web UI `/api/settings/pairing` with real data | sub-agent (worktree), parallel | 29 cases identical; terminal and web UI approval flows | ✅ |
+| Integration | merges, comparisons and the web UI browser test re-run | main session | 4,064 passed, 7 skipped | ✅ |
+| Mutation checks | 605 rules | sub-agent (worktree) | 590 caught, 15 equivalent (143 tests added); 4,207 passed | ✅ |
+| Docs | note 24, CODE_MAP, README, ROADMAP | main session | — | ✅ |
+| PR | `p2/layer-24` → `main` | main session | PR #16 | ✅ |
+
 ## Blockers and open items
 
 | Item | Status |
 |---|---|
 | Real-model tests need API keys as environment secrets | Open; FakeProvider only until then |
+| Live Telegram test needs a bot token | Open; mocked tests until then |
 | Windows shell (16.4) not yet run on Windows | Needs a run of `uv run pytest` on Windows by the user |
-| PRs #2–#4 merged; #5–#14 (layers 13–22) open; later layers stacked on them | — |
+| PRs #2–#4 merged; #5–#15 (layers 13–23) open; later layers stacked on them | — |
 | Rewrite earlier commits to the user's author | After phase 2 (user decision) |

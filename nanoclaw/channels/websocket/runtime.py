@@ -33,7 +33,7 @@ its own writer task, so a slow browser never blocks the others (nanobot
 runtime.py:70-77).
 
 Left out: unix sockets, the listener restart loop, binary uploads, media
-signing, temporary chats, pairing, subagent cards, terminal leases.
+signing, temporary chats, remote pairing, subagent cards, terminal leases.
 """
 
 from __future__ import annotations
@@ -60,6 +60,7 @@ from nanoclaw.bus.runtime_events import (
     TurnRuntimeAdmitted,
 )
 from nanoclaw.channels.base import BaseChannel
+from nanoclaw.pairing.events import PairingChanged
 from nanoclaw.session.webui_turns import (
     WEBUI_SESSION_METADATA_KEY,
     WebsocketTurnRegistry,
@@ -397,6 +398,9 @@ class WebSocketChannel(BaseChannel):
             self.bus.subscribe(self._on_run_status_changed, TurnRunStatusChanged),
             self.bus.subscribe(self._on_runtime_admitted, TurnRuntimeAdmitted),
             self.bus.subscribe(self._on_turn_completed, TurnCompleted),
+            # nanobot runtime.py:821: pairing changes become a ``pairing_changed``
+            # frame for web UI clients (outbound_projection.py).
+            self.bus.subscribe(self._queue_pairing_changed, PairingChanged),
         ]
 
     async def start(self) -> None:
@@ -584,6 +588,15 @@ class WebSocketChannel(BaseChannel):
             self._enqueue(connection, raw)
         await asyncio.sleep(0)
 
+    async def _queue_pairing_changed(self, event: PairingChanged) -> None:
+        """(nanobot runtime.py:1562)"""
+        await self.bus.publish_event(event, channel=self.name, chat_id="*")
+
+    async def send_pairing_changed(self) -> None:
+        """Project invalidation only to bootstrap-authenticated WebUI clients.
+        (nanobot runtime.py:1565)"""
+        await self.broadcast("*", {"event": "pairing_changed"}, audience="webui")
+
     async def send_session_updated(self, chat_id: str, *, scope: str | None = None) -> None:
         """Tell every connection a sidebar row changed. (nanobot runtime.py:1525)"""
         body: dict[str, Any] = {"event": "session_updated", "chat_id": chat_id}
@@ -594,7 +607,12 @@ class WebSocketChannel(BaseChannel):
     # -- inbound ----------------------------------------------------------------------
 
     async def dispatch_inbound(self, *, sender_id: str, chat_id: str, content: str, metadata: dict[str, Any]) -> bool:
-        return await self._handle_message(sender_id=sender_id, chat_id=chat_id, content=content, metadata=metadata)
+        # WebSocket already authenticates at handshake time (token), so
+        # pairing is not applicable. Treat as non-DM to avoid sending pairing
+        # codes to an already-authenticated client. (nanobot runtime.py:887)
+        return await self._handle_message(
+            sender_id=sender_id, chat_id=chat_id, content=content, metadata=metadata, is_dm=False
+        )
 
     def attach_fields(self, chat_id: str) -> dict[str, Any]:
         """Session facts sent with ``attached``. (nanobot session_projection.py:51)"""

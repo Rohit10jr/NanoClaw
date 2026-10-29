@@ -14,8 +14,9 @@ and every route answers ``401 Unauthorized`` without a valid API token.
 
 nanobot runs mutations only through the socket's ``webui_request``; a plain
 HTTP call to a mutation path answers 405 (ws_http.py:483). This module
-registers the ``sidebar.update`` and ``automation.enable`` / ``disable`` /
-``delete`` / ``run`` mutations in ``ctx.mutations`` (the channel owns
+registers the ``sidebar.update``, ``automation.enable`` / ``disable`` /
+``delete`` / ``run`` and ``settings.pairing.approve`` / ``deny`` (payload
+``{"code": ...}``, settings_system.py) mutations in ``ctx.mutations`` (the channel owns
 ``session.delete``) and answers 405 on the mutation paths it knows.
 
 What differs from nanobot (deliberately):
@@ -26,8 +27,9 @@ What differs from nanobot (deliberately):
   control off, and per-chat scope metadata is not read.
 - ``/api/settings`` is read-only and small: ``agent``, ``model_presets`` and
   ``runtime`` come from NanoClaw's config; providers, usage, version and the
-  other sections are nanobot's defaults or empty. The ``settings.*``
-  mutations are not served. It reads ``ctx.config`` (nanobot reloads
+  other sections are nanobot's defaults or empty. Of the ``settings.*``
+  mutations only ``settings.pairing.approve`` / ``deny`` are served
+  (``GET /api/settings/pairing`` lists the pairing store). It reads ``ctx.config`` (nanobot reloads
   ``config.json`` on each request).
 - Sidebar state lives at ``<webui history dir>/sidebar-state.json``
   (``~/.nanoclaw/webui/<workspace-id>/``), per workspace like NanoClaw's
@@ -61,11 +63,14 @@ from loguru import logger
 
 from nanoclaw.command.builtin import builtin_command_palette
 from nanoclaw.cron.session_turns import is_bound_cron_job
+from nanoclaw.pairing import approve_code, deny_code, list_pending
+from nanoclaw.pairing.events import PairingChanged
 from nanoclaw.webui.context import WebUIContext, default_workspace_scope_payload
 from nanoclaw.webui.inbound_commands import mutation_query_value
 from nanoclaw.webui.session_automations import all_automations_payload, session_automations_payload
 from nanoclaw.webui.session_identity import is_webui_session_key
 from nanoclaw.webui.session_list_index import webui_sessions_payload
+from nanoclaw.webui.settings_system import pairing_action, pairing_payload
 from nanoclaw.webui.transcript import (
     build_webui_thread_payload,
     build_webui_trace_detail_response,
@@ -1104,13 +1109,41 @@ async def _handle_settings(request: web.Request) -> web.Response:
 
 
 async def _handle_pairing(request: web.Request) -> web.Response:
-    """GET /api/settings/pairing (settings_system.py ``pairing_payload``).
-
-    NanoClaw has no DM pairing, so there is never a pending request.
-    """
+    """GET /api/settings/pairing (settings_system.py:551 ``pairing_payload``)."""
     if not _authorized(request):
         return _unauthorized()
-    return _json_response({"requests": []})
+    return _json_response(pairing_payload(list_pending))
+
+
+def _pairing_bus(ctx: WebUIContext) -> Any:
+    channel = ctx.channel
+    if channel is not None:
+        return channel.bus
+    return getattr(ctx.loop, "bus", None)
+
+
+def _pairing_mutation(ctx: WebUIContext, action: str):
+    async def pairing_mutation(payload: dict[str, Any]) -> web.Response:
+        """``webui_request`` ``settings.pairing.<action>`` (settings_system.py:1154);
+        a successful change publishes ``PairingChanged`` (settings_routes.py:546)."""
+
+        def changed() -> None:
+            bus = _pairing_bus(ctx)
+            if bus is not None:
+                bus.publish_nowait(PairingChanged())
+
+        status, body = pairing_action(
+            mutation_query_value(payload, "code"),
+            action,
+            list_pending=list_pending,
+            approve_code=lambda code: approve_code(code, on_change=changed),
+            deny_code=lambda code: deny_code(code, on_change=changed),
+        )
+        if isinstance(body, str):
+            return _error(status, body)
+        return _json_response(body, status=status)
+
+    return pairing_mutation
 
 
 def webui_skills_payload(workspace: Path) -> dict[str, Any]:
@@ -1175,12 +1208,16 @@ def register_rest_routes(app: web.Application, ctx: WebUIContext) -> None:
     ctx.mutations["sidebar.update"] = _sidebar_update_mutation(ctx)
     for action in ("enable", "disable", "delete", "run"):
         ctx.mutations[f"automation.{action}"] = _automation_action_mutation(ctx, action)
+    for action in ("approve", "deny"):
+        ctx.mutations[f"settings.pairing.{action}"] = _pairing_mutation(ctx, action)
     for path in (
         "/api/webui/sidebar-state/update",
         "/api/sessions/{key}/delete",
         "/api/webui/automations/{action:(enable|disable|delete|run|update|change-chat)}",
         "/api/workspaces/favorite",
         "/api/workspaces/resolve-project",
+        "/api/settings/pairing/approve",
+        "/api/settings/pairing/deny",
     ):
         app.router.add_route("*", path + _SLASH, _handle_mutation_path)
     routes = (
