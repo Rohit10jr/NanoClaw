@@ -11,6 +11,7 @@ from nanoclaw.providers.base import (
     ContentDeltaCallback,
     LLMProvider,
     LLMResponse,
+    RetryStatusCallback,
     RetryWaitCallback,
     StreamRecoverCallback,
     ToolCallDeltaCallback,
@@ -213,6 +214,7 @@ class FakeProvider(LLMProvider):
         retry_mode: str = "standard",
         on_retry_wait: RetryWaitCallback | None = None,
         on_retry_exhausted: RetryWaitCallback | None = None,
+        on_retry_status: RetryStatusCallback | None = None,
     ) -> LLMResponse:
         self.last_retry_mode = retry_mode
         if self.retries:
@@ -226,6 +228,7 @@ class FakeProvider(LLMProvider):
                 retry_mode,
                 on_retry_wait,
                 on_retry_exhausted,
+                on_retry_status,
             )
         return await self.safe_chat(
             messages=messages,
@@ -251,6 +254,7 @@ class FakeProvider(LLMProvider):
         retry_mode: str = "standard",
         on_retry_wait: RetryWaitCallback | None = None,
         on_retry_exhausted: RetryWaitCallback | None = None,
+        on_retry_status: RetryStatusCallback | None = None,
     ) -> LLMResponse:
         self.last_retry_mode = retry_mode
         if self.retries:
@@ -268,6 +272,7 @@ class FakeProvider(LLMProvider):
                 retry_mode,
                 on_retry_wait,
                 on_retry_exhausted,
+                on_retry_status,
             )
         return await self.safe_chat_stream(
             messages=messages,

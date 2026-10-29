@@ -1045,6 +1045,9 @@ class AgentLoop:
             # whose preset no longer works.
             assert ctx.session is not None
             ctx.runtime = await self.runtime_for_session(ctx.session)
+        if ctx.delivery is not None:
+            # nanobot loop.py:2250 (``_build_turn``)
+            await ctx.delivery.runtime_admitted(ctx.runtime)
         await self._run_and_save_turn(ctx)
         self._prepare_outbound(ctx)
         return ctx
@@ -1200,6 +1203,7 @@ class AgentLoop:
         ctx.latency_ms = max(0, int((time.time() - ctx.started_at) * 1000))
         if ctx.delivery is not None:
             ctx.delivery.record_latency(ctx.latency_ms)
+            ctx.delivery.record_usage(result.round_usages)  # nanobot loop.py:2354
 
         # Persist everything the runner added after the user's message, with
         # the summary marker where the compacted history ends (if compacted).
@@ -1433,7 +1437,7 @@ class AgentLoop:
         delivery, result = ctx.delivery, ctx.result
         if delivery is None or result is None:
             return
-        delivery.record_stop_reason(result.stop_reason)
+        delivery.record_stop_reason(result.stop_reason, failure_error_kind=result.failure_error_kind)
         if ctx.kind == "system":
             ctx.outbound = delivery.background_response(
                 result.final_content,

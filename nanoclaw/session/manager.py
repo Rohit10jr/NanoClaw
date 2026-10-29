@@ -368,6 +368,34 @@ class SessionManager:
             data["metadata"] = {}
         return data
 
+    def delete_session_family(self, key: str) -> list[str]:
+        """Delete a session and its persisted descendants (sessions whose
+        ``parent_session_key`` chain leads to it, e.g. subagent children);
+        return the keys whose files were removed. (nanobot ``delete_session``)"""
+        children: dict[str, list[str]] = {}
+        for header in self.list_session_headers():
+            parent = header["metadata"].get("parent_session_key")
+            if isinstance(parent, str):
+                children.setdefault(parent, []).append(header["key"])
+        pending, seen, removed = [key], set(), []
+        while pending:
+            current = pending.pop()
+            if current in seen:
+                continue
+            seen.add(current)
+            pending.extend(children.get(current, ()))
+            self._cache.pop(current, None)
+            try:
+                self.get_session_path(current).unlink()
+            except FileNotFoundError:
+                continue
+            removed.append(current)
+        return removed
+
+    def delete_session(self, key: str) -> bool:
+        """Delete a session and its descendants; whether any file was removed."""
+        return bool(self.delete_session_family(key))
+
     def invalidate(self, key: str) -> None:
         """Drop a session from the cache; the next ``get_or_create`` reloads it."""
         self._cache.pop(key, None)

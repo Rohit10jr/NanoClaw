@@ -15,6 +15,9 @@ from nanoclaw.utils import tokens
 # closed afterwards ("I/O operation on closed file" in later MCP tests).
 import mcp.client.stdio  # noqa: E402,F401
 
+# The ``history`` fixture of the WebUI history tests (tests/webui).
+from webui_history_fixture import history  # noqa: E402,F401
+
 REAL_GET_TOKEN_ENCODING = tokens.get_token_encoding
 
 WINDOWS = sys.platform == "win32"

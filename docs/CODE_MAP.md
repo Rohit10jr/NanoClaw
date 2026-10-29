@@ -770,6 +770,19 @@ Note: [`notes/21-runtime.md`](notes/21-runtime.md). Links point at nanobot `c4da
 | Heartbeat (`cli/gateway.py`), `nanoclaw/utils/evaluator.py`, `templates/HEARTBEAT.md`, `templates/agent/evaluator.md`; `session/keys.py` | [`cli/gateway_runtime.py:244-800`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/cli/gateway_runtime.py#L244), [`utils/evaluator.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/utils/evaluator.py) | 1,061 checks identical |
 | `DreamConfig`, `GatewayConfig`, `HeartbeatConfig` (`config/schema.py`) | [`config/schema.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/config/schema.py) | Same names and defaults |
 
+## Layer 22 — Session history for the web UI
+
+Note: [`notes/22-session-history.md`](notes/22-session-history.md). Links point at nanobot `c4dac64`.
+
+| NanoClaw | nanobot (`c4dac64`) | How it compares |
+|---|---|---|
+| `nanoclaw/webui/outbound_wire.py` encoders, `project_tool_events` | [`webui/outbound_wire.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/webui/outbound_wire.py) | 46 sequences identical |
+| `nanoclaw/webui/outbound_projection.py` `WebUIOutboundProjector`, `WireFrame`, `is_persisted_wire_event`, `lifecycle_outbound` | [`webui/outbound_projection.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/webui/outbound_projection.py), [`channels/websocket/runtime.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/channels/websocket/runtime.py), [`session/webui_turns.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/session/webui_turns.py) | Same frames and records; no socket |
+| `RetryStatusEvent` emission (`providers/base.py`, `fallback_provider.py`), `TurnRuntimeAdmitted`, `TurnCompleted` fields | [`providers/base.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/providers/base.py), [`agent/loop.py:2250`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/loop.py#L2250) | 13 retry cases identical |
+| `nanoclaw/webui/history.py` `WebUIHistoryStore` | [`webui/history.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/webui/history.py) | JSONL per chat instead of SQLite |
+| `nanoclaw/webui/transcript.py` `build_webui_thread_payload`, `WebUITranscriptRecorder`, backfill | [`webui/transcript.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/webui/transcript.py) | 48 checks identical; backfill instead of 404 |
+| `nanoclaw/webui/session_list_index.py`, `session_identity.py`; `session/webui_turns.py` titles | [`webui/session_list_index.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/webui/session_list_index.py) | Computed on read |
+
 [nb-pta]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/providers/base.py#L118
 [nb-tcr]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/providers/base.py#L72
 [nb-tcr-hvn]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/providers/base.py#L81
