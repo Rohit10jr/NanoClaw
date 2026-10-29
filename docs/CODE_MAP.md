@@ -177,7 +177,7 @@ Note: [`notes/03-tools.md`](notes/03-tools.md)
 
 | NanoClaw | nanobot | How it compares |
 |---|---|---|
-| [`ExecTool`](../nanoclaw/agent/tools/shell.py#L62) | [`agent/tools/shell.py:162`][nb-l3-exec] | Simplified: bash only; no sessions, sandbox, shell choice, PATH config or Windows |
+| [`ExecTool`](../nanoclaw/agent/tools/shell.py#L62) | [`agent/tools/shell.py:162`][nb-l3-exec] | *(Layer 16: rewritten on exec sessions with Windows support; see the layer 16 section)* Phase 1: bash only, no sessions |
 | [`DEFAULT_DENY_PATTERNS`](../nanoclaw/agent/tools/shell.py#L32) | [`shell.py:215`][nb-l3-deny] | Same list as nanobot, including the memory-file patterns (`history.jsonl`, `.dream_cursor`) added at the end of layer 6 (checked: identical) |
 | [`_guard_command`](../nanoclaw/agent/tools/shell.py#L197) | [`shell.py:840`][nb-l3-guard], called at [`:446`][nb-l3-guardcall] | **Different: deny list and internal-URL check always applied** (nanobot: only when `restrict_to_workspace` is on, off by default). Since layer 9 also nanobot's internal-URL and restricted-mode path checks (see the layer 9 section); no allowlist |
 | [`_build_env`](../nanoclaw/agent/tools/shell.py#L405) | [`shell.py:791`][nb-l3-env] | Same (Unix) |
@@ -594,7 +594,7 @@ section point at `c4dac64`, the phase 2 reference.
 | `_search_error`, tool descriptions (`nanoclaw/agent/tools/web.py`) | [`agent/tools/web.py:1206`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/tools/web.py#L1206) | Same texts |
 | `_model_slug`, `_requires_max_completion_tokens`, `_supports_temperature`, `_is_direct_openai`, `_parse_usage` (`nanoclaw/providers/openai_compat.py`) | [`providers/openai_compat_provider.py:147-927`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/providers/openai_compat_provider.py#L147) | Same request settings in 17 cases; no effort setting or provider specs |
 | `normalize_command_text`, `command_name`, `invalid_command_text` (`nanoclaw/cli/chat.py`) | [`command/router.py:26-168`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/command/router.py#L26) | Same results; functions instead of a router class |
-| `requires_posix_shell`, `symlink_or_skip` (`tests/conftest.py`) | — | NanoClaw only: Windows test skips (`WINDOWS.md`) |
+| `requires_posix_shell(reason)`, `pid_running`, `symlink_or_skip` (`tests/conftest.py`) | — | NanoClaw only: Windows test skips and a portable process check (`WINDOWS.md`) |
 
 ## Layer 12 — Foundations
 
@@ -673,6 +673,24 @@ Note: [`notes/15-robustness.md`](notes/15-robustness.md). Links point at nanobot
 | `AgentRunSpec.context_window_tokens`, `consolidate_history`, `accepted_boundary`, `active_summary`; `AgentRunResult.summary_checkpoint` (`agent/runner.py`) | [`agent/runner.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/runner.py) | Same call site, before every request |
 | `SessionSummaryCheckpoint` (`session/summary.py`); commit in `AgentLoop._save_turn` | [`session/summary.py:30`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/session/summary.py#L30) | Same boundary rule |
 | Subagent compaction, `persist=False` (`agent/subagent.py`) | [`agent/subagent.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/subagent.py) | Same; no child transcript saved |
+
+## Layer 16 — Shell: exec sessions, Windows
+
+Note: [`notes/16-shell.md`](notes/16-shell.md). Links point at nanobot `c4dac64`.
+
+| NanoClaw | nanobot (`c4dac64`) | How it compares |
+|---|---|---|
+| `nanoclaw/agent/tools/exec_session.py` `ExecSessionManager`, `_ExecSession`, `_BoundedOutputBuffer`, `format_session_poll` | [`agent/tools/exec_session.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/tools/exec_session.py) | Full port; 41 of 44 scenarios identical, 3 deliberate (guard) |
+| `ExecSessionTool` (`exec_session`), `ListExecSessionsTool` (`list_exec_sessions`) | [`exec_session.py:777, 936`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/tools/exec_session.py#L777) | Same names, schemas, texts; plain constructors (no `ToolContext`) |
+| `nanoclaw/agent/tools/shell_output.py` `ShellOutputFilter` | [`agent/tools/shell_output.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/tools/shell_output.py) | Same |
+| `ExecTool.execute`, `_execute_session`, `execute_to_completion`, `_prepare_command`, `_spawn`, `_resolve_timeout`, `_exec_parameters` (`agent/tools/shell.py`) | [`agent/tools/shell.py:103-620`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/tools/shell.py#L103) | Same; guard always on (difference #1) |
+| `_resolve_shell`, `_normalize_powershell_command`, `_build_env`, `_kill_process_tree`, `_create_windows_job` | [`shell.py:620-819`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/tools/shell.py#L620) | 486 Windows cases identical (monkeypatched) |
+| `nanoclaw/agent/tools/_windows_job.py` | [`agent/tools/_windows_job.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/tools/_windows_job.py) | Same; NanoClaw falls back to `taskkill` when a job can't be created |
+| `current_request_session_key`, `request_context` (`agent/tools/context.py`) | [`agent/tools/context.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/tools/context.py) | Session key for owning sessions |
+| `ExecToolConfig` as `tools.exec` (`config/schema.py`) | [`agent/tools/shell_config.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/tools/shell_config.py) | Identical on 16 config files |
+| `AgentLoop` exec manager, `cancel_active_tasks`, `aclose`, `_has_pending_work` (`agent/loop.py`) | [`agent/loop.py:397, 983, 1531, 1819`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/loop.py#L983) | Same on 21 loop-level checks |
+| `SubagentManager` per-child exec managers, `close`, `has_pending_work` (`agent/subagent.py`) | [`agent/subagent.py:106, 274, 318, 999`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/subagent.py#L318) | Same; child sessions owned by the parent's key |
+| Windows paths in `_OUTSIDE_PATH_PATTERN`, `_normalize_violation_target` (`agent/tools/violations.py`) | [`utils/runtime.py:136`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/utils/runtime.py#L136) | NanoClaw only (nanobot has the gap) |
 
 [nb-pta]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/providers/base.py#L118
 [nb-tcr]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/providers/base.py#L72

@@ -1,14 +1,17 @@
-"""ExecTool against real bash.
+"""ExecTool against a real shell: bash, or PowerShell on Windows.
 
-Tests marked ``requires_posix_shell`` really run a command and are skipped on
-Windows until it has shell support (docs/WINDOWS.md, cause A); the guard tests
-run everywhere."""
+Tests that run a command give Windows a PowerShell variant; the few marked
+``requires_posix_shell`` check something only a POSIX shell does (reasons in
+docs/WINDOWS.md). The guard tests run everywhere. Windows output lines end in
+CRLF, so outputs are compared after ``lf()``."""
 
+import re
+import sys
 import time
 
 import pytest
 
-from conftest import requires_posix_shell
+from conftest import WINDOWS, requires_posix_shell
 from nanoclaw.agent.tools import is_tool_error
 from nanoclaw.agent.tools.shell import ExecTool
 
@@ -18,23 +21,32 @@ def tool(tmp_path):
     return ExecTool(working_dir=tmp_path)
 
 
-@requires_posix_shell
+# Since layer 16 every command runs as an exec session and ends with the
+# session's elapsed time (nanobot exec_session.format_session_poll).
+ELAPSED = r"\nElapsed: \d+\.\ds"
+PWD = "(Get-Location).Path" if WINDOWS else "pwd"
+
+
+def lf(text: str) -> str:
+    """Windows line endings to LF (a no-op on POSIX)."""
+    return text.replace("\r\n", "\n")
+
+
 async def test_stdout_and_exit_code(tool):
-    assert await tool.execute(command="echo hello") == "hello\n\n\nExit code: 0"
+    assert re.fullmatch("hello\n\nExit code: 0" + ELAPSED, lf(await tool.execute(command="echo hello")))
 
 
-@requires_posix_shell
 async def test_stderr_and_nonzero_exit_is_not_a_tool_error(tool):
-    out = await tool.execute(command="echo oops >&2; exit 3")
+    command = "[Console]::Error.WriteLine('oops'); exit 3" if WINDOWS else "echo oops >&2; exit 3"
+    out = await tool.execute(command=command)
     assert not is_tool_error(out)
-    assert out == "STDERR:\noops\n\n\nExit code: 3"
+    assert re.fullmatch("STDERR:\noops\n\nExit code: 3" + ELAPSED, lf(out))
 
 
-@requires_posix_shell
 async def test_runs_in_workspace_and_working_dir(tool, tmp_path):
     (tmp_path / "sub").mkdir()
-    assert (await tool.execute(command="pwd")).startswith(str(tmp_path))
-    assert (await tool.execute(command="pwd", working_dir="sub")).startswith(str(tmp_path / "sub"))
+    assert (await tool.execute(command=PWD)).startswith(str(tmp_path))
+    assert (await tool.execute(command=PWD, working_dir="sub")).startswith(str(tmp_path / "sub"))
 
 
 async def test_missing_working_dir_is_an_error(tool):
@@ -42,52 +54,85 @@ async def test_missing_working_dir_is_an_error(tool):
     assert is_tool_error(out) and out.startswith("Error executing command:")
 
 
-@requires_posix_shell
+@requires_posix_shell(
+    "a `&` background job and exit code -9 (SIGKILL); the Windows tree kill is tested in "
+    "test_shell_reap (real) and test_exec_platform (mocked)"
+)
 async def test_timeout_kills_the_command_and_its_children(tool, tmp_path):
     marker = tmp_path / "late.txt"
     start = time.monotonic()
-    out = await tool.execute(command=f"(sleep 3; touch {marker}) & sleep 5", timeout=1)
-    assert out == "Error: Command timed out after 1 seconds"
+    out = await tool.execute(command=f"(sleep 3; touch {marker}) & sleep 5", timeout=1, yield_time_ms=3000)
+    assert is_tool_error(out)
+    assert re.fullmatch(
+        "Error: Command timed out; session was terminated. Reason: max_runtime.\nExit code: -9" + ELAPSED, out
+    )
     assert time.monotonic() - start < 3
     time.sleep(2.5)
     assert not marker.exists()  # the background child was killed too
 
 
 def test_timeout_resolution(tmp_path):
+    # nanobot shell.py _resolve_timeout: the model's request is used as given
+    # within 1..max_runtime_limit and rejected outside it, never silently capped.
+    assert ExecTool()._resolve_timeout(None) == 3600  # default max_runtime: 1 hour
     assert ExecTool(timeout=60)._resolve_timeout(None) == 60
     assert ExecTool(timeout=60)._resolve_timeout(5) == 5
-    assert ExecTool(timeout=60)._resolve_timeout(9999) == 600  # model's choice is capped
-    assert ExecTool(timeout=1200)._resolve_timeout(None) == 1200  # configured default may exceed the cap
-    assert ExecTool(timeout=0)._resolve_timeout(None) is None  # 0 = no limit
+    assert ExecTool(timeout=60)._resolve_timeout(9999) == 9999
+    assert ExecTool(max_runtime=0)._resolve_timeout(None) is None  # 0 = no limit
+    assert ExecTool(timeout=0)._resolve_timeout(None) is None
+    with pytest.raises(ValueError, match="between 1 and 86400 seconds"):
+        ExecTool()._resolve_timeout(86401)
+    with pytest.raises(ValueError, match="between 1 and 100 seconds"):
+        ExecTool(max_runtime_limit=100)._resolve_timeout(0)
+    with pytest.raises(ValueError, match="integer number of seconds"):
+        ExecTool()._resolve_timeout(True)
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        ExecTool(timeout=5, max_runtime=5)
 
 
-@requires_posix_shell
+async def test_timeout_and_max_runtime_together_is_an_error(tool):
+    out = await tool.execute(command="echo hi", timeout=5, max_runtime=5)
+    assert is_tool_error(out) and out == "Error: timeout and max_runtime are mutually exclusive."
+
+
+async def test_runtime_over_the_limit_is_an_error(tool):
+    out = await tool.execute(command="echo hi", max_runtime=86401)
+    assert is_tool_error(out) and out == "Error: max_runtime must be between 1 and 86400 seconds"
+
+
 async def test_zero_timeout_means_no_limit(tmp_path):
-    out = await ExecTool(working_dir=tmp_path, timeout=0).execute(command="sleep 0.2; echo done")
-    assert out == "done\n\n\nExit code: 0"
+    command = "Start-Sleep -Milliseconds 200; echo done" if WINDOWS else "sleep 0.2; echo done"
+    out = await ExecTool(working_dir=tmp_path, timeout=0).execute(command=command)
+    assert re.fullmatch("done\n\nExit code: 0" + ELAPSED, lf(out))
 
 
-@requires_posix_shell
+@requires_posix_shell("the exact truncation counts assume LF line endings; Windows prints CRLF")
 async def test_long_output_keeps_head_and_tail(tool):
     out = await tool.execute(command="python3 -c \"print('a' * 6000 + 'b' * 6000)\"")
-    assert out.startswith("a" * 5000)
-    assert "chars truncated) ..." in out
-    assert out.endswith("\n\nExit code: 0")
+    # nanobot: the first and last 5,000 characters, then a note of what was cut.
+    assert out.startswith("a" * 5000 + "b" * 4999 + "\n\n(2,001 chars truncated from output)\nExit code: 0")
+    assert re.search(ELAPSED + "$", out)
 
 
-@requires_posix_shell
 async def test_secrets_are_not_passed_to_commands(tool, monkeypatch):
     monkeypatch.setenv("NANOCLAW_API_KEY", "sk-secret")
-    out = await tool.execute(command='echo "key=[$NANOCLAW_API_KEY]"; env | sort')
+    if WINDOWS:
+        command = (
+            'echo "key=[$env:NANOCLAW_API_KEY]"; '
+            'Get-ChildItem env: | ForEach-Object { "$($_.Name)=$($_.Value)" }'
+        )
+    else:
+        command = 'echo "key=[$NANOCLAW_API_KEY]"; env | sort'
+    out = await tool.execute(command=command)
     assert "key=[]" in out
     assert "sk-secret" not in out
-    assert "HOME=" in out
+    assert ("systemroot=" if WINDOWS else "home=") in out.lower()
 
 
-@requires_posix_shell
 async def test_commands_can_still_find_programs(tool):
-    # No PATH is passed; bash supplies a default one.
-    assert "Exit code: 0" in await tool.execute(command="ls / > /dev/null && which python3")
+    # POSIX: no PATH is passed; bash supplies a default one. Windows passes PATH.
+    command = "where.exe cmd" if WINDOWS else "ls / > /dev/null && which python3"
+    assert "Exit code: 0" in await tool.execute(command=command)
 
 
 @pytest.mark.parametrize(
@@ -115,10 +160,16 @@ async def test_deny_list_allows_ordinary_commands(tool, command):
     assert "blocked" not in await tool.execute(command=command)
 
 
-@requires_posix_shell
 @pytest.mark.parametrize(
     "command",
     [
+        "Remove-Item -Recurse -Force junk",
+        "cmd /c rd /s /q junk",
+        # A quoted .exe path: PowerShell needs the `&` that _spawn adds.
+        f"\"{sys.executable}\" -c \"import shutil; shutil.rmtree('junk')\"",
+    ]
+    if WINDOWS
+    else [
         "rm --recursive --force junk",
         "find junk -delete",
         "python3 -c \"import shutil; shutil.rmtree('junk')\"",
@@ -138,7 +189,7 @@ async def test_extra_deny_patterns(tmp_path):
 
 
 async def test_missing_command(tool):
-    assert await tool.execute(command="") == "Error: Missing command. Provide command."
+    assert await tool.execute(command="") == "Error: Missing command. Provide command or cmd."
 
 
 @pytest.mark.parametrize(

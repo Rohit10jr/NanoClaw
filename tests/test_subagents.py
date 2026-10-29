@@ -27,7 +27,10 @@ from nanoclaw.utils.llm_runtime import LLMRuntime
 from nanoclaw.utils.templates import sync_workspace_templates
 from toy_tools import EchoTool
 
-DEFAULT_TOOLS = ["edit_file", "exec", "list_dir", "read_file", "web_fetch", "web_search", "write_file"]
+DEFAULT_TOOLS = [
+    "edit_file", "exec", "exec_session", "list_dir", "list_exec_sessions",
+    "read_file", "web_fetch", "web_search", "write_file",
+]
 
 
 def call(name, args, call_id="c1"):
@@ -375,7 +378,7 @@ async def test_unfinished_child_report_is_marked_partial(ws):
 async def test_child_exception_is_reported(ws, monkeypatch):
     manager = SubagentManager(ws)
 
-    def boom():
+    def boom(**_kwargs):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(manager, "_build_tools", boom)
