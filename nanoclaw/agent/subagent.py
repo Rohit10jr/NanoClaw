@@ -48,6 +48,7 @@ from nanoclaw.agent.runner import AgentRunner, AgentRunSpec
 from nanoclaw.agent.skills import SkillsLoader
 from nanoclaw.agent.tools import ToolRegistry, ToolResult, build_default_tools
 from nanoclaw.agent.tools.context import RequestContext, bind_request_context, reset_request_context
+from nanoclaw.security.workspace_access import WorkspaceScope, bind_workspace_scope, reset_workspace_scope
 from nanoclaw.agent.tools.exec_session import ExecSessionManager
 from nanoclaw.agent.tools.file_state import FileStates
 from nanoclaw.bus.events import InboundMessage
@@ -286,8 +287,13 @@ class SubagentManager:
         *,
         runtime: LLMRuntime,
         origin_chat_id: str = "direct",
+        workspace_scope: WorkspaceScope | None = None,
     ) -> str:
-        """Start a subagent in the background; its report goes on the bus."""
+        """Start a subagent in the background; its report goes on the bus.
+
+        ``workspace_scope`` is the scope of the turn that started it; the
+        child works on the same project (nanobot subagent.py:772, :824).
+        """
         if temperature is not None:
             runtime = dataclasses.replace(runtime, temperature=temperature)
         task_id = str(uuid.uuid4())[:8]
@@ -297,7 +303,15 @@ class SubagentManager:
         self._new_exec_manager(task_id)
         bg_task = asyncio.create_task(
             self._run_subagent(
-                task_id, task, display_label, origin_channel, session_key, status, runtime, chat_id=origin_chat_id
+                task_id,
+                task,
+                display_label,
+                origin_channel,
+                session_key,
+                status,
+                runtime,
+                chat_id=origin_chat_id,
+                workspace_scope=workspace_scope,
             )
         )
         self._register(task_id, session_key, bg_task)
@@ -315,6 +329,7 @@ class SubagentManager:
         *,
         runtime: LLMRuntime,
         origin_chat_id: str = "direct",
+        workspace_scope: WorkspaceScope | None = None,
     ) -> str:
         """Run a subagent and return its final answer (an error result if it failed)."""
         if temperature is not None:
@@ -335,6 +350,7 @@ class SubagentManager:
                 runtime,
                 announce=False,
                 chat_id=origin_chat_id,
+                workspace_scope=workspace_scope,
             )
         )
         self._register(task_id, session_key, inline_task)
@@ -363,6 +379,7 @@ class SubagentManager:
         *,
         announce: bool = True,
         chat_id: str = "direct",
+        workspace_scope: WorkspaceScope | None = None,
     ) -> str:
         """Wait for a free slot, then run the task.
 
@@ -374,7 +391,16 @@ class SubagentManager:
             async with self._run_slots:
                 status.phase = "initializing"
                 return await self._run_admitted_subagent(
-                    task_id, task, label, channel, session_key, status, runtime, announce=announce, chat_id=chat_id
+                    task_id,
+                    task,
+                    label,
+                    channel,
+                    session_key,
+                    status,
+                    runtime,
+                    announce=announce,
+                    chat_id=chat_id,
+                    workspace_scope=workspace_scope,
                 )
         except asyncio.CancelledError:
             cleanup = self._start_cleanup(task_id)
@@ -395,20 +421,25 @@ class SubagentManager:
         *,
         announce: bool = True,
         chat_id: str = "direct",
+        workspace_scope: WorkspaceScope | None = None,
     ) -> str:
         """Run the child agent and report the result."""
         logger.info("Subagent [{}] starting task: {}", task_id, label)
         result = None
         messages: list[dict[str, Any]] = []
         try:
+            root = workspace_scope.project_path if workspace_scope is not None else self.workspace
+            # Built from the agent workspace; the bound scope below supplies
+            # the project root and restriction (nanobot subagent.py:777).
             tools = self._build_tools(exec_manager=self._exec_managers.get(task_id))
             messages = [
-                {"role": "system", "content": self._build_subagent_prompt()},
+                {"role": "system", "content": self._build_subagent_prompt(workspace=root)},
                 {"role": "user", "content": task},
             ]
             token = bind_request_context(
                 RequestContext(channel=channel, session_key=session_key, runtime=runtime, chat_id=chat_id)
             )
+            scope_token = bind_workspace_scope(workspace_scope) if workspace_scope is not None else None
             try:
                 result = await self.runner.run(
                     AgentRunSpec(
@@ -418,7 +449,7 @@ class SubagentManager:
                         model=runtime.model,
                         max_iterations=self.max_iterations,
                         max_tool_result_chars=self.max_tool_result_chars,
-                        workspace=self.workspace,
+                        workspace=root,
                         max_tokens=runtime.max_tokens,
                         temperature=runtime.temperature,
                         session_key=session_key,
@@ -429,6 +460,8 @@ class SubagentManager:
                     )
                 )
             finally:
+                if scope_token is not None:
+                    reset_workspace_scope(scope_token)
                 reset_request_context(token)
 
             # The run's outcome (nanobot subagent.py:877-883).
@@ -552,15 +585,25 @@ class SubagentManager:
         await self.bus.publish_inbound(report.to_inbound())
         logger.debug("Subagent [{}] announced result to {}:{}", task_id, channel, chat_id)
 
-    def _build_subagent_prompt(self) -> str:
-        """The child's short system prompt."""
-        workspace = self.workspace.expanduser().resolve()
-        skills_summary = SkillsLoader(self.workspace).build_skills_summary()
+    def _build_subagent_prompt(self, workspace: Path | None = None) -> str:
+        """The child's short system prompt (nanobot subagent.py:952).
+
+        With a project other than the agent workspace, it names the agent
+        workspace and gives the journal's absolute path.
+        """
+        agent_workspace = self.workspace.expanduser().resolve()
+        project_workspace = workspace.expanduser().resolve() if workspace else agent_workspace
+        skills_summary = SkillsLoader(self.workspace).build_skills_summary(workspace=project_workspace)
+        history_log = (
+            str(agent_workspace / "memory" / "history.jsonl")
+            if agent_workspace != project_workspace
+            else "memory/history.jsonl"
+        )
         return render_template(
             "agent/subagent_system.md",
-            workspace=str(workspace),
-            agent_workspace=str(workspace),
-            history_log="memory/history.jsonl",
+            workspace=str(project_workspace),
+            agent_workspace=str(agent_workspace),
+            history_log=history_log,
             skills_summary=skills_summary or "",
         )
 

@@ -96,6 +96,14 @@ from nanoclaw.runtime_context import (
     iteration_limit_block,
     record_iteration_limit,
 )
+from nanoclaw.security.workspace_access import (
+    WorkspaceScope,
+    bind_workspace_scope,
+    default_workspace_scope,
+    project_workspace_scope,
+    reset_workspace_scope,
+    workspace_access_block,
+)
 from nanoclaw.session import Session, SessionManager
 from nanoclaw.session.manager import SESSION_CACHE_MAX_SIZE
 from nanoclaw.session.recovery import (
@@ -152,6 +160,8 @@ class TurnContext:
     tools: ToolRegistry | None = None
     hooks: list[AgentHook] = field(default_factory=list)
     delivery: TurnDelivery | None = None
+    # The turn's project folder and access mode (nanobot ``RequestContext.workspace_scope``).
+    workspace_scope: WorkspaceScope | None = None
     session: Session | None = None
     result: AgentRunResult | None = None
     outbound: OutboundMessage | None = None
@@ -184,6 +194,7 @@ class AgentLoop:
         compaction: str = COMPACTION_NANOBOT,
         provider_retry_mode: str = "standard",
         exec_config: ExecToolConfig | None = None,
+        project: Path | None = None,
     ) -> None:
         self.provider = provider
         # For the main agent's model calls only; subagents and memory archiving
@@ -191,6 +202,13 @@ class AgentLoop:
         self.provider_retry_mode = provider_retry_mode
         self.restrict_to_workspace = restrict_to_workspace
         self.workspace = workspace
+        # The folder turns work on (``--project``; nanobot's WebUI scope) and
+        # the agent workspace as a scope, for Dream (nanobot: every channel
+        # but the WebUI). Raises WorkspaceScopeError for a missing folder.
+        self.agent_workspace_scope = default_workspace_scope(workspace, restrict_to_workspace)
+        self.workspace_scope = project_workspace_scope(
+            project, workspace=workspace, restrict_to_workspace=restrict_to_workspace
+        )
         self.model = model
         self.max_iterations = max_iterations
         self.max_tool_result_chars = max_tool_result_chars
@@ -234,7 +252,11 @@ class AgentLoop:
         # with "[File unchanged since last read: ...]".
         self._file_state_store = FileStateStore(max_sessions=SESSION_CACHE_MAX_SIZE)
         self.consolidator = Consolidator(
-            self.memory, self.sessions, self.context.build_messages, self.tools.get_definitions, compaction=compaction
+            self.memory,
+            self.sessions,
+            partial(self.context.build_messages, workspace=self.workspace_scope.project_path),
+            self.tools.get_definitions,
+            compaction=compaction,
         )
         self.subagents.consolidator = self.consolidator
         self.runner = AgentRunner()
@@ -278,6 +300,7 @@ class AgentLoop:
         events: EventSink = NO_EVENTS,
         streaming: bool = False,
         hooks: list[AgentHook] | None = None,
+        workspace_scope: WorkspaceScope | None = None,
     ) -> AgentRunResult:
         """Run one turn in the session and return the result. (nanobot loop.py:2667)
 
@@ -292,6 +315,8 @@ class AgentLoop:
         are nanobot's callbacks, adapted with ``output_events``. The answer
         streams when ``on_stream`` is given or ``streaming`` is set (nanobot
         loop.py:1931). ``hooks`` are extra hooks for this turn only.
+        ``workspace_scope`` replaces the loop's project for this turn (Dream
+        uses the agent workspace).
         """
         if channel == "system":
             raise ValueError("channel 'system' is reserved for internal messages")
@@ -307,6 +332,7 @@ class AgentLoop:
                 ),
                 streaming=streaming or on_stream is not None,
                 hooks=hooks,
+                workspace_scope=workspace_scope,
             )
         if ctx.result is None:
             reply = ctx.outbound.content if ctx.outbound is not None else ""
@@ -674,6 +700,7 @@ class AgentLoop:
         ephemeral: bool = False,
         tools: ToolRegistry | None = None,
         hooks: list[AgentHook] | None = None,
+        workspace_scope: WorkspaceScope | None = None,
     ) -> TurnContext:
         """One message through the turn stages; the caller holds the session lock.
         (nanobot loop.py:1860)"""
@@ -693,6 +720,7 @@ class AgentLoop:
             tools=tools,
             hooks=list(hooks or []),
             delivery=delivery,
+            workspace_scope=workspace_scope or self.workspace_scope,
         )
         if streaming:
             # Whether the last streamed segment had text, so the final answer
@@ -782,11 +810,17 @@ class AgentLoop:
         ctx.command_handled = command_matched
         return command_matched
 
-    def _runtime_blocks(self, content: str, session: Session, *, ephemeral: bool) -> list[RuntimeContextBlock]:
-        """The runtime context for user input: the time, the iteration-limit
+    def _runtime_blocks(
+        self, content: str, session: Session, *, ephemeral: bool, scope: WorkspaceScope | None = None
+    ) -> list[RuntimeContextBlock]:
+        """The runtime context for user input: the time, the project and
+        file-access mode (every turn, nanobot loop.py:662), the iteration-limit
         notice (user turns only, nanobot loop.py:663) and $skill-name skills
         (nanobot ``_resolve_runtime_context_for_request``, loop.py:829)."""
-        blocks: list[RuntimeContextBlock] = [current_time_block()]
+        blocks: list[RuntimeContextBlock] = [
+            current_time_block(),
+            workspace_access_block(scope or self.workspace_scope, sandbox=self.exec_config.sandbox),
+        ]
         if not ephemeral and (limit_block := iteration_limit_block(session.metadata)) is not None:
             blocks.append(limit_block)
         skill_context = self.context.skills.build_explicit_skill_runtime_context(content)
@@ -816,14 +850,16 @@ class AgentLoop:
                 self.sessions.save(session)
             persisted_early = True
         else:
-            blocks = self._runtime_blocks(content, session, ephemeral=ephemeral)
+            blocks = self._runtime_blocks(content, session, ephemeral=ephemeral, scope=ctx.workspace_scope)
             persisted_early = not ephemeral and self._persist_user_message_early(content, session, blocks)
         # [system, *history, new message], the new message never merged into
         # the history (nanobot ``ContextBuilder.build_transcript``): system
         # prompt + history are what the model has already accepted, so they
         # are what compaction summarizes; the model copy merges adjacent users.
         messages = [
-            *self.context.build_messages(history, None, channel=msg.channel, session_summary=summary),
+            *self.context.build_messages(
+                history, None, channel=msg.channel, session_summary=summary, workspace=self._project(ctx)
+            ),
             self.context.build_current_message(content, runtime_context_blocks=blocks),
         ]
 
@@ -875,6 +911,7 @@ class AgentLoop:
         session = ctx.session
         assert session is not None
         ephemeral, pending_queue, events = ctx.ephemeral, ctx.pending_queue, ctx.events
+        scope = ctx.workspace_scope or self.workspace_scope
 
         async def _checkpoint(payload: dict[str, Any]) -> None:
             # The latest finished step, saved to disk so a cancelled turn, or
@@ -904,7 +941,9 @@ class AgentLoop:
                     # Commands are barriers: their worker turn handles them.
                     if not self._can_inject_message(pending_msg):
                         break
-                    converted.append(self._injected_user_message(pending_msg, session, ephemeral=ephemeral))
+                    converted.append(
+                        self._injected_user_message(pending_msg, session, ephemeral=ephemeral, scope=scope)
+                    )
                 consumed = len(converted)
                 return converted
             finally:
@@ -952,12 +991,14 @@ class AgentLoop:
                 streaming=ctx.streaming,
                 channel=ctx.msg.channel,
                 session_key=session.key,
-                workspace=self.workspace,
+                workspace=scope.project_path,
                 turn_hooks=ctx.hooks,
                 ephemeral=ephemeral,
             )
         )
         file_state_token = bind_file_states(self._file_state_store.for_session(session.key))
+        # Tools resolve paths against the turn's project (nanobot loop.py:1293).
+        workspace_token = bind_workspace_scope(scope)
         try:
             result = await self.runner.run(
                 AgentRunSpec(
@@ -967,8 +1008,9 @@ class AgentLoop:
                     model=self.model,
                     max_iterations=self.max_iterations,
                     max_tool_result_chars=self.max_tool_result_chars,
-                    # Temporary turns never write spill files.
-                    workspace=None if ephemeral else self.workspace,
+                    # Temporary turns never write spill files. Others write them
+                    # in the project, as nanobot does (loop.py:1344).
+                    workspace=None if ephemeral else scope.project_path,
                     max_tokens=self.max_tokens,
                     temperature=self.temperature,
                     session_key=session.key,
@@ -990,10 +1032,13 @@ class AgentLoop:
                     ),
                     accepted_boundary=accepted_boundary,
                     active_summary=active_summary,
-                    summary_transcript_builder=partial(self._summary_transcript, ctx.msg.channel),
+                    summary_transcript_builder=partial(
+                        self._summary_transcript, ctx.msg.channel, workspace=scope.project_path
+                    ),
                 )
             )
         finally:
+            reset_workspace_scope(workspace_token)
             reset_request_context(token)
             reset_file_states(file_state_token)
         if result.stop_reason == "max_iterations":
@@ -1011,7 +1056,9 @@ class AgentLoop:
         """Commands stay out of injected batches. (nanobot loop.py:1007)"""
         return msg.channel == "system" or not self.commands.is_dispatchable_command(command_text(msg))
 
-    def _injected_user_message(self, msg: InboundMessage, session: Session, *, ephemeral: bool) -> dict[str, Any]:
+    def _injected_user_message(
+        self, msg: InboundMessage, session: Session, *, ephemeral: bool, scope: WorkspaceScope | None = None
+    ) -> dict[str, Any]:
         """A queued message as a user message for the running turn.
         (nanobot ``_to_user_message``, loop.py:1119)
 
@@ -1027,7 +1074,7 @@ class AgentLoop:
         if HIDDEN_HISTORY_META in msg.metadata:
             row[HIDDEN_HISTORY_META] = msg.metadata[HIDDEN_HISTORY_META]
         if msg.is_user_input:
-            blocks = self._runtime_blocks(msg.content, session, ephemeral=ephemeral)
+            blocks = self._runtime_blocks(msg.content, session, ephemeral=ephemeral, scope=scope)
             row["content"], marker = append_runtime_context(msg.content, blocks)
             if marker is not None:
                 row["_meta"][RUNTIME_CONTEXT_MESSAGE_META] = marker
@@ -1076,7 +1123,13 @@ class AgentLoop:
         budget = self.context_window_tokens - self.max_tokens - CONTEXT_SAFETY_BUFFER
         return budget if budget > 0 else 0
 
-    def _summary_transcript(self, channel: str | None, summary: str) -> list[dict[str, Any]]:
+    def _project(self, ctx: TurnContext) -> Path:
+        """The folder the turn works on."""
+        return (ctx.workspace_scope or self.workspace_scope).project_path
+
+    def _summary_transcript(
+        self, channel: str | None, summary: str, *, workspace: Path | None = None
+    ) -> list[dict[str, Any]]:
         """The system prompt around a new summary, with no history or message.
         (nanobot ``ContextCompactionState.from_transcript``, context_governance.py:162)"""
         return self.context.build_messages(
@@ -1084,6 +1137,7 @@ class AgentLoop:
             None,
             channel=channel,
             session_summary={"text": summary, "last_active": datetime.now().astimezone().isoformat()},
+            workspace=workspace or self.workspace_scope.project_path,
         )
 
     # -- session commands -----------------------------------------------------
@@ -1165,7 +1219,12 @@ class AgentLoop:
         before = [MemoryStore.read_file(f) for f in files]
         try:
             response = await self.process_direct(
-                prompt, session_key=MemoryStore.dream_session_key(), ephemeral=True, tools=self.memory.build_dream_tools()
+                prompt,
+                session_key=MemoryStore.dream_session_key(),
+                ephemeral=True,
+                tools=self.memory.build_dream_tools(),
+                # Dream edits the agent's own files, never the project.
+                workspace_scope=self.agent_workspace_scope,
             )
             elapsed = time.monotonic() - start
             if response.stop_reason == "completed":

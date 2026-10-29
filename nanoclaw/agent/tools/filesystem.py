@@ -1,9 +1,10 @@
 """File tools: read_file, write_file, edit_file, list_dir.
 
 Mirrors nanobot/agent/tools/filesystem.py. Relative paths resolve against the
-workspace. With ``restrict_to_workspace`` (off by default, as in nanobot) every
-path must stay inside the workspace; reads may also use the skills folders and
-the history journal (layer 9).
+turn's project folder (the workspace unless ``--project`` names another one;
+``nanoclaw.security.workspace_access``). With ``restrict_to_workspace`` (off by
+default, as in nanobot) every path must stay inside the project; reads may also
+use the agent's skills folders and its history journal (layer 9, layer 18).
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from typing import Any
 from nanoclaw.agent.tools.base import Tool, ToolResult
 from nanoclaw.agent.tools.file_state import FileStates, current_file_states
 from nanoclaw.agent.tools.schema import object_schema
+from nanoclaw.security.workspace_access import ToolWorkspace, current_tool_workspace
 from nanoclaw.security.workspace_policy import resolve_allowed_path
 
 
@@ -38,20 +40,25 @@ class _FsTool(Tool):
         *,
         restrict_to_workspace: bool = False,
         file_states: FileStates | None = None,
+        sandbox_restricts_workspace: bool = False,
     ) -> None:
         self._workspace = workspace
+        # A configured shell sandbox restricts the file tools too, also under
+        # a bound project scope (nanobot filesystem.py:83, ``current_tool_workspace``).
+        self._sandbox_restricts_workspace = sandbox_restricts_workspace
         # Explicit state is used by isolated runners like Dream/subagents.
         # Main AgentLoop tools leave this unset and resolve state from the
         # current async task, which keeps shared tool instances session-safe.
         # (nanobot filesystem.py:71-105)
         self._explicit_file_states = file_states
         self._fallback_file_states = FileStates()
-        self._allowed_dir = workspace if restrict_to_workspace and workspace is not None else None
+        self._restrict_to_workspace = restrict_to_workspace
         if workspace is not None:
             from nanoclaw.agent.skills import BUILTIN_SKILLS_DIR
 
             resolved = workspace.expanduser().resolve(strict=False)
-            # Agent-owned skills stay readable; of memory/, only the journal.
+            # Agent-owned skills stay readable from a project scope; of
+            # memory/, only the journal (nanobot filesystem.py:85-95).
             self._extra_read_allowed_dirs = [BUILTIN_SKILLS_DIR, resolved / "skills"]
             self._extra_read_allowed_files = [resolved / "memory" / "history.jsonl"]
         else:
@@ -63,28 +70,44 @@ class _FsTool(Tool):
             return self._explicit_file_states
         return current_file_states(self._fallback_file_states)
 
+    def _access(self) -> ToolWorkspace:
+        """The turn's project root and restriction (nanobot ``current_tool_workspace``).
+
+        Relative paths resolve against the project; restricted mode keeps
+        paths inside it. Outside a turn, the tool's own workspace applies.
+        """
+        return current_tool_workspace(
+            self._workspace,
+            restrict_to_workspace=self._restrict_to_workspace,
+            sandbox_restricts_workspace=self._sandbox_restricts_workspace,
+        )
+
     def _resolve_read(self, path: str) -> Path:
-        restricted = self._allowed_dir is not None
+        access = self._access()
+        restricted = access.allowed_root is not None
         return resolve_allowed_path(
             path,
-            workspace=self._workspace,
-            allowed_root=self._allowed_dir,
+            workspace=access.project_path,
+            allowed_root=access.allowed_root,
             extra_allowed_roots=self._extra_read_allowed_dirs if restricted else None,
             # The journal exception only matters when restricted.
             extra_allowed_files=self._extra_read_allowed_files if restricted else None,
         )
 
     def _resolve_write(self, path: str) -> Path:
-        return resolve_allowed_path(path, workspace=self._workspace, allowed_root=self._allowed_dir)
+        access = self._access()
+        return resolve_allowed_path(path, workspace=access.project_path, allowed_root=access.allowed_root)
 
     def _resolve(self, path: str) -> Path:
         return self._resolve_read(path)
 
     def _display(self, p: Path) -> str:
-        """Path relative to the workspace when inside it (nanobot: display_file_edit_path)."""
-        if self._workspace is not None:
+        """Path relative to the project when inside it (nanobot: display_file_edit_path
+        with ``_display_workspace``)."""
+        root = self._access().project_path
+        if root is not None:
             try:
-                return p.resolve().relative_to(self._workspace.resolve()).as_posix()
+                return p.resolve().relative_to(root.resolve()).as_posix()
             except ValueError:
                 pass
         return p.as_posix()

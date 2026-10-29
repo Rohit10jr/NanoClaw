@@ -304,12 +304,15 @@ async def test_wait_for_matches_text_split_across_polls(tmp_path):
     manager = ExecSessionManager()
     tool = ExecTool(working_dir=str(tmp_path), exec_session_manager=manager)
     try:
-        # The first chunk comes after a delay so that exec's own (immediate)
-        # read can't consume "ab" under load: both halves must reach the wait.
+        # Nothing is printed until the test creates "go", so exec's own read
+        # can't consume "ab" however loaded the machine is: both halves must
+        # reach the wait.
         initial = await tool.execute(
-            command="sleep 1; printf 'ab'; sleep 0.8; printf 'cd'; sleep 30", yield_time_ms=0,
+            command="while [ ! -f go ]; do sleep 0.05; done; printf 'ab'; sleep 0.8; printf 'cd'; sleep 30",
+            yield_time_ms=0,
         )
         assert "ab" not in initial
+        (tmp_path / "go").write_text("", encoding="utf-8")
         # A missed match would end at the timeout with "Wait target not
         # observed", so no wall-clock assertion is needed (it failed under load).
         result = await ExecSessionTool(manager=manager).execute(

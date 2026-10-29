@@ -77,8 +77,14 @@ class ApplyPatchTool(_FsTool):
         restrict_to_workspace: bool = False,
         write_check: Callable[[str, Path], str | None] | None = None,
         file_states: FileStates | None = None,
+        sandbox_restricts_workspace: bool = False,
     ) -> None:
-        super().__init__(workspace, restrict_to_workspace=restrict_to_workspace, file_states=file_states)
+        super().__init__(
+            workspace,
+            restrict_to_workspace=restrict_to_workspace,
+            file_states=file_states,
+            sandbox_restricts_workspace=sandbox_restricts_workspace,
+        )
         self._write_check = write_check
 
     @property

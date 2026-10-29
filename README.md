@@ -33,6 +33,7 @@ recovery, governance) for later.
 | 15 | Crash recovery, compaction before every model request | done |
 | 16 | Shell: background exec sessions, Windows PowerShell | done |
 | 17 | More tools: `apply_patch`, `rg`, unchanged-file reads, MCP servers | done |
+| 18 | Isolation: bubblewrap sandbox, separate project folder (`--project`) | done |
 
 Phase 1 (the core agent) is complete. Phase 2 builds the production backend
 (layers 11–25; progress in [`docs/PHASE2_PROGRESS.md`](docs/PHASE2_PROGRESS.md)).
@@ -53,6 +54,20 @@ uv sync
 uv run pytest
 uv run nanoclaw --version
 ```
+
+## Working on a project folder
+
+By default the agent works in its workspace (`~/.nanoclaw/workspace`), which
+also holds its own files. `nanoclaw chat --project DIR` / `nanoclaw ask
+--project DIR "..."` (or `NANOCLAW_PROJECT=DIR`) point it at a code folder
+instead, as nanobot's WebUI project picker does: relative paths in the file
+tools, `exec`'s and `rg`'s default directory and `AGENTS.md` come from the
+project, while memory, skills, `SOUL.md` and `USER.md` stay in the workspace
+(Dream only ever edits the workspace). With `--restrict` the tools are kept
+inside the project, though they can still read the agent's skills and
+`memory/history.jsonl`. `nanoclaw prompt --project DIR` shows the system
+prompt with its `# Current Project` section. The choice lasts for one run; it
+is not saved with the session.
 
 ## Configuration
 
@@ -149,7 +164,10 @@ export NANOCLAW_SSRF_WHITELIST=100.64.0.0/10          # private ranges you trust
 ```
 
 These are guards, not a sandbox: run the agent somewhere you don't mind it
-working.
+working, or, on Linux, set `"tools": {"exec": {"sandbox": "bwrap"}}` in the
+config to run every shell command inside bubblewrap, where only the workspace
+is writable and nothing outside it but system folders is visible (this also
+turns on the workspace restriction).
 
 Shell commands, as in nanobot: a command still running after a second keeps
 running in the background (up to an hour by default) and the agent checks on

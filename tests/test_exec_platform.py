@@ -4,7 +4,7 @@ Ported from nanobot tests/tools/test_exec_platform.py (c4dac64), task 16.4.
 Verifies that ExecTool selects the correct shell, environment and path-append
 strategy per platform, without actually running platform-specific binaries
 (all subprocess calls are mocked), so the Windows parts run on Linux too.
-nanobot's TestSandboxPlatform is left out: NanoClaw has no OS sandbox yet
+nanobot's TestSandboxPlatform is ported (bwrap only) in tests/test_sandbox.py
 (layer 18). The tests after TestWindowsRealExec are NanoClaw's own (taskkill,
 Job-object ownership, the job-creation fallback).
 """

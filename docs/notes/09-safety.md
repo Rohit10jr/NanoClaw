@@ -16,7 +16,8 @@ has two kinds, and NanoClaw now has both:
 Both are **application-level guards**: they check paths, commands and
 addresses before a tool runs. They are not an operating-system sandbox; a
 determined program can still find ways around text checks (nanobot says the
-same in `security/workspace_policy.py`). An OS sandbox is phase 2.
+same in `security/workspace_policy.py`). Layer 18 added the real boundary for
+shell commands: an optional **bubblewrap sandbox** (section 3).
 
 ## 1. Private-network guard
 
@@ -66,6 +67,59 @@ Note: this is a hard policy boundary, not a transient failure. Do NOT retry with
 
 Dream's tools were already limited to its own files (layer 6); this setting doesn't change them.
 
+## 3. OS sandbox: bubblewrap (layer 18, task 18.1)
+
+Set `tools.exec.sandbox` to `"bwrap"` in `~/.nanoclaw/config.json` (Linux,
+needs the `bwrap` program and user namespaces). Every `exec` and `rg` command is
+then run as `bwrap ... -- sh -c '<command>'` (`agent/tools/sandbox.py`, a port
+of nanobot's `_bwrap` and `wrap_command`):
+
+| Inside the sandbox | bwrap argument | nanobot |
+|---|---|---|
+| `/usr` read-only; `/bin`, `/lib`, `/lib64`, `/etc/alternatives`, certificates, `/etc/resolv.conf`, `/etc/ld.so.cache` read-only if they exist | `--ro-bind`, `--ro-bind-try` | `sandbox.py:71` |
+| Fresh `/proc`, `/dev`, an empty private `/tmp` | `--proc`, `--dev`, `--tmpfs /tmp` | same |
+| The workspace's **parent** folder replaced by an empty tmpfs (in nanobot's layout it holds `config.json`), then the workspace mounted back **read-write** | `--tmpfs <parent>`, `--dir`, `--bind <ws> <ws>` | same |
+| `HOME` is the workspace; the command starts in `working_dir`, or the workspace when that is outside it | `--setenv HOME`, `--chdir` | same |
+| `tools.exec.sandboxRoBinds` / `sandboxRwBinds`: extra folders, read-only / read-write. Relative or blank entries, duplicates, and the workspace or any of its parents are dropped (a bind there would undo the hidden parent); missing folders are skipped by bwrap (`-try`) | `--ro-bind-try`, `--bind-try` | `_normalize_bind_paths` |
+| Everything else (`/home`, `/root`, `/var`, ...) does not exist | — | same |
+| Network: not isolated | (no `--unshare-net`) | same |
+
+What else the setting changes, as in nanobot:
+
+- **It forces workspace restriction**, even without `--restrict`: `exec` gets
+  the `working_dir` and path checks of section 2 (nanobot
+  `sandbox_restricts_workspace`, `shell.py:391`), and the file tools stay inside
+  the workspace (nanobot `_FsTool.create`, `filesystem.py:83`). Subagents get
+  the same, since they share the exec settings.
+- **Bind folders count as allowed in `exec`'s path check** (nanobot
+  `_active_sandbox_bind_roots`, `shell.py:1175`), so `~/.local/bin/uv` works
+  with that folder in `sandboxRoBinds`. A bind that contains the workspace is
+  ignored there too. Binds never grant **file-tool** access.
+- `rg`'s argument list is joined, wrapped and split back, so it still runs
+  without a shell around `bwrap` (`shell.py:445`).
+- On Windows the setting is ignored with nanobot's warning ("Sandbox 'bwrap'
+  is not supported on Windows; running unsandboxed"); restriction is still forced.
+- Only `"bwrap"` is accepted. Any other name, `"seatbelt"` included, fails the
+  command with nanobot's error for an unknown backend:
+  `Unknown sandbox backend 'seatbelt'. Available: ['bwrap']`.
+
+Deliberate differences: no macOS **seatbelt** backend (phase-2 decision 11:
+bubblewrap only), and no read-only bind of nanobot's **media folder**
+(`~/.nanobot/media`): NanoClaw has none (difference #4). nanobot's `my` tool
+also tells the model "Shell sandbox configured; extra binds do not grant
+file-tool access." in its workspace-access runtime-context block
+(`runtime_control.py:203`); NanoClaw has no such block yet.
+
+Checked against nanobot (`scratchpad/t181/compare.py`): 62 cases (43 bwrap
+argument lists over workspace layouts at `/`, under `/tmp`, nested, symlinked,
+missing or relative; binds overlapping the workspace or its parents, missing,
+relative, duplicated, `~`/`$VAR`, symlinked; cwd inside, outside and escaping;
+and 19 sandboxed `exec`/`rg` commands in string and argument-list form):
+60 identical, 2 different, both the unknown-backend message (`['bwrap']`
+instead of `['bwrap', 'seatbelt']`) and `seatbelt` itself. Tested live with
+bubblewrap 0.9.0 (`tests/test_sandbox.py::TestBwrapLive`, skipped where
+`bwrap --ro-bind / / true` fails).
+
 ## How a blocked call reaches the model
 
 As in nanobot's tool execution (`agent/tools/execution.py:26–60`, `_classify_violation` `:245`):
@@ -83,7 +137,7 @@ The count starts again with each run. Dream's own boundary errors use the same w
 |---|---|---|
 | 1 | Shell deny list (deferred from layer 3) | **Keep it always on** (nanobot: only in restricted mode) |
 | 2 | Restriction default | **Off**, as in nanobot; on with `--restrict` / `NANOCLAW_RESTRICT_TO_WORKSPACE` |
-| 3 | OS sandbox | **Phase 2** |
+| 3 | OS sandbox | **Phase 2** → layer 18: bubblewrap only (phase-2 decision 11) |
 
 ## Differences from nanobot (deliberate)
 
@@ -92,20 +146,20 @@ The count starts again with each run. Dream's own boundary errors use the same w
 | 1 | Shell deny list | Only in restricted mode (`shell.py:446`), so by default nothing is blocked | Always | Decision 1 (layer 3 difference #1, now settled) | — |
 | 2 | `exec` internal-URL check | Inside the same restricted-only guard | Always | Built with the deny list as part of the always-on guard (the plan described it as always on; it turned out to be restricted-only in nanobot while building). Side effect, as in nanobot's restricted mode: a URL whose host can't be resolved also blocks the command | — |
 | 3 | Whitelist and restriction settings | Config file (`tools.ssrfWhitelist`, `tools.restrictToWorkspace`); the boundary note says "via tools.ssrfWhitelist" | Environment variables and `--restrict`; the note names `NANOCLAW_SSRF_WHITELIST` | NanoClaw has no config file | Phase 2: configuration |
-| 4 | Media folder | Restricted reads (and `exec` paths) may also use nanobot's media folder (`~/.nanobot/media`, chat attachments) | No exception | NanoClaw has no attachments | Phase 2 (with channels) |
+| 4 | Media folder | Restricted reads (and `exec` paths) may also use nanobot's media folder (`~/.nanobot/media`, chat attachments); the bwrap sandbox mounts it read-only | No exception, no sandbox mount | NanoClaw has no attachments | Phase 2 (with channels) |
 | 5 | Requests per fetch | `web_fetch` first checks whether the page is an image, then fetches it again (2 requests) | 1 request | Image detection and Jina Reader were left out in layer 3; the safety checks on each request are the same | — |
 
 ## What we left out (for later phases)
 
 | nanobot feature | Where | What it does | Later phase |
 |---|---|---|---|
-| OS sandbox for `exec` | `agent/tools/sandbox.py` (bubblewrap on Linux, seatbelt on macOS), `sandbox_ro_binds`/`rw_binds` | Runs commands in an isolated filesystem view with only the workspace writable | **Phase 2** (decision 3; `bwrap` isn't installed here) |
+| OS sandbox for `exec` | `agent/tools/sandbox.py` (bubblewrap on Linux, seatbelt on macOS), `sandbox_ro_binds`/`rw_binds` | Runs commands in an isolated filesystem view with only the workspace writable | **bubblewrap done in task 18.1** (section 3); seatbelt left out (phase-2 decision 11) |
 | Allow patterns | `exec.allow_patterns` | Commands that bypass the deny list (or an allow-only mode) | **Phase 2: configuration** |
 | Extra allowed folders | `extra_read_allowed_dirs`, `extra_write_allowed_dirs` | More folders the file tools may use in restricted mode | **Phase 2: configuration** |
 | Local-service access for the Web UI | `allow_loopback`, `webui_allow_local_service_access` | Lets the Web UI's preview reach `localhost` | **Phase 2: Web UI** |
 | Trusting a proxy's DNS | `trust_remote_dns` | For image generation behind a trusted proxy | **Phase 2** |
 | Configured fetch proxy | `web.proxy` | A proxy just for `web_fetch` (environment proxies already work) | **Phase 2: configuration** |
-| Workspace scopes / separate project folder | `security/workspace_access.py` | Per-chat project folders, each with its own restriction | **Phase 2: Separate project folder** |
+| Workspace scopes / separate project folder | `security/workspace_access.py` | Per-chat project folders, each with its own restriction | **Done in layer 18 (task 18.2)**: `--project DIR`; restricted mode then means the project, plus reads of the agent's skills and `memory/history.jsonl` |
 | SSRF checks for MCP servers | `agent/tools/mcp.py` | Same guard for MCP connections | **Done in task 17.4** (URL check, per-request hook incl. redirects, DNS pinning) |
 | Repeated-lookup throttle | `repeated_external_lookup_error` | Stops the model repeating the same search or fetch | **Phase 2** (skipped since layer 2) |
 
@@ -118,6 +172,7 @@ The count starts again with each run. Dream's own boundary errors use the same w
 | `nanoclaw/agent/tools/violations.py` (new) | How blocked calls are reported; the repeated-violation message | `agent/tools/execution.py`, `utils/runtime.py` |
 | `nanoclaw/agent/tools/web.py` | Safe validation, pinned transport, proxy mounts, redirect checks | `agent/tools/web.py` |
 | `nanoclaw/agent/tools/shell.py` | `working_dir` check; guard with internal-URL and path checks; path extraction copied from nanobot | `agent/tools/shell.py` |
+| `nanoclaw/agent/tools/sandbox.py` (layer 18) | `wrap_command`, `_bwrap`, `_normalize_bind_paths` | `agent/tools/sandbox.py` (seatbelt left out) |
 | `nanoclaw/agent/tools/filesystem.py` | `_resolve_read` / `_resolve_write` with the boundary | `agent/tools/filesystem.py`, `path_utils.py` |
 | `nanoclaw/agent/runner.py` | Uses `classify_violation`; per-run counts | `agent/tools/execution.py`, `runner.py:385` |
 | `agent/tools/__init__.py`, `loop.py`, `subagent.py` | `restrict_to_workspace` passed through | config wiring |
@@ -148,7 +203,7 @@ stops if a package file changes. Two changes cannot fail because they change
 nothing today:
 
 - checking a redirect target before the next loop step checks it again (kept as in nanobot, as defence in depth);
-- the journal exception for restricted reads: the journal is always inside the workspace while NanoClaw has one workspace folder. It matters once a separate project folder exists (phase 2).
+- the journal exception for restricted reads: the journal is always inside the workspace while NanoClaw has one workspace folder. It matters once a separate project folder exists (phase 2). *(Layer 18: it does now; `tests/test_workspace_scope.py` covers it.)*
 
 ## Review against nanobot
 

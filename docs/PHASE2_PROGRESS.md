@@ -99,11 +99,22 @@ Legend: ⏳ in progress · ✅ done and verified · ⛔ blocked
 | Docs | note 17, CODE_MAP, README, ROADMAP, notes 03/06/07/08/09 | main session | — | ✅ |
 | PR | `p2/layer-17` → `main` | main session | PR #9 | ✅ |
 
+## Layer 18 — isolation: bubblewrap sandbox, separate project folder (`p2/layer-18`) ✅
+
+| Task | Scope (files) | Sub-agent | Verification | Status |
+|---|---|---|---|---|
+| 18.1 Sandbox | new `agent/tools/sandbox.py` (bubblewrap), `exec`/`rg` wrapping, `tools.exec.sandbox` forcing restriction, bind roots in the guard | sub-agent (worktree), parallel | 62 cases: 60 identical, 2 deliberate (no seatbelt); bubblewrap installed, live tests run | ✅ |
+| 18.2 Project folder | workspace scope, `--project`, tools resolving against the project, `# Current Project` prompt section, `AGENTS.md` from the project, subagents | sub-agent (worktree), parallel | 564 checks identical | ✅ |
+| Integration | merge, sandbox restriction under a project scope (gap found and fixed), sandbox line in the runtime block | main session | 1 conflict; comparisons re-run; 2,075 passed, 6 skipped | ✅ |
+| Mutation checks | 214 rules | sub-agent (worktree) | 206 caught, 8 equivalent (26 tests added); 2,101 passed | ✅ |
+| Docs | note 18, CODE_MAP, README, ROADMAP, notes 03/04/08/09 | main session | — | ✅ |
+| PR | `p2/layer-18` → `main` | main session | PR #10 | ✅ |
+
 ## Blockers and open items
 
 | Item | Status |
 |---|---|
 | Real-model tests need API keys as environment secrets | Open; FakeProvider only until then |
 | Windows shell (16.4) not yet run on Windows | Needs a run of `uv run pytest` on Windows by the user |
-| PRs #2–#4 merged; #5–#8 (layers 13–16) open; later layers stacked on them | — |
+| PRs #2–#4 merged; #5–#9 (layers 13–17) open; later layers stacked on them | — |
 | Rewrite earlier commits to the user's author | After phase 2 (user decision) |

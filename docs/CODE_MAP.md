@@ -219,10 +219,10 @@ Note: [`notes/04-context.md`](notes/04-context.md)
 
 | NanoClaw | nanobot | How it compares |
 |---|---|---|
-| [`ContextBuilder`](../nanoclaw/agent/context.py#L29) | [`agent/context.py:89`][nb-l4-cb] | Simplified: one workspace folder; skills since layer 7 |
+| [`ContextBuilder`](../nanoclaw/agent/context.py#L29) | [`agent/context.py:89`][nb-l4-cb] | Simplified; skills since layer 7; a separate project folder (`workspace=`) since layer 18 |
 | ↳ `BOOTSTRAP_FILES`, `_SKIPPABLE_DEFAULTS` | [`context.py:92`][nb-l4-boot] | Same |
 | ↳ [`build_system_prompt()`](../nanoclaw/agent/context.py#L45) | [`context.py:101`][nb-l4-bsp] | Same order and separator; memory and summary sections since layer 6, skills sections since layer 7 (whole prompt checked identical) |
-| ↳ [`_get_identity()`](../nanoclaw/agent/context.py#L78) | [`context.py:154`][nb-l4-id] | Same; agent and project path are the same folder |
+| ↳ [`_get_identity()`](../nanoclaw/agent/context.py#L78) | [`context.py:154`][nb-l4-id] | Same; the project differs from the agent workspace with `--project` (layer 18) |
 | ↳ [`_load_bootstrap_files()`](../nanoclaw/agent/context.py#L96) | [`context.py:194`][nb-l4-load] | Same rules, minus the legacy `SOUL.md` upgrade |
 | ↳ [`_is_template_content()`](../nanoclaw/agent/context.py#L111) | [`context.py:224`][nb-l4-istpl] | Same |
 | ↳ [`build_messages()`](../nanoclaw/agent/context.py#L140) | [`context.py:231`][nb-l4-bm] (+ `build_transcript`) | Simplified: merges a trailing user message (and its `_meta`); no media. Since layer 6: `current_message=None` and `session_summary` |
@@ -389,7 +389,7 @@ Note: [`notes/07-skills.md`](notes/07-skills.md)
 | ↳ [`list_skills()`](../nanoclaw/agent/skills.py#L84), [`_skill_entries_from_dir()`](../nanoclaw/agent/skills.py#L69) | [`:90`][nb-l7-list], [`:74`][nb-l7-entries] | Same order and precedence (workspace wins), unsorted as in nanobot |
 | ↳ [`load_skill()`](../nanoclaw/agent/skills.py#L99), [`load_skills_for_context()`](../nanoclaw/agent/skills.py#L104) | [`:132`][nb-l7-load], [`:148`][nb-l7-loadctx] | Same |
 | ↳ [`get_explicitly_invoked_skills()`](../nanoclaw/agent/skills.py#L113), [`build_explicit_skill_runtime_context()`](../nanoclaw/agent/skills.py#L125) | [`:165`][nb-l7-explicit], [`:182`][nb-l7-block] | Same (`$name`, word start, available only, always-on excluded) |
-| ↳ [`build_skills_summary()`](../nanoclaw/agent/skills.py#L139) | [`:204`][nb-l7-summary] | Same text; no plugin group or absolute roots for a separate project folder |
+| ↳ [`build_skills_summary()`](../nanoclaw/agent/skills.py#L139) | [`:204`][nb-l7-summary] | Same text; no plugin group. Absolute workspace root for a separate project folder since layer 18 |
 | ↳ [`_requirement_lists()`](../nanoclaw/agent/skills.py#L173), [`_get_missing_requirements()`](../nanoclaw/agent/skills.py#L184), [`_check_requirements()`](../nanoclaw/agent/skills.py#L190), [`get_skill_availability()`](../nanoclaw/agent/skills.py#L194) | [`:266`][nb-l7-reqs], [`:277`][nb-l7-missing], [`:338`][nb-l7-check], [`:285`][nb-l7-avail] | Same (no `get_skill_requirements`; not used) |
 | ↳ [`_parse_nanobot_metadata()`](../nanoclaw/agent/skills.py#L215) | [`:318`][nb-l7-meta] | Same, plus a `nanoclaw` key checked first (difference #2) |
 | ↳ [`get_always_skills()`](../nanoclaw/agent/skills.py#L239), [`get_skill_description()`](../nanoclaw/agent/skills.py#L202), [`_strip_frontmatter()`](../nanoclaw/agent/skills.py#L208), [`get_skill_metadata()`](../nanoclaw/agent/skills.py#L248) | [`:350`][nb-l7-always], [`:301`][nb-l7-desc], [`:309`][nb-l7-strip], [`:362`][nb-l7-getmeta] | Same |
@@ -708,6 +708,21 @@ Note: [`notes/17-more-tools.md`](notes/17-more-tools.md). Links point at nanobot
 | `MCPServerConfig` as `tools.mcpServers` (`config/schema.py`) | [`config/schema.py:414`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/config/schema.py#L414) | Same fields; `useProxy` and OAuth accepted, not used |
 | `ToolRegistry.get_definitions` order and cache (`agent/tools/registry.py`) | [`agent/tools/registry.py:97`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/tools/registry.py#L97) | Same |
 | `env_proxy_applies_to_url` (`security/network.py`) | [`security/network.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/security/network.py) | Same |
+
+## Layer 18 — Isolation: sandbox, project folder
+
+Note: [`notes/18-isolation.md`](notes/18-isolation.md). Links point at nanobot `c4dac64`.
+
+| NanoClaw | nanobot (`c4dac64`) | How it compares |
+|---|---|---|
+| `nanoclaw/agent/tools/sandbox.py` `wrap_command`, `_bwrap`, `_normalize_bind_paths` | [`agent/tools/sandbox.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/tools/sandbox.py) | 60 of 62 cases identical; no seatbelt, no media bind |
+| `ExecTool` sandbox wrapping, `_active_sandbox_bind_roots`, `_normalize_bind_roots` (`agent/tools/shell.py`) | [`agent/tools/shell.py:437, 1156, 1175`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/tools/shell.py#L437) | Same |
+| `nanoclaw/security/workspace_access.py` `WorkspaceScope`, `build_workspace_scope`, `bind_workspace_scope`, `current_tool_workspace`, `workspace_sandbox_status` | [`security/workspace_access.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/security/workspace_access.py) | Same; no web UI resolver or session metadata |
+| `project_workspace_scope` (`--project`) | — | NanoClaw only |
+| `workspace_access_block` | [`agent/runtime_control.py:186`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/runtime_control.py#L186) | Same lines |
+| `_FsTool._access`, extra read-allowed dirs (`agent/tools/filesystem.py`) | [`agent/tools/filesystem.py:71-105`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/tools/filesystem.py#L71) | 496 decisions identical |
+| `ContextBuilder` `workspace=`, `# Current Project` (`agent/context.py`), skills root (`agent/skills.py`) | [`agent/context.py:105`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/context.py#L105) | Same |
+| Scope binding in `AgentLoop._run_agent_loop`; subagent inheritance (`agent/subagent.py`, `tools/spawn.py`) | [`agent/loop.py:1293`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/loop.py#L1293), [`agent/subagent.py:824`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/subagent.py#L824) | Same |
 
 [nb-pta]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/providers/base.py#L118
 [nb-tcr]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/providers/base.py#L72

@@ -154,6 +154,10 @@ sessions; the layer-3 version is described in git history.)*
   `PYTHONUNBUFFERED` (bash supplies a default `PATH`). Your `NANOCLAW_API_KEY`
   is invisible to anything the model runs. This is nanobot's `_build_env`.
 - **Deny list** (see the differences below).
+- **OS sandbox** (layer 18): with `tools.exec.sandbox: "bwrap"` every command
+  (and every `rg` call) runs inside bubblewrap, with only the workspace
+  writable and its parent folder hidden; it also turns on workspace
+  restriction for `exec` and the file tools (`09-safety.md`, section 3).
 
 ### `rg(args, working_dir, max_runtime, yield_time_ms, ...)`
 *(Layer 17, nanobot `agent/tools/rg.py`.)* `ExecTool` with an argument array
@@ -243,8 +247,8 @@ spellings, for example `rm --recursive --force`, `find dir -delete`, or a Python
 one-liner calling `shutil.rmtree`. (Earlier, in chat, I wrongly gave `rm -r -f`
 as an example that slips through; the tests showed it is blocked.) So the list
 prevents accidents, it is not a security boundary. Workspace restriction and
-private-network blocking arrived in layer 9 (`09-safety.md`); OS sandboxing is
-phase 2. Both the
+private-network blocking arrived in layer 9 (`09-safety.md`); the OS sandbox
+(bubblewrap) in layer 18. Both the
 blocked and the slip-through cases are tested in `tests/test_shell_tool.py`.
 
 ## What we left out
@@ -253,7 +257,7 @@ blocked and the slip-through cases are tested in `tests/test_shell_tool.py`.
 |---|---|---|
 | Workspace restriction, extra allowed dirs | `_FsTool._resolve_*`, `security/workspace_*.py` | Keep tools inside the workspace (**done in layer 9**; extra allowed dirs: phase 2) |
 | Private-network (SSRF) blocking | `security/network.py`, `_validate_url_safe` | Stop `web_fetch` reaching `localhost` or cloud metadata (**done in layer 9**) |
-| Sandbox (bubblewrap / macOS seatbelt) | `tools/sandbox.py` | OS-level isolation for `exec` (**phase 2**, decided in layer 9) |
+| Sandbox (bubblewrap / macOS seatbelt) | `tools/sandbox.py` | OS-level isolation for `exec`: **bubblewrap done in task 18.1**; macOS seatbelt left out (phase-2 decision 11) |
 | "File unchanged since last read" | `file_state.py` | Saves tokens when the model rereads a file (**done in layer 17**) |
 | `edit_file` `line_hint`, `expected_replacements` | `filesystem.py` | Pick a match by line number; guard the number of replacements (**done in layer 17**) |
 | `apply_patch`, `grep`/`find_files` | `tools/apply_patch.py`, `tools/search.py` | Multi-file patches (**`apply_patch` done in layer 17**); code search without ripgrep (ripgrep `rg`, `tools/rg.py`: **done in layer 17**) |
@@ -314,3 +318,26 @@ Checked and already matching: parameter validation and casting, `write_file`,
 `list_dir` (apart from documented difference #3), the deny list and its
 message, the minimal environment, output formatting and truncation in `exec`,
 the redirect loop and JSON result in `web_fetch`, and `web_search` formatting.
+
+## The project folder (layer 18, task 18.2)
+
+Since layer 18 "the workspace" in this note means the turn's **project
+folder**: the agent workspace, unless `--project DIR` (or `NANOCLAW_PROJECT`)
+names another folder (nanobot's WebUI project scope,
+`security/workspace_access.py`). The loop binds a `WorkspaceScope` for each
+turn and every tool asks `current_tool_workspace()` for it, as in nanobot:
+
+- file tools (`read_file`, `write_file`, `edit_file`, `list_dir`,
+  `apply_patch`) resolve relative paths against the project and show edited
+  paths relative to it; restricted mode keeps them inside the project, except
+  reads of the built-in and workspace `skills/` and the exact
+  `memory/history.jsonl` file (nanobot filesystem.py:85-95);
+- `exec` and `rg` run in the project by default, and restricted mode checks
+  `working_dir` and command paths against the project;
+- large tool results are saved under the project's `.nanoclaw/tool-results/`
+  (nanobot loop.py:1344 passes the project too);
+- subagents get the scope of the turn that spawned them; Dream always runs on
+  the agent workspace.
+
+Outside a turn (a tool used on its own, as in most tests) the tool's own
+workspace and `restrict_to_workspace` apply, as before.
