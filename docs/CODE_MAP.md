@@ -783,6 +783,21 @@ Note: [`notes/22-session-history.md`](notes/22-session-history.md). Links point 
 | `nanoclaw/webui/transcript.py` `build_webui_thread_payload`, `WebUITranscriptRecorder`, backfill | [`webui/transcript.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/webui/transcript.py) | 48 checks identical; backfill instead of 404 |
 | `nanoclaw/webui/session_list_index.py`, `session_identity.py`; `session/webui_turns.py` titles | [`webui/session_list_index.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/webui/session_list_index.py) | Computed on read |
 
+## Layer 23 — Web UI backend
+
+Note: [`notes/23-webui-backend.md`](notes/23-webui-backend.md). Links point at nanobot `c4dac64`.
+
+| NanoClaw | nanobot (`c4dac64`) | How it compares |
+|---|---|---|
+| `nanoclaw/channels/base.py`, `manager.py` `ChannelManager` | [`channels/base.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/channels/base.py), [`channels/manager.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/channels/manager.py) | Slim; filters live in the layer 22 projector |
+| `nanoclaw/channels/websocket/runtime.py` `WebSocketChannel` | [`channels/websocket/runtime.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/channels/websocket/runtime.py) | 64 of 71 observations identical; aiohttp |
+| `nanoclaw/webui/gateway_http.py`, `http_utils.py` (bootstrap, static, routing) | [`channels/websocket/ws_http.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/channels/websocket/ws_http.py) | Same responses |
+| `nanoclaw/webui/gateway_tokens.py`, `ingress_policy.py`, `client_contract.py` | [`webui/gateway_tokens.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/webui/gateway_tokens.py), [`webui/ingress_policy.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/webui/ingress_policy.py), [`webui/client_contract.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/webui/client_contract.py) | Same |
+| `nanoclaw/webui/inbound_commands.py` | [`webui/inbound_commands.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/webui/inbound_commands.py) | Core envelopes |
+| `nanoclaw/webui/rest_api.py`, `context.py` `WebUIContext` | [`channels/websocket/ws_http.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/channels/websocket/ws_http.py), [`webui/settings_*.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/webui) | 41 of 48 identical; read-only settings |
+| `WebsocketTurnRegistry` (`session/webui_turns.py`) | [`session/webui_turns.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/session/webui_turns.py) | On the channel instead of module globals |
+| `channels.websocket` config | [`config/schema.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/config/schema.py) | Same names; `webuiDist` NanoClaw only |
+
 [nb-pta]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/providers/base.py#L118
 [nb-tcr]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/providers/base.py#L72
 [nb-tcr-hvn]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/providers/base.py#L81

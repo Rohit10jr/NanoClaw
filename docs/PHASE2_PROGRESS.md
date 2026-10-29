@@ -157,11 +157,25 @@ Legend: ⏳ in progress · ✅ done and verified · ⛔ blocked
 | Docs | note 22, CODE_MAP, README, ROADMAP | main session | — | ✅ |
 | PR | `p2/layer-22` → `main` | main session | PR #14 | ✅ |
 
+## Layer 23 — web UI backend: aiohttp server, websocket channel, `webui.core.v1` (`p2/layer-23`) ✅
+
+| Task | Scope (files) | Sub-agent | Verification | Status |
+|---|---|---|---|---|
+| 23.1 Server and websocket channel | aiohttp app in the gateway (static frontend, SPA fallback, WS upgrade), tokens and `/webui/bootstrap`, `channels.websocket` config, the websocket channel (inbound envelopes, outbound frames via the layer 22 projector, transcript recording), channel manager | sub-agent (worktree), phase A | 71 observations through both real channels: 64 identical, 7 deliberate (capabilities, no session generations, no uploads); real UI in Chromium: send, streamed reply, reload, title | ✅ |
+| 23.2 REST endpoints | `/api/sessions`, `webui-thread`, `/api/commands`, sidebar state, minimal `/api/settings`, `/api/workspaces` | sub-agent (worktree), phase A | 48 requests through nanobot's real handler: 41 identical, 7 explained; fix: provider rows in `/api/settings` (the real UI couldn't send without them) | ✅ |
+| 23.3 Frontend build | nanobot's `webui/` built in the scratchpad (not vendored) for testing | sub-agent (scratchpad), phase A | Built unchanged with bun (556 files, `.gz` siblings); its first-load calls and bootstrap contract read from source and passed to 23.1/23.2 | ✅ |
+| 23.4 End to end | the real frontend in a browser (Playwright) against `nanoclaw gateway`: chat, streaming, tools, reload, history, delete | sub-agent (worktree), phase B | 9 scenarios pass in Chromium (no backend bug found beyond 23.2's); `tests/e2e/` | ✅ |
+| 23.5 Chat automations | `/api/sessions/<key>/automations`, delete check for bound cron jobs, popover actions | sub-agent (worktree) | 31 cases identical; e2e scenario added (12 scenarios pass) | ✅ |
+| Integration | merges, comparisons re-run, e2e re-run by main session | main session | 3,640 passed, 7 skipped; browser e2e 1 passed | ✅ |
+| Mutation checks | 636 rules | sub-agent (worktree) | 617 caught, 19 equivalent (134 tests added); 3,774 passed | ✅ |
+| Docs | note 23, CODE_MAP, README, ROADMAP | main session | — | ✅ |
+| PR | `p2/layer-23` → `main` | main session | PR #15 | ✅ |
+
 ## Blockers and open items
 
 | Item | Status |
 |---|---|
 | Real-model tests need API keys as environment secrets | Open; FakeProvider only until then |
 | Windows shell (16.4) not yet run on Windows | Needs a run of `uv run pytest` on Windows by the user |
-| PRs #2–#4 merged; #5–#13 (layers 13–21) open; later layers stacked on them | — |
+| PRs #2–#4 merged; #5–#14 (layers 13–22) open; later layers stacked on them | — |
 | Rewrite earlier commits to the user's author | After phase 2 (user decision) |

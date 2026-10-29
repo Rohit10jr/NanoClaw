@@ -8,18 +8,23 @@ to what NanoClaw has. One asyncio process runs:
   MCP servers connected inside its task, as nanobot's ``_run_agent`` does;
   its 1 s idle tick runs idle auto-compaction (agent/autocompact.py);
 - the ``/health`` endpoint on ``gateway.host``:``gateway.port`` (default
-  127.0.0.1:18790; ``GET /health``, at most 64 connections, nanobot's JSON).
+  127.0.0.1:18790; ``GET /health``, at most 64 connections, nanobot's JSON);
+- the channel manager (nanoclaw/channels/manager.py): the enabled channels
+  and the outbound dispatcher. NanoClaw's channel is the web UI
+  (``channels.websocket``, off by default; layer 23).
 
 SIGINT / SIGTERM set a shutdown event (a second one cancels the tasks), then
-the tasks are cancelled and awaited (bounded), the loop and MCP closed and the
-bus drained (nanobot ``_install_gateway_shutdown_handlers``,
-``_close_gateway_runtime``). The process then exits with status 0.
+the channels are stopped, the tasks cancelled and awaited (bounded), the loop
+and MCP closed and the bus drained (nanobot
+``_install_gateway_shutdown_handlers``, ``_close_gateway_runtime``). The
+process then exits with status 0.
 
-No channels yet (layers 23/24 add WebSocket and Telegram), so nothing feeds
-the bus from outside. nanobot behaves the same with no channel enabled: it
-prints "Warning: No channels enabled" and keeps running (cron, Dream,
-heartbeat and idle compaction still work, ``/health`` answers ``ok`` because
-the WebSocket channel is not required).
+With no channel enabled nothing feeds the bus from outside. nanobot behaves
+the same: it prints "Warning: No channels enabled" and keeps running (cron,
+Dream, heartbeat and idle compaction still work, ``/health`` answers ``ok``
+because the WebSocket channel is not required). With the web UI enabled,
+``/health`` reports its state (``"websocket": "running"``) and answers 503
+until it listens.
 
 The cron service (``<workspace>/cron/jobs.json``, the same one the loop's
 ``cron`` tool writes to) starts before the loop and stops first on shutdown.
@@ -30,9 +35,9 @@ a legacy ``cron`` expression), the protected ``heartbeat`` job reads
 ``HEARTBEAT.md`` every ``gateway.heartbeat.intervalS`` seconds (default 1800),
 session-bound jobs run as turns of their session, other agent jobs are
 skipped. The heartbeat needs a delivery target: the most recently used
-session of an enabled channel other than the CLI. With no channels (until
-layers 23/24) it finds none and does nothing, as nanobot does with only the
-CLI.
+session of an enabled channel other than the CLI (a web UI chat,
+``websocket:<chat_id>``). With no channels it finds none and does nothing,
+as nanobot does with only the CLI.
 
 Left out of nanobot's runtime: background mode (``--background``,
 ``gateway status/stop/logs/restart``) and OS services
@@ -391,9 +396,16 @@ async def _close_gateway_runtime(
     *,
     task_wait_timeout: float = 15.0,
     close_timeout: float = 15.0,
+    channels: Any = None,
 ) -> None:
-    """Cancel runtime tasks, then close the loop and MCP, each bounded.
-    (nanobot gateway_runtime.py:365; no channels to stop first)"""
+    """Stop the channels, cancel runtime tasks, then close the loop and MCP,
+    each bounded. (nanobot gateway_runtime.py:365)"""
+    if channels is not None:
+        # Close channel transports before waiting for their runners to exit.
+        try:
+            await asyncio.wait_for(channels.stop_all(), timeout=close_timeout)
+        except BaseException as exc:  # noqa: BLE001 - shutdown must proceed
+            logger.warning("Gateway shutdown: channel stop incomplete: {}", exc)
     for task in tasks:
         if not task.done():
             task.cancel()
@@ -446,9 +458,12 @@ class Gateway:
         self.console = console or Console()
         self.health_server_enabled = health_server_enabled
         self.health_identity = GatewayHealthIdentity.create(config_path or Path("config.json"), agent.workspace)
-        # No channel manager yet (layers 23/24); /health treats it as "no channels".
-        self.channels: Any = None
-        self.enabled_channels: list[str] = []
+        from nanoclaw.channels.manager import ChannelManager
+
+        # The enabled channels (the web UI when ``channels.websocket.enabled``)
+        # and the outbound dispatcher; /health reports their state.
+        self.channels: ChannelManager = ChannelManager(config, self.bus, agent=agent, config_path=config_path)
+        self.enabled_channels: list[str] = self.channels.enabled_channels
         self.shutdown_event = asyncio.Event()
         self.tasks: list[asyncio.Task[Any]] = []
         # One cron service per workspace store: the loop's (its ``cron`` tool
@@ -458,6 +473,11 @@ class Gateway:
             cron = CronService(agent.workspace / "cron" / "jobs.json")
         self.cron: CronService = cron
         self.cron.on_job = self.on_cron_job
+        # The web UI lists and manages the jobs of this same store.
+        ws = self.channels.get_channel("websocket")
+        ws_context = getattr(ws, "context", None)
+        if ws_context is not None:
+            ws_context.cron = self.cron
         # Extra long-running coroutines to run beside the loop (named tasks).
         self.extra_tasks: list[tuple[str, Callable[[], Awaitable[Any]]]] = []
         self.crashed = False
@@ -473,6 +493,17 @@ class Gateway:
         ``run_gateway``. The idle-compaction line is NanoClaw's."""
         if self.enabled_channels:
             self.console.print(f"[green]✓[/green] Channels enabled: {', '.join(self.enabled_channels)}")
+            ws = self.channels.get_channel("websocket")
+            if ws is not None:
+                ws_cfg = self.config.channels.websocket
+                url = f"http://{_host_for_local_browser(ws_cfg.host)}:{ws_cfg.port}"
+                if getattr(ws, "static_dist_path", None) is not None:
+                    self.console.print(f"[green]✓[/green] Web UI: {url}")
+                else:
+                    self.console.print(
+                        f"[yellow]○[/yellow] Web UI server: {url} (no frontend build: set "
+                        "channels.websocket.webuiDist or NANOCLAW_WEBUI_DIST)"
+                    )
         else:
             self.console.print("[yellow]Warning: No channels enabled[/yellow]")
         hb_cfg = self.config.gateway.heartbeat
@@ -736,6 +767,8 @@ class Gateway:
                         name="nanoclaw-health-server",
                     )
                 )
+            # nanobot :1070. With no channel enabled this returns at once.
+            tasks.append(asyncio.create_task(self.channels.start_all(), name="nanoclaw-channels"))
             for name, factory in self.extra_tasks:
                 tasks.append(asyncio.create_task(factory(), name=name))
             runtime_tasks = asyncio.gather(*tasks)
@@ -769,7 +802,9 @@ class Gateway:
                         await shutdown_task
                 self.cron.stop()  # nanobot :1137
                 self.agent.stop()
-                await _close_gateway_runtime(self.agent, self.mcp_provider, tasks, runtime_tasks)
+                await _close_gateway_runtime(
+                    self.agent, self.mcp_provider, tasks, runtime_tasks, channels=self.channels
+                )
                 await self.bus.drain()
             finally:
                 restore_shutdown_handlers()
@@ -799,6 +834,15 @@ def run_gateway(
             f"[red]Cannot start the gateway: {gateway_health_url(config.gateway.host, port)} is already in use.[/red]"
         )
         console.print("Stop the other instance, or choose an unused port with [cyan]--port[/cyan].")
+        return 1
+    ws_cfg = config.channels.websocket
+    if ws_cfg.enabled and _tcp_endpoint_reachable(_host_for_local_browser(ws_cfg.host).strip("[]"), ws_cfg.port):
+        # nanobot gateway_runtime.py:527
+        console.print(
+            f"[red]Cannot start the gateway: the web UI port http://{_host_for_local_browser(ws_cfg.host)}:"
+            f"{ws_cfg.port} is already in use.[/red]"
+        )
+        console.print("Stop the other instance, or set [cyan]channels.websocket.port[/cyan].")
         return 1
     console.print(f"Starting nanoclaw gateway version {__version__} on port {port}...")
 
