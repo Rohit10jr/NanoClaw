@@ -42,10 +42,12 @@ from nanoclaw.security.network import (
 )
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from mcp import ClientSession
     from mcp.types import Tool as MCPToolDefinition
 
-    from nanoclaw.config.schema import MCPServerConfig
+    from nanoclaw.config.schema import Config, MCPServerConfig
 
 # Transient connection errors that warrant a single retry (nanobot mcp.py:44).
 # These typically happen when an MCP server restarts or a network
@@ -951,11 +953,25 @@ async def connect_mcp_servers(
     return server_stacks
 
 
+def configured_servers(config: Config, workspace: Path | None = None) -> dict[str, MCPServerConfig]:
+    """``tools.mcpServers`` plus the stdio servers of enabled Agent Plugins
+    (nanobot mcp.py:1409 ``_configured_servers``); configured names win.
+
+    ``workspace`` is the agent workspace in use (``-w``), else the
+    configured one. Plugin servers are resolved here, once per provider:
+    enabling or disabling a plugin takes effect at the next start of
+    ``chat``, ``ask`` or ``gateway`` (nanobot's web UI hot-reloads instead).
+    """
+    from nanoclaw.agent.plugins import agent_plugin_mcp_servers
+
+    return agent_plugin_mcp_servers(workspace or config.workspace_path, config.tools.mcp_servers)
+
+
 class MCPProvider:
     """Own configured MCP connections and their tool registrations.
 
-    nanobot mcp.py:1425, without hot reload, runtime status, OAuth and
-    plugin servers. The CLI creates one per agent loop, sharing the loop's
+    nanobot mcp.py:1425, without hot reload, runtime status and OAuth;
+    Agent Plugin servers come in through :func:`configured_servers`. The CLI creates one per agent loop, sharing the loop's
     registry: ``connect()`` before the first turn, ``aclose()`` after the
     loop closes (nanobot cli/agent.py ``_close_runtime``).
     """

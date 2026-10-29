@@ -199,7 +199,7 @@ be used unchanged on top of it. Progress: [`PHASE2_PROGRESS.md`](PHASE2_PROGRESS
 | 22 | Session storage | JSONL + per-chat event log for the web UI history | `session/` | ~300 | ✅ done |
 | 23 | Web UI backend | WebSocket channel and minimal web UI backend (`webui.core.v1`) | `channels/websocket/`, `webui/` | ~1,200 | ✅ done |
 | 24 | Telegram | First chat app | `channels/telegram/` | ~500 | ✅ done |
-| 25 | Skills and plugins | Disabled skills, skill cache, plugins, `cron` skill | `agent/plugins.py`, `skills/` | ~350 | |
+| 25 | Skills and plugins | Disabled skills, skill cache, plugins, `cron` skill | `agent/plugins.py`, `skills/` | ~350 | ✅ done |
 
 **Skipped:** OpenAI Responses API and provider conversation state; Bedrock,
 Azure and subscription logins; per-provider quirks; transcription and image
@@ -259,7 +259,7 @@ replaces it.
 | Memory history (git) | `utils/gitstore.py`, `/dream-log`, `/dream-restore` | Commits `SOUL.md`/`USER.md`/`MEMORY.md` after each Dream so changes can be viewed and undone (deferred from layer 6) |
 | Provider conversation state | `providers/conversation_state.py`, `summarize_provider_compaction` | Server-side conversation state (e.g. OpenAI Responses API), including **provider-native compaction** (deferred from layer 6) and adding subagent reports to it (deferred from layer 8) |
 | Prompt overrides | `utils/workspace_prompts.py`, `templates/prompts/`, `/dream-prompt` | Replace Dream's (and the heartbeat's) instructions with a file in the workspace (deferred from layer 6) |
-| More skills features | `skills/clawhub`, `disabled_skills` config, `apps/cli` aliases, nanobot's `cron`/`image-generation`/`my`/`update-setup` skills | Install community skills (after layer 9), hide skills, CLI-app aliases, and the built-in skills that need features NanoClaw lacks (deferred from layer 7) |
+| More skills features | `skills/clawhub`, `apps/cli` aliases, nanobot's `image-generation`/`update-setup` skills (*layer 25: `disabled_skills`, `cron`, `my` done*) | Install community skills (after layer 9), hide skills, CLI-app aliases, and the built-in skills that need features NanoClaw lacks (deferred from layer 7) |
 | OS sandbox for `exec` | `agent/tools/sandbox.py` (bubblewrap, macOS seatbelt) | Commands run in an isolated filesystem view with only the workspace writable; the text guards of layer 9 are not a security boundary (deferred from layer 9) |
 | Configuration file | `config/schema.py`, `config/loader.py` | One place for settings now spread over environment variables: SSRF whitelist, restriction, `exec` allow patterns, extra allowed folders, a fetch proxy (deferred from layer 9), disabled skills (layer 7) |
 | Logging | `loguru` throughout | Warnings for degraded archives, corrupt files, ... (NanoClaw has no logging yet) |

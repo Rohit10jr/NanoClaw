@@ -57,6 +57,7 @@ Layout (camelCase in JSON)::
                          "pathAppend", "sandbox", "sandboxRoBinds",
                          "sandboxRwBinds", "allowedEnvKeys",
                          "allowPatterns", "denyPatterns"},
+                "my": {"enable", "allowSet"},
                 "restrictToWorkspace", "ssrfWhitelist"}
     }
 
@@ -205,6 +206,9 @@ class AgentDefaults(Base):
     # Stored for the time block; NanoClaw's time block still uses the host clock.
     timezone: str = "UTC"
     timezone_mode: Literal["auto", "manual"] = "auto"
+    # Skill names to leave out of the prompt, ``$name`` and ``load_skill``
+    # (schema.py:198, e.g. ["summarize", "skill-creator"]).
+    disabled_skills: list[str] = Field(default_factory=list)
     # NanoClaw only (not in nanobot): "nanobot" (default, like upstream) or
     # "fixed" (docs/UPSTREAM_BUGS.md, bug 4). nanobot ignores the key.
     compaction: CompactionMode = "nanobot"
@@ -550,10 +554,22 @@ class MCPServerConfig(Base):
     enabled_tools: list[str] = Field(default_factory=lambda: ["*"])
 
 
+class MyToolConfig(Base):
+    """The ``my`` tool (nanobot agent/tools/self_config.py ``MyToolConfig``).
+
+    ``enable`` registers the tool for the main agent; ``allow_set`` lets it
+    change runtime settings (off: ``check`` only).
+    """
+
+    enable: bool = True
+    allow_set: bool = False
+
+
 class ToolsConfig(Base):
     """Tool settings (nanobot schema.py:430 ``ToolsConfig``, a subset)."""
 
     exec: ExecToolConfig = Field(default_factory=ExecToolConfig)  # schema.py:434
+    my: MyToolConfig = Field(default_factory=MyToolConfig)  # schema.py:437
     restrict_to_workspace: bool = False  # schema.py:442
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)  # schema.py:459
     ssrf_whitelist: list[str] = Field(default_factory=list)  # schema.py:460, CIDR ranges

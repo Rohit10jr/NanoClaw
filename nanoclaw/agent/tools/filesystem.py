@@ -85,11 +85,29 @@ class _FsTool(Tool):
     def _resolve_read(self, path: str) -> Path:
         access = self._access()
         restricted = access.allowed_root is not None
+        plugin_skill_dirs: list[Path] = []
+        if restricted and self._workspace is not None:
+            # Skill folders of enabled Agent Plugins stay readable, only for
+            # the package whose fingerprint still matches (nanobot
+            # filesystem.py:145-166); a read elsewhere checks no package.
+            from nanoclaw.agent.plugins import enabled_agent_plugin_skill_dirs
+
+            try:
+                candidate = Path(path).expanduser()
+                if not candidate.is_absolute() and access.project_path is not None:
+                    candidate = access.project_path / candidate
+                plugin_skill_dirs = list(
+                    enabled_agent_plugin_skill_dirs(
+                        Path(self._workspace), requested_path=candidate.resolve(strict=False)
+                    )
+                )
+            except (OSError, RuntimeError):
+                pass
         return resolve_allowed_path(
             path,
             workspace=access.project_path,
             allowed_root=access.allowed_root,
-            extra_allowed_roots=self._extra_read_allowed_dirs if restricted else None,
+            extra_allowed_roots=[*self._extra_read_allowed_dirs, *plugin_skill_dirs] if restricted else None,
             # The journal exception only matters when restricted.
             extra_allowed_files=self._extra_read_allowed_files if restricted else None,
         )

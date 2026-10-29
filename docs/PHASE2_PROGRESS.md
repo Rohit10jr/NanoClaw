@@ -8,6 +8,12 @@ comparison and mutation checks → docs → PR.
 
 Legend: ⏳ in progress · ✅ done and verified · ⛔ blocked
 
+**Phase 2 is complete:** layers 11–25 built, each compared with nanobot,
+mutation-checked and documented (tests: 784 at the start of layer 11, 4,513
+at the end; 6 Windows-only and 1 browser test skipped by default). PRs #3 and
+#4 are merged; #5–#17 are stacked and wait to be merged in order. What is
+still open is listed under "Blockers and open items".
+
 ## Layer 11 — catch up with upstream (`p2/layer-11`) ✅
 
 | Task | Scope (files) | Sub-agent | Verification | Status |
@@ -182,6 +188,18 @@ Legend: ⏳ in progress · ✅ done and verified · ⛔ blocked
 | Docs | note 24, CODE_MAP, README, ROADMAP | main session | — | ✅ |
 | PR | `p2/layer-24` → `main` | main session | PR #16 | ✅ |
 
+## Layer 25 — skills and plugins (`p2/layer-25`) ✅
+
+| Task | Scope (files) | Sub-agent | Verification | Status |
+|---|---|---|---|---|
+| 25.1 Skills catch-up | `skill_metadata.py`, per-prompt skill snapshot, `disabledSkills`, skills shown as disabled (CLI, web UI), the built-in `cron` skill | sub-agent (worktree), parallel; sent back once (config toggle dropped unknown keys; cron skill named missing tools) | 390 checks identical | ✅ |
+| 25.2 Agent plugins | `agent/plugins.py` (packages in `plugins/`, approval bound to content), plugin skills, `read_file` allowance, plugin MCP servers, `nanoclaw plugins` | sub-agent (worktree), parallel | 26 cases identical; end-to-end enable/revoke with real `ask` runs | ✅ |
+| 25.3 `my` tool and skill | nanobot's `my` tool (inspect the agent's own setup), the `my` skill | sub-agent (worktree), parallel | 80 calls identical; no action writes config, restarts or touches security settings | ✅ |
+| Integration | conflicts (keep both); plugin skills wired into the snapshot as nanobot | main session | comparisons re-run; 4,411 passed, 7 skipped | ✅ |
+| Mutation checks | 478 rules | sub-agent (worktree) | 459 caught, 19 equivalent (102 tests added); 4,513 passed | ✅ |
+| Docs | note 25, CODE_MAP, README, ROADMAP, note 07 | main session | — | ✅ |
+| PR | `p2/layer-25` → `main` | main session | PR #17 | ✅ |
+
 ## Blockers and open items
 
 | Item | Status |
@@ -189,5 +207,5 @@ Legend: ⏳ in progress · ✅ done and verified · ⛔ blocked
 | Real-model tests need API keys as environment secrets | Open; FakeProvider only until then |
 | Live Telegram test needs a bot token | Open; mocked tests until then |
 | Windows shell (16.4) not yet run on Windows | Needs a run of `uv run pytest` on Windows by the user |
-| PRs #2–#4 merged; #5–#15 (layers 13–23) open; later layers stacked on them | — |
+| PRs #2–#4 merged; #5–#17 (layers 13–25) open, stacked: merge in order | Waiting for the user |
 | Rewrite earlier commits to the user's author | After phase 2 (user decision) |
