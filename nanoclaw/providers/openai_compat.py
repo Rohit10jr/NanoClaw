@@ -1,8 +1,15 @@
 """Provider for any OpenAI-compatible Chat Completions API.
 
 Mirrors nanobot/providers/openai_compat_provider.py. One class covers OpenAI,
-OpenRouter, DeepSeek, Groq, Ollama, vLLM and others: only the base URL, key
-and model name differ.
+OpenRouter, DeepSeek, Groq, Ollama, vLLM and others: the base URL, key and
+model name differ, and the provider's registry spec (``spec``) adds its
+request rules: model-prefix stripping, ``max_completion_tokens``, per-model
+overrides and how a ``reasoning_effort`` is sent.
+
+Not ported: nanobot's Responses API path (nanobot sends GPT-5 / o-series
+models on api.openai.com there; NanoClaw always uses Chat Completions),
+OpenRouter's "nanobot" attribution headers, the random session-affinity
+header and Gemini thought signatures.
 """
 
 from __future__ import annotations
@@ -11,8 +18,9 @@ import asyncio
 import inspect
 import secrets
 import string
+from collections.abc import Callable
 from contextlib import suppress
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 from openai import APIStatusError, AsyncOpenAI
 
@@ -30,6 +38,9 @@ from nanoclaw.providers.base import (
     tool_arguments_json_for_replay,
 )
 
+if TYPE_CHECKING:
+    from nanoclaw.providers.registry import ProviderSpec
+
 _ALNUM = string.ascii_letters + string.digits
 
 # Message keys the Chat Completions API understands; anything else is dropped.
@@ -46,6 +57,41 @@ def _short_tool_id() -> str:
 # Moonshot's Kimi K3 models have a fixed temperature and take
 # max_completion_tokens (nanobot/providers/registry.py:213).
 _KIMI_K3_MODELS = frozenset({"kimi-k3", "kimi-k3.1-pro", "kimi-k3.1-pro-highspeed"})
+
+# nanobot openai_compat_provider.py:85-131.
+_KIMI_THINKING_MODELS = frozenset(
+    {"kimi-k2.5", "kimi-k2.6", "kimi-k2.7", "kimi-k2.7-code", "kimi-k2.7-code-highspeed", "k2.6-code-preview"}
+)
+_KIMI_ALWAYS_THINKING_MODELS = frozenset({"kimi-k2.7-code", "kimi-k2.7-code-highspeed"})
+_KIMI_SERVER_MANAGED_TEMPERATURE_MODELS = frozenset({"kimi-k2.5", "kimi-k2.6"})
+_MIMO_THINKING_MODELS = frozenset({"mimo-v2.5-pro", "mimo-v2.5", "mimo-v2-pro", "mimo-v2-omni"})
+_QWEN_THINKING_MODELS = frozenset(
+    {
+        "qwen3.7-max",
+        "qwen3.7-plus",
+        "qwen3.6-max-preview",
+        "qwen3.6-plus",
+        "qwen3.6-flash",
+        "qwen3.5-plus",
+        "qwen3.5-flash",
+    }
+)
+_MODEL_THINKING_STYLES: dict[str, str] = {
+    **dict.fromkeys(_KIMI_THINKING_MODELS, "thinking_type"),
+    **dict.fromkeys(_MIMO_THINKING_MODELS, "thinking_type"),
+    **dict.fromkeys(_QWEN_THINKING_MODELS, "enable_thinking"),
+}
+
+# ProviderSpec.thinking_style -> the extra_body for thinking on/off
+# (nanobot openai_compat_provider.py:116).
+_THINKING_STYLE_MAP: dict[str, Callable[[bool], dict[str, Any]]] = {
+    "thinking_type": lambda on: {"thinking": {"type": "enabled" if on else "disabled"}},
+    "enable_thinking": lambda on: {"enable_thinking": on},
+    "reasoning_split": lambda on: {"reasoning_split": on},
+}
+_GATEWAY_REASONING_STYLE_MAP: dict[str, Callable[[str], dict[str, Any]]] = {
+    "reasoning_effort": lambda effort: {"reasoning": {"effort": effort}},
+}
 
 
 def _model_slug(model_name: str) -> str:
@@ -67,20 +113,68 @@ def _requires_max_completion_tokens(model_name: str) -> bool:
     )
 
 
-def _supports_temperature(model_name: str) -> bool:
+def _supports_temperature(model_name: str, reasoning_effort: str | None = None) -> bool:
     """False for fixed-temperature models (nanobot openai_compat_provider.py:859).
 
-    nanobot also takes a reasoning_effort: GPT-6 accepts temperature only with
-    effort "none". NanoClaw has no effort setting, so GPT-6 never gets one.
-    Unlike the slug match above, this is a substring test on the full name,
-    exactly as nanobot does it.
+    GPT-6 accepts a temperature only with reasoning effort "none". Unlike the
+    slug match above, this is a substring test on the full name, exactly as
+    nanobot does it.
     """
     if _model_slug(model_name) in _KIMI_K3_MODELS:
         return False
     name = model_name.lower()
     if "gpt-6" in name:
-        return False
+        return bool(reasoning_effort and reasoning_effort.lower() == "none")
     return not any(token in name for token in ("gpt-5", "o1", "o3", "o4"))
+
+
+def _model_thinking_style(model_name: str) -> str:
+    return _MODEL_THINKING_STYLES.get(_model_slug(model_name), "")
+
+
+def _thinking_styles_for(spec: ProviderSpec | None, model_name: str) -> list[str]:
+    """nanobot openai_compat_provider.py:163."""
+    styles: list[str] = []
+    if spec and spec.thinking_style:
+        styles.append(spec.thinking_style)
+    elif (
+        spec
+        and spec.name == "zhipu"
+        and _model_slug(model_name) in {"glm-4.6", "glm-4.7", "glm-5", "glm-5.1", "glm-5.2"}
+    ):
+        # Model-specific: GLM-5.3 requires thinking and cannot disable it.
+        styles.append("thinking_type")
+    model_style = _model_thinking_style(model_name)
+    if model_style and model_style not in styles:
+        styles.append(model_style)
+    return styles
+
+
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """Merge ``override`` into a copy of ``base``; nested dicts key by key (nanobot :393)."""
+    merged = dict(base)
+    for key, value in override.items():
+        if key in merged and isinstance(merged[key], dict) and isinstance(value, dict):
+            merged[key] = _deep_merge(cast(dict[str, Any], merged[key]), cast(dict[str, Any], value))
+        else:
+            merged[key] = value
+    return merged
+
+
+def _merge_chat_extra_body(kwargs: dict[str, Any], extra_body: dict[str, Any]) -> dict[str, Any]:
+    """Merge configured request fields without clobbering tools (nanobot :436)."""
+    regular_extra = {key: value for key, value in extra_body.items() if key != "tools"}
+    merged = dict(kwargs)
+    if regular_extra:
+        merged["extra_body"] = _deep_merge(kwargs.get("extra_body", {}), regular_extra)
+    if "tools" in extra_body:
+        current_tools = kwargs.get("tools")
+        configured_tools = extra_body["tools"]
+        if isinstance(current_tools, list) and isinstance(configured_tools, list):
+            merged["tools"] = [*current_tools, *configured_tools]
+        else:
+            merged["tools"] = configured_tools
+    return merged
 
 
 def _is_direct_openai(api_base: str | None) -> bool:
@@ -164,11 +258,26 @@ class OpenAICompatProvider(LLMProvider):
         api_base: str | None = None,
         default_model: str = "gpt-4o-mini",
         *,
+        extra_headers: dict[str, str] | None = None,
+        spec: ProviderSpec | None = None,
+        extra_body: dict[str, Any] | None = None,
+        extra_query: dict[str, str] | None = None,
+        reasoning_effort: str | None = None,
+        provider_name: str = "openai",
         client: AsyncOpenAI | None = None,
         max_retries: int = 0,
         timeout_s: float = 120.0,
     ) -> None:
         super().__init__(api_key, api_base, default_model)
+        self.provider_name = provider_name
+        self.extra_headers = extra_headers or {}
+        self._spec = spec
+        self._extra_body = dict(extra_body or {})
+        self._extra_query = dict(extra_query or {})
+        # The preset's reasoning effort, sent with every request (nanobot
+        # passes it per call from ``GenerationSettings``; NanoClaw's chat
+        # calls take no effort argument, so the provider holds it).
+        self.reasoning_effort = reasoning_effort
         # The SDK's own retries are off: chat_with_retry is the one retry
         # policy, so retries don't multiply (nanobot openai_compat_provider.py:581).
         self._max_retries = max_retries
@@ -182,10 +291,32 @@ class OpenAICompatProvider(LLMProvider):
                 # Local servers (Ollama, vLLM) need no key, but the SDK requires one.
                 api_key=self.api_key or "no-key",
                 base_url=self.api_base or None,
+                default_headers=self.extra_headers or None,
+                default_query=self._extra_query or None,
                 max_retries=self._max_retries,
                 timeout=self._timeout_s,
             )
         return self._client
+
+    async def aclose(self) -> None:
+        """Close the HTTP client (nanobot openai_compat_provider.py:611)."""
+        client, self._client = self._client, None
+        if client is not None:
+            await client.close()
+
+    def _request_model_name(self, model_name: str) -> str:
+        return self._spec.request_model_name(model_name) if self._spec else model_name
+
+    def _uses_max_completion_tokens(self) -> bool:
+        """The spec decides (nanobot: ``supports_max_completion_tokens``).
+
+        Without a spec, or for a ``custom`` entry with no apiBase (NanoClaw's
+        api.openai.com default), requests to api.openai.com use it.
+        """
+        spec = self._spec
+        if spec is not None and not (spec.name == "custom" and not self.api_base):
+            return spec.supports_max_completion_tokens
+        return _is_direct_openai(self.api_base)
 
     def build_kwargs(
         self,
@@ -196,23 +327,168 @@ class OpenAICompatProvider(LLMProvider):
         temperature: float = 0.7,
         tool_choice: str | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Build the keyword arguments for ``chat.completions.create``."""
-        model_name = model or self.default_model
-        kwargs: dict[str, Any] = {
-            "model": model_name,
-            "messages": self._sanitize_messages(messages),
-        }
-        # nanobot openai_compat_provider.py:919-927.
-        if _supports_temperature(model_name):
+        """Build the keyword arguments for ``chat.completions.create``
+        (nanobot ``_build_kwargs``, openai_compat_provider.py:890)."""
+        spec = self._spec
+        reasoning_effort = self.reasoning_effort
+        configured_model = model or self.default_model
+        model_name = self._request_model_name(configured_model)
+        messages = self._sanitize_messages(messages)
+        if spec and spec.strip_history_reasoning_content:
+            messages = [{k: v for k, v in msg.items() if k != "reasoning_content"} for msg in messages]
+        # Anthropic models through a caching gateway (OpenRouter) get
+        # cache_control markers (nanobot openai_compat_provider.py:904).
+        if spec and spec.supports_prompt_caching and configured_model.lower().startswith(("anthropic/", "claude")):
+            messages, tools = self._apply_cache_control(messages, tools)
+        kwargs: dict[str, Any] = {"model": model_name, "messages": messages}
+
+        if _supports_temperature(model_name, reasoning_effort):
             kwargs["temperature"] = temperature
-        if _is_direct_openai(self.api_base) or _requires_max_completion_tokens(model_name):
+        if self._uses_max_completion_tokens() or _requires_max_completion_tokens(model_name):
             kwargs["max_completion_tokens"] = max(1, max_tokens)
         else:
             kwargs["max_tokens"] = max(1, max_tokens)
+
+        if spec:
+            model_lower = model_name.lower()
+            for pattern, overrides in spec.model_overrides:
+                if pattern in model_lower:
+                    kwargs.update(overrides)
+                    break
+        # Moonshot picks the only valid temperature from the K2.5/K2.6 thinking mode.
+        if spec and spec.name == "moonshot" and _model_slug(model_name) in _KIMI_SERVER_MANAGED_TEMPERATURE_MODELS:
+            kwargs.pop("temperature", None)
+
+        self._apply_reasoning_effort(kwargs, spec, model_name, reasoning_effort)
+
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = tool_choice or "auto"
+
+        # User-configured extra_body last, so it can override provider defaults.
+        if self._extra_body:
+            kwargs = _merge_chat_extra_body(kwargs, self._extra_body)
         return kwargs
+
+    @staticmethod
+    def _apply_cache_control(
+        messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]] | None]:
+        """Mark the system prompt, the second-to-last message and the tool
+        list's built-in/MCP boundary and tail as cacheable (nanobot :620)."""
+        cache_marker = {"type": "ephemeral"}
+        new_messages = list(messages)
+
+        def _mark(msg: dict[str, Any]) -> dict[str, Any]:
+            content = msg.get("content")
+            if isinstance(content, str):
+                return {**msg, "content": [{"type": "text", "text": content, "cache_control": cache_marker}]}
+            if isinstance(content, list) and content:
+                parts = list(cast(list[dict[str, Any]], content))
+                parts[-1] = {**parts[-1], "cache_control": cache_marker}
+                return {**msg, "content": parts}
+            return msg
+
+        if new_messages and new_messages[0].get("role") == "system":
+            new_messages[0] = _mark(new_messages[0])
+        if len(new_messages) >= 3:
+            new_messages[-2] = _mark(new_messages[-2])
+
+        new_tools = tools
+        if tools:
+            new_tools = list(tools)
+
+            def _tool_name(tool: dict[str, Any]) -> str:
+                name = tool.get("name") or (tool.get("function") or {}).get("name")
+                return name if isinstance(name, str) else ""
+
+            tail_idx = len(new_tools) - 1
+            last_builtin_idx = next(
+                (i for i in range(tail_idx, -1, -1) if not _tool_name(new_tools[i]).startswith("mcp_")), None
+            )
+            for idx in dict.fromkeys(i for i in (last_builtin_idx, tail_idx) if i is not None):
+                new_tools[idx] = {**new_tools[idx], "cache_control": cache_marker}
+        return new_messages, new_tools
+
+    @staticmethod
+    def _apply_reasoning_effort(
+        kwargs: dict[str, Any], spec: ProviderSpec | None, model_name: str, reasoning_effort: str | None
+    ) -> None:
+        """Send ``reasoning_effort`` the way the provider accepts it (nanobot openai_compat_provider.py:946-1060).
+
+        The OpenAI vocabulary (none/minimal/low/medium/high/...) is remapped
+        per provider, dropped for models that always reason, and turned into
+        a provider's thinking switch in ``extra_body``. No effort set means
+        nothing is sent, so each provider keeps its default.
+        """
+        semantic_effort: str | None = None
+        if isinstance(reasoning_effort, str):
+            semantic_effort = reasoning_effort.lower()
+            if semantic_effort == "minimum":
+                semantic_effort = "minimal"
+        wire_effort = reasoning_effort
+        slug = _model_slug(model_name)
+        if slug in _KIMI_K3_MODELS and semantic_effort is not None:
+            # K3 always reasons and accepts low/high/max.
+            if semantic_effort in ("none", "minimal"):
+                wire_effort = None
+            else:
+                if semantic_effort not in ("low", "high", "max"):
+                    semantic_effort = "max"
+                wire_effort = semantic_effort
+        if spec and spec.name == "dashscope" and semantic_effort == "minimal":
+            wire_effort = "minimum"  # DashScope's spelling; "minimal" is rejected
+        elif spec and spec.name == "deepseek" and semantic_effort == "minimal":
+            semantic_effort = wire_effort = "low"
+
+        strip_effort = bool(spec and any(pat in model_name.lower() for pat in spec.implicit_reasoning_models))
+        if not strip_effort and spec and spec.reasoning_effort_remap and isinstance(semantic_effort, str):
+            mapped = dict(spec.reasoning_effort_remap).get(semantic_effort)
+            if mapped is not None:
+                wire_effort = mapped or None
+                semantic_effort = mapped or "none"
+        if strip_effort:
+            wire_effort = None
+        elif wire_effort and semantic_effort != "none":
+            kwargs["reasoning_effort"] = wire_effort
+
+        if reasoning_effort is not None:
+            thinking_enabled = semantic_effort not in ("none", "minimal")
+            for style in _thinking_styles_for(spec, model_name):
+                if not thinking_enabled and slug in _KIMI_ALWAYS_THINKING_MODELS:
+                    continue
+                if builder := _THINKING_STYLE_MAP.get(style):
+                    kwargs.setdefault("extra_body", {}).update(builder(thinking_enabled))
+            gateway_style = spec.gateway_reasoning_style if spec else ""
+            if (
+                gateway_style
+                and semantic_effort
+                and _model_thinking_style(model_name)
+                and (thinking_enabled or slug not in _KIMI_ALWAYS_THINKING_MODELS)
+            ):
+                if builder_g := _GATEWAY_REASONING_STYLE_MAP.get(gateway_style):
+                    kwargs.setdefault("extra_body", {}).update(builder_g(semantic_effort))
+            # Moonshot rejects reasoning_effort next to its native thinking switch.
+            if slug in _KIMI_THINKING_MODELS:
+                kwargs.pop("reasoning_effort", None)
+
+        # DeepSeek-style thinking rejects assistant history without
+        # reasoning_content; "" reads as "no thinking that turn".
+        explicit_thinking = (
+            reasoning_effort is not None
+            and semantic_effort not in ("none", "minimal")
+            and ((spec and spec.thinking_style) or _model_thinking_style(model_name))
+        )
+        implicit_deepseek_thinking = (
+            spec is not None
+            and spec.name == "deepseek"
+            and semantic_effort not in ("none", "minimal", "minimum")
+            and (slug == "deepseek-flash" or any(t in model_name.lower() for t in ("deepseek-v4", "deepseek-reasoner")))
+        )
+        if explicit_thinking or implicit_deepseek_thinking:
+            for msg in kwargs["messages"]:
+                if msg.get("role") == "assistant" and "reasoning_content" not in msg:
+                    msg["reasoning_content"] = ""
 
     @staticmethod
     def _sanitize_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:

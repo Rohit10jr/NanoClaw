@@ -26,8 +26,14 @@ from nanoclaw.config import (
     set_config_path,
 )
 from nanoclaw.events import AgentEvent, EventSink
+from nanoclaw.agent.model_presets import (
+    PresetRuntimeLoader,
+    configured_model_presets,
+    make_preset_runtime_loader,
+    normalize_preset_name,
+)
 from nanoclaw.providers import LLMProvider
-from nanoclaw.providers.factory import provider_from_config
+from nanoclaw.providers.factory import chain_context_window_tokens, provider_from_config
 from nanoclaw.security.network import configure_ssrf_whitelist
 from nanoclaw.security.workspace_access import WorkspaceScopeError, project_workspace_scope
 from nanoclaw.utils.templates import sync_workspace_templates
@@ -84,6 +90,24 @@ def _compaction() -> str:
     return _runtime_config().agents.defaults.compaction
 
 
+def _with_preset(config: Config, name: str | None) -> Config:
+    """``--preset NAME``: the config with ``agents.defaults.modelPreset`` set to NAME.
+
+    NanoClaw only (nanobot sets the preset in the config or with ``/model``).
+    The name matches case-insensitively, as ``/model`` does.
+    """
+    if name is None:
+        return config
+    try:
+        name = normalize_preset_name(name, configured_model_presets(config))
+    except (KeyError, ValueError) as exc:
+        message = exc.args[0] if isinstance(exc, KeyError) and exc.args else str(exc)
+        raise SystemExit(f"--preset: {message}") from None
+    config = config.model_copy(deep=True)
+    config.agents.defaults.model_preset = None if name == "default" else name
+    return config
+
+
 def _make_loop(
     provider: LLMProvider,
     workspace: Path,
@@ -91,6 +115,7 @@ def _make_loop(
     restrict: bool = False,
     config: Config | None = None,
     project: Path | None = None,
+    preset_loader: PresetRuntimeLoader | None = None,
 ) -> AgentLoop:
     """The agent loop with the configured settings (nanobot builds it from
     ``agents.defaults``, cli/agent.py) and ``tools.exec``. ``restrict``
@@ -100,23 +125,36 @@ def _make_loop(
     exec sessions it started (nanobot ``agent -m``'s ``_close_runtime``).
 
     ``project`` (``--project``) is the folder the agent works on; its own
-    files stay in ``workspace``."""
+    files stay in ``workspace``.
+
+    Model settings come from the active preset (``agents.defaults.modelPreset``,
+    else agents.defaults). ``preset_loader`` builds a provider for each
+    preset ``/model`` picks; without it (a provider handed in, as in tests)
+    presets reuse ``provider``."""
     config = config or _runtime_config()
     defaults = config.agents.defaults
+    preset = config.resolve_preset()
     return AgentLoop(
         provider,
         workspace,
+        # A named preset's model; otherwise the provider's default model.
+        model=preset.model if defaults.model_preset else None,
         max_iterations=defaults.max_tool_iterations,
         max_tool_result_chars=defaults.max_tool_result_chars,
         max_concurrent_subagents=defaults.max_concurrent_subagents,
-        temperature=defaults.temperature,
-        max_tokens=defaults.max_tokens,
-        context_window_tokens=defaults.context_window_tokens,
+        temperature=preset.temperature,
+        max_tokens=preset.max_tokens,
+        # The smallest window of the model and its fallbacks (nanobot build_provider_snapshot).
+        context_window_tokens=chain_context_window_tokens(config, preset),
         restrict_to_workspace=restrict or config.tools.restrict_to_workspace,
         compaction=defaults.compaction,
         provider_retry_mode=defaults.provider_retry_mode,
         exec_config=config.tools.exec,
         project=project,
+        model_presets=configured_model_presets(config),
+        model_preset=defaults.model_preset,
+        dream_model_preset=defaults.dream.model_override,
+        preset_runtime_loader=preset_loader,
     )
 
 
@@ -226,8 +264,11 @@ async def _ask(
     restrict: bool = False,
     config: Config | None = None,
     project: Path | None = None,
+    preset_loader: PresetRuntimeLoader | None = None,
 ) -> int:
-    loop = _make_loop(provider, workspace, restrict=restrict, config=config, project=project)
+    loop = _make_loop(
+        provider, workspace, restrict=restrict, config=config, project=project, preset_loader=preset_loader
+    )
     mcp = _mcp_provider(loop, config)
     if new:
         await loop.new_session(session_key)
@@ -283,6 +324,7 @@ async def _chat(
     markdown: bool,
     config: Config | None = None,
     project: Path | None = None,
+    preset_loader: PresetRuntimeLoader | None = None,
 ) -> int:
     """The interactive chat (nanobot ``agent`` in classic mode, over the bus).
 
@@ -295,7 +337,9 @@ async def _chat(
 
     console = make_console()
     config = config or _runtime_config()
-    loop = _make_loop(provider, workspace, restrict=restrict, config=config, project=project)
+    loop = _make_loop(
+        provider, workspace, restrict=restrict, config=config, project=project, preset_loader=preset_loader
+    )
     interactive = stdin_is_interactive()
     prompt: PromptInput | None = None
     if interactive:
@@ -330,8 +374,18 @@ async def _chat(
     return 0
 
 
-async def _compact(provider: LLMProvider, workspace: Path, session_key: str, config: Config | None = None) -> int:
-    summary = await _make_loop(provider, workspace, config=config).compact_session(session_key)
+async def _compact(
+    provider: LLMProvider,
+    workspace: Path,
+    session_key: str,
+    config: Config | None = None,
+    preset_loader: PresetRuntimeLoader | None = None,
+) -> int:
+    loop = _make_loop(provider, workspace, config=config, preset_loader=preset_loader)
+    try:
+        summary = await loop.compact_session(session_key)
+    finally:
+        await loop.aclose()
     if summary == "":
         print("Nothing to compact.")
     elif summary is None:
@@ -365,8 +419,14 @@ def _skills(workspace: Path) -> int:
     return 0
 
 
-async def _dream(provider: LLMProvider, workspace: Path, config: Config | None = None) -> int:
-    print(await _make_loop(provider, workspace, config=config).run_dream())
+async def _dream(
+    provider: LLMProvider, workspace: Path, config: Config | None = None, preset_loader: PresetRuntimeLoader | None = None
+) -> int:
+    loop = _make_loop(provider, workspace, config=config, preset_loader=preset_loader)
+    try:
+        print(await loop.run_dream())
+    finally:
+        await loop.aclose()
     return 0
 
 
@@ -438,6 +498,7 @@ def main(argv: list[str] | None = None, provider: LLMProvider | None = None) -> 
         f"folder to work on, if not the workspace (also {ENV_PROJECT}); "
         "memory, skills, SOUL.md and USER.md stay in the workspace, AGENTS.md is read from the project"
     )
+    preset_help = "model preset to use (a modelPresets name or default; overrides agents.defaults.modelPreset)"
     chat = commands.add_parser(
         "chat", parents=[common, with_logs], help="chat with the agent in the terminal (type exit or press Ctrl+C to quit)"
     )
@@ -447,6 +508,7 @@ def main(argv: list[str] | None = None, provider: LLMProvider | None = None) -> 
     chat.add_argument("-w", "--workspace", type=Path, default=None, help=workspace_help)
     chat.add_argument("--restrict", action="store_true", help=restrict_help)
     chat.add_argument("-p", "--project", type=Path, default=None, help=project_help)
+    chat.add_argument("--preset", default=None, metavar="NAME", help=preset_help)
     chat.add_argument(
         "--markdown", action=argparse.BooleanOptionalAction, default=True, help="render replies as Markdown (default: on)"
     )
@@ -461,6 +523,7 @@ def main(argv: list[str] | None = None, provider: LLMProvider | None = None) -> 
     ask.add_argument("-w", "--workspace", type=Path, default=None, help=workspace_help)
     ask.add_argument("--restrict", action="store_true", help=restrict_help)
     ask.add_argument("-p", "--project", type=Path, default=None, help=project_help)
+    ask.add_argument("--preset", default=None, metavar="NAME", help=preset_help)
     compact = commands.add_parser(
         "compact", parents=[common, with_logs], help="summarize the conversation so far into a short checkpoint"
     )
@@ -502,7 +565,7 @@ def main(argv: list[str] | None = None, provider: LLMProvider | None = None) -> 
     if args.command == "config":
         return _config_command(args.config_action)
 
-    config = _runtime_config()
+    config = _with_preset(_runtime_config(), getattr(args, "preset", None))
     # Trusted private ranges web_fetch may reach (nanobot tools.ssrfWhitelist,
     # applied at load time in nanobot loader.py:133).
     configure_ssrf_whitelist(config.tools.ssrf_whitelist)
@@ -512,20 +575,46 @@ def main(argv: list[str] | None = None, provider: LLMProvider | None = None) -> 
     workspace = _prepare_workspace(workspace_arg)
 
     def get_provider() -> LLMProvider:
-        return provider or provider_from_config(config)
+        if provider is not None:
+            return provider
+        try:
+            return provider_from_config(config)
+        except ValueError as exc:  # e.g. "No API key configured for provider 'deepseek'."
+            raise SystemExit(f"Provider setup error: {exc}") from None
 
+    # Presets picked with /model get their own provider, built from the config.
+    loader = None if provider is not None else make_preset_runtime_loader(config)
     if args.command == "chat":
         return asyncio.run(
-            _chat(get_provider(), workspace, args.session, args.restrict, args.markdown, config, project=project)
+            _chat(
+                get_provider(),
+                workspace,
+                args.session,
+                args.restrict,
+                args.markdown,
+                config,
+                project=project,
+                preset_loader=loader,
+            )
         )
     if args.command == "ask":
         return asyncio.run(
-            _ask(get_provider(), args.prompt, workspace, args.session, args.new, args.restrict, config, project=project)
+            _ask(
+                get_provider(),
+                args.prompt,
+                workspace,
+                args.session,
+                args.new,
+                args.restrict,
+                config,
+                project=project,
+                preset_loader=loader,
+            )
         )
     if args.command == "compact":
-        return asyncio.run(_compact(get_provider(), workspace, args.session, config))
+        return asyncio.run(_compact(get_provider(), workspace, args.session, config, preset_loader=loader))
     if args.command == "dream":
-        return asyncio.run(_dream(get_provider(), workspace, config))
+        return asyncio.run(_dream(get_provider(), workspace, config, preset_loader=loader))
     if args.command == "skills":
         return _skills(workspace)
     if args.command == "prompt":

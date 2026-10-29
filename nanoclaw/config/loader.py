@@ -253,7 +253,7 @@ def apply_env_overrides(config: Config, env: Mapping[str, str] | None = None) ->
     """Return a copy of ``config`` with the ``NANOCLAW_*`` variables applied.
 
     Empty variables are ignored. ``NANOCLAW_API_KEY`` / ``NANOCLAW_API_BASE``
-    set the provider entry ``resolve_provider`` picks (after
+    set the provider entry the active preset routes to (after
     ``NANOCLAW_MODEL`` is applied), or a ``custom`` entry when none is
     configured. Raises ``ConfigEnvError`` for an unusable value.
     """
@@ -283,17 +283,30 @@ def apply_env_overrides(config: Config, env: Mapping[str, str] | None = None) ->
 
     api_key, api_base = get(ENV_API_KEY), get(ENV_API_BASE)
     if api_key or api_base:
-        key, entry = config.resolve_provider()
-        if entry is None:
-            # Nothing configured: fill the named provider, or "custom" under
-            # "auto" (then the only configured entry, so "auto" picks it).
-            key = defaults.provider if defaults.provider != "auto" else "custom"
-            entry = config.providers.setdefault(key, ProviderConfig())
+        # Nothing matched: fill the forced provider, or "custom" under "auto"
+        # (then the only entry with a key or base, so "auto" picks it).
+        name = config.get_provider_name()
+        if name is None:
+            name = defaults.provider if defaults.provider != "auto" else "custom"
+        entry = _stored_provider_entry(config, name)
         if api_key:
             entry.api_key = api_key
         if api_base:
             entry.api_base = api_base
     return config
+
+
+def _stored_provider_entry(config: Config, name: str) -> ProviderConfig:
+    """The ``providers`` entry for ``name``, added when missing."""
+    from nanoclaw.providers.registry import find_by_name
+
+    spec = find_by_name(name)
+    if spec is not None:
+        found = config.provider_entry(spec.name)
+        if found is not None:
+            return found[1]
+        name = spec.name
+    return config.providers.setdefault(name, ProviderConfig())
 
 
 def load_runtime_config(config_path: Path | None = None, env: Mapping[str, str] | None = None) -> Config:
@@ -309,8 +322,8 @@ def mask_secrets(data: object) -> object:
     """Hide API keys in JSON data for display (``nanoclaw config show``).
 
     Keeps the last four characters of long keys, so two keys can be told apart.
-    MCP servers' ``headers`` and ``env`` values (bearer tokens, API keys) are
-    masked too. (nanobot has no ``config show``; its Web UI hides provider
+    MCP servers' ``headers`` and ``env`` values (bearer tokens, API keys) and
+    provider/preset ``extraHeaders`` values are masked too. (nanobot has no ``config show``; its Web UI hides provider
     secrets the same way.)
     """
     if isinstance(data, dict):
@@ -319,6 +332,8 @@ def mask_secrets(data: object) -> object:
             if key.replace("_", "").lower() in _SECRET_KEYS
             else _mask_mcp_servers(value)
             if key.replace("_", "").lower() == "mcpservers"
+            else {k: _mask(v) for k, v in cast(dict[str, object], value).items()}
+            if key.replace("_", "").lower() == "extraheaders" and isinstance(value, dict)
             else mask_secrets(value)
             for key, value in cast(dict[str, object], data).items()
         }

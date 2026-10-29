@@ -40,10 +40,16 @@ Since layer 13 each turn builds nanobot's hook chain (``build_agent_turn_hook``)
 over an :class:`EventSink`: progress, tool hints, reasoning, stream deltas and
 ends, retry waits and context compaction all arrive there as events.
 
+Since layer 20 the provider and model settings live in a
+``ModelRuntimeResolver`` (``runtime_resolver``): ``provider``, ``model``,
+``max_tokens``, ... read and set its default runtime, and each turn runs with
+its session's runtime: the preset picked with ``/model`` (saved in the
+session metadata), else the default (nanobot ``runtime_for_session``).
+
 Left out of nanobot's loop: unified sessions, goals and turn continuations,
 automation (cron) turns, WebUI recovery admission and follow-up journal,
-model presets, workspace scopes, the global concurrency gate and idle
-auto-compaction (the 1 s idle tick of ``run`` is kept).
+config hot reload, the global concurrency gate and idle auto-compaction (the
+1 s idle tick of ``run`` is kept).
 """
 
 from __future__ import annotations
@@ -52,7 +58,7 @@ import asyncio
 import copy
 import dataclasses
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -70,6 +76,8 @@ from nanoclaw.agent.context_governance import (
 from nanoclaw.agent.hook import AgentHook
 from nanoclaw.agent.memory import COMPACTION_NANOBOT, Consolidator, MemoryStore
 from nanoclaw.agent.messages import EMPTY_FINAL_RESPONSE_MESSAGE, is_blank
+from nanoclaw.agent.model_presets import PresetRuntimeLoader
+from nanoclaw.agent.model_runtime import ModelRuntimeResolver
 from nanoclaw.agent.runner import AgentRunner, AgentRunResult, AgentRunSpec, ProgressCallback
 from nanoclaw.agent.subagent import (
     DEFAULT_MAX_CONCURRENT_SUBAGENTS,
@@ -89,7 +97,7 @@ from nanoclaw.bus.events import INBOUND_META_TURN_ID, InboundMessage, OutboundMe
 from nanoclaw.bus.outbound_events import StreamDeltaEvent, StreamedResponseEvent, StreamEndEvent
 from nanoclaw.bus.queue import MessageBus
 from nanoclaw.command import CommandContext, CommandRouter, command_text, register_builtin_commands
-from nanoclaw.config.schema import ExecToolConfig
+from nanoclaw.config.schema import ExecToolConfig, ModelPresetConfig
 from nanoclaw.events import NO_EVENTS, AgentEvent, EventSink
 from nanoclaw.providers import LLMProvider
 from nanoclaw.runtime_context import (
@@ -111,6 +119,7 @@ from nanoclaw.security.workspace_access import (
 )
 from nanoclaw.session import Session, SessionManager
 from nanoclaw.session.manager import SESSION_CACHE_MAX_SIZE
+from nanoclaw.session.model_selection import SESSION_MODEL_PRESET_METADATA_KEY, model_preset_from_metadata
 from nanoclaw.session.recovery import (
     PENDING_USER_TURN_KEY,
     RUNTIME_CHECKPOINT_KEY,
@@ -168,6 +177,9 @@ class TurnContext:
     # The turn's project folder and access mode (nanobot ``RequestContext.workspace_scope``).
     workspace_scope: WorkspaceScope | None = None
     session: Session | None = None
+    # The provider and model settings the turn runs with (nanobot
+    # ``TurnContext.runtime``): the session's preset, else the loop default.
+    runtime: LLMRuntime | None = None
     result: AgentRunResult | None = None
     outbound: OutboundMessage | None = None
     command_handled: bool = False
@@ -203,8 +215,39 @@ class AgentLoop:
         provider_retry_mode: str = "standard",
         exec_config: ExecToolConfig | None = None,
         project: Path | None = None,
+        model_presets: Mapping[str, ModelPresetConfig] | None = None,
+        model_preset: str | None = None,
+        dream_model_preset: str | None = None,
+        preset_runtime_loader: PresetRuntimeLoader | None = None,
     ) -> None:
-        self.provider = provider
+        # ``model_presets`` include "default" (nanobot ``configured_model_presets``);
+        # without one, "default" is these constructor settings.
+        # ``preset_runtime_loader`` builds a provider per preset from the
+        # config; without it a preset reuses ``provider``.
+        presets = dict(model_presets or {})
+        presets.setdefault(
+            "default",
+            ModelPresetConfig(
+                model=model or provider.default_model or "",
+                max_tokens=max_tokens,
+                context_window_tokens=context_window_tokens,
+                temperature=temperature,
+            ),
+        )
+        self.runtime_resolver = ModelRuntimeResolver(
+            LLMRuntime(
+                provider=provider,
+                model=model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                context_window_tokens=context_window_tokens,
+                model_preset=model_preset,
+            ),
+            model_presets=presets,
+            preset_runtime_loader=preset_runtime_loader,
+        )
+        # The preset Dream runs with (``agents.defaults.dream.modelOverride``).
+        self.dream_model_preset = dream_model_preset
         # For the main agent's model calls only; subagents and memory archiving
         # retry in standard mode, as in nanobot (loop.py:367, :1346).
         self.provider_retry_mode = provider_retry_mode
@@ -217,12 +260,8 @@ class AgentLoop:
         self.workspace_scope = project_workspace_scope(
             project, workspace=workspace, restrict_to_workspace=restrict_to_workspace
         )
-        self.model = model
         self.max_iterations = max_iterations
         self.max_tool_result_chars = max_tool_result_chars
-        self.max_tokens = max_tokens
-        self.temperature = temperature
-        self.context_window_tokens = context_window_tokens
         self.bus = bus if bus is not None else MessageBus()
         self.context = ContextBuilder(workspace)
         self.memory: MemoryStore = self.context.memory
@@ -284,15 +323,117 @@ class AgentLoop:
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._close_lock: asyncio.Lock | None = None
 
+    # -- model selection (nanobot loop.py:230-290, 560-640) ------------------
+
     @property
     def runtime(self) -> LLMRuntime:
-        return LLMRuntime(
-            provider=self.provider,
-            model=self.model,
-            max_tokens=self.max_tokens,
-            temperature=self.temperature,
-            context_window_tokens=self.context_window_tokens,
-        )
+        """The default runtime: turns of sessions without a ``/model`` preset."""
+        return self.runtime_resolver.runtime
+
+    @property
+    def provider(self) -> LLMProvider:
+        return self.runtime_resolver.runtime.provider
+
+    @provider.setter
+    def provider(self, value: LLMProvider) -> None:
+        self.runtime_resolver.update_default(provider=value)
+
+    @property
+    def model(self) -> str | None:
+        """Model selected for future turns (None: the provider's default model)."""
+        return self.runtime_resolver.runtime.model
+
+    @model.setter
+    def model(self, value: str | None) -> None:
+        self.runtime_resolver.update_default(model=value)
+
+    @property
+    def max_tokens(self) -> int:
+        return self.runtime_resolver.runtime.max_tokens
+
+    @max_tokens.setter
+    def max_tokens(self, value: int) -> None:
+        self.runtime_resolver.update_default(max_tokens=value)
+
+    @property
+    def temperature(self) -> float:
+        return self.runtime_resolver.runtime.temperature
+
+    @temperature.setter
+    def temperature(self, value: float) -> None:
+        self.runtime_resolver.update_default(temperature=value)
+
+    @property
+    def context_window_tokens(self) -> int:
+        """Context limit selected for future turns."""
+        return self.runtime_resolver.runtime.context_window_tokens
+
+    @context_window_tokens.setter
+    def context_window_tokens(self, value: int) -> None:
+        self.runtime_resolver.update_default(context_window_tokens=value)
+
+    @property
+    def model_presets(self) -> Mapping[str, ModelPresetConfig]:
+        """Configured model presets exposed for selection and display."""
+        return self.runtime_resolver.model_presets
+
+    @property
+    def model_preset(self) -> str | None:
+        return self.runtime_resolver.model_preset
+
+    def set_model_preset(self, name: str | None) -> LLMRuntime:
+        """Select a named default runtime for future turns (nanobot loop.py:621)."""
+        old_model = self.model
+        runtime = self.runtime_resolver.select_preset(name)
+        logger.info("Runtime model switched for next turn: {} -> {}", old_model, runtime.model)
+        return runtime
+
+    def set_runtime_model(self, model: str) -> LLMRuntime:
+        """Select a model on the current provider for future turns (nanobot loop.py:636)."""
+        return self.runtime_resolver.select_model(model)
+
+    def dream_runtime(self) -> LLMRuntime | None:
+        """The preset Dream runs with, without changing defaults (nanobot loop.py:271)."""
+        if not self.dream_model_preset:
+            return None
+        return self.runtime_resolver.resolve_preset(self.dream_model_preset)
+
+    def _resolve_session_runtime(self, session: Session, *, recover_removed: bool) -> LLMRuntime | None:
+        """The session's runtime, or None after dropping a removed preset (nanobot loop.py:560)."""
+        name = model_preset_from_metadata(session.metadata)
+        if name is None:
+            return self.runtime
+        try:
+            return self.runtime_resolver.resolve_preset(name)
+        except KeyError:
+            if not recover_removed or name in self.runtime_resolver.model_presets:
+                raise
+            logger.warning(
+                "Session '{}' references removed model preset '{}'; falling back to default", session.key, name
+            )
+            session.metadata.pop(SESSION_MODEL_PRESET_METADATA_KEY, None)
+            return None
+
+    async def runtime_for_session(self, session: Session, *, recover_removed: bool = True) -> LLMRuntime:
+        """The runtime a session's turns use (nanobot loop.py:582).
+
+        Raises ``KeyError`` for a removed preset when ``recover_removed`` is
+        False, and ``ValueError`` when the preset's provider is misconfigured.
+        """
+        runtime = self._resolve_session_runtime(session, recover_removed=recover_removed)
+        if runtime is not None:
+            return runtime
+        # Only saved sessions carry a preset, so this never saves a temporary one.
+        self.sessions.save(session)
+        return self.runtime
+
+    async def set_session_model_preset(self, session_key: str, name: str, *, session: Session | None = None) -> LLMRuntime:
+        """Validate and save one session's preset (nanobot loop.py:598)."""
+        runtime = self.runtime_resolver.resolve_preset(name)
+        session = session or self.sessions.get_or_create(session_key)
+        session.metadata[SESSION_MODEL_PRESET_METADATA_KEY] = runtime.model_preset
+        self.sessions.save(session)
+        return runtime
 
     # -- direct entry points ----------------------------------------------
 
@@ -312,6 +453,7 @@ class AgentLoop:
         streaming: bool = False,
         hooks: list[AgentHook] | None = None,
         workspace_scope: WorkspaceScope | None = None,
+        runtime: LLMRuntime | None = None,
     ) -> AgentRunResult:
         """Run one turn in the session and return the result. (nanobot loop.py:2667)
 
@@ -327,7 +469,8 @@ class AgentLoop:
         streams when ``on_stream`` is given or ``streaming`` is set (nanobot
         loop.py:1931). ``hooks`` are extra hooks for this turn only.
         ``workspace_scope`` replaces the loop's project for this turn (Dream
-        uses the agent workspace).
+        uses the agent workspace). ``runtime`` replaces the session's model
+        settings for this turn (Dream's preset).
         """
         if channel == "system":
             raise ValueError("channel 'system' is reserved for internal messages")
@@ -344,6 +487,7 @@ class AgentLoop:
                 streaming=streaming or on_stream is not None,
                 hooks=hooks,
                 workspace_scope=workspace_scope,
+                runtime=runtime,
             )
         if ctx.result is None:
             reply = ctx.outbound.content if ctx.outbound is not None else ""
@@ -680,7 +824,12 @@ class AgentLoop:
                 self._background_tasks.clear()
                 # Each step runs even when one before it fails (nanobot loop.py:1817).
                 errors: list[BaseException] = []
-                for cleanup in (self.subagents.close, self._exec_session_manager.close_all):
+                for cleanup in (
+                    self.subagents.close,
+                    self._exec_session_manager.close_all,
+                    # Every provider client handed out (nanobot ``_close_runtime``).
+                    self.runtime_resolver.aclose,
+                ):
                     try:
                         await cleanup()
                     except BaseException as exc:
@@ -718,6 +867,7 @@ class AgentLoop:
         tools: ToolRegistry | None = None,
         hooks: list[AgentHook] | None = None,
         workspace_scope: WorkspaceScope | None = None,
+        runtime: LLMRuntime | None = None,
     ) -> TurnContext:
         """One message through the turn stages; the caller holds the session lock.
         (nanobot loop.py:1860)"""
@@ -742,6 +892,7 @@ class AgentLoop:
             hooks=list(hooks or []),
             delivery=delivery,
             workspace_scope=workspace_scope or self.workspace_scope,
+            runtime=runtime,
             turn_id=f"{key}:{time.time_ns()}",
         )
         if streaming:
@@ -764,6 +915,11 @@ class AgentLoop:
         await self._restore_turn(ctx)
         if ctx.kind == "user" and await self._dispatch_command(ctx):
             return ctx
+        if ctx.runtime is None:
+            # Resolved after commands, so /model can still repair a session
+            # whose preset no longer works.
+            assert ctx.session is not None
+            ctx.runtime = await self.runtime_for_session(ctx.session)
         await self._run_and_save_turn(ctx)
         self._prepare_outbound(ctx)
         return ctx
@@ -934,6 +1090,7 @@ class AgentLoop:
         assert session is not None
         ephemeral, pending_queue, events = ctx.ephemeral, ctx.pending_queue, ctx.events
         scope = ctx.workspace_scope or self.workspace_scope
+        runtime = ctx.runtime or self.runtime
 
         async def _checkpoint(payload: dict[str, Any]) -> None:
             # The latest finished step, saved to disk so a cancelled turn, or
@@ -1005,7 +1162,7 @@ class AgentLoop:
             RequestContext(
                 channel=ctx.msg.channel,
                 session_key=session.key,
-                runtime=self.runtime,
+                runtime=runtime,
                 chat_id=ctx.msg.chat_id,
                 message_id=ctx.msg.metadata.get("message_id"),
                 # A transport's turn id wins (nanobot loop.py:781, ``route.turn_id``).
@@ -1036,15 +1193,15 @@ class AgentLoop:
                 AgentRunSpec(
                     initial_messages=messages,
                     tools=tools,
-                    provider=self.provider,
-                    model=self.model,
+                    provider=runtime.provider,
+                    model=runtime.model,
                     max_iterations=self.max_iterations,
                     max_tool_result_chars=self.max_tool_result_chars,
                     # Temporary turns never write spill files. Others write them
                     # in the project, as nanobot does (loop.py:1344).
                     workspace=None if ephemeral else scope.project_path,
-                    max_tokens=self.max_tokens,
-                    temperature=self.temperature,
+                    max_tokens=runtime.max_tokens,
+                    temperature=runtime.temperature,
                     session_key=session.key,
                     provider_retry_mode=self.provider_retry_mode,
                     hook=hook,
@@ -1054,10 +1211,10 @@ class AgentLoop:
                     terminal_injection_callback=_wait_for_pending,
                     # Checked before every model request (nanobot loop.py:1335-1361).
                     # Temporary turns are checked too, but never journal.
-                    context_window_tokens=self.context_window_tokens,
+                    context_window_tokens=runtime.context_window_tokens,
                     consolidate_history=partial(
                         self.consolidator.summarize_transcript,
-                        runtime=self.runtime,
+                        runtime=runtime,
                         session_key=session.key,
                         tools=tools.get_definitions(),
                         persist=not ephemeral,
@@ -1209,7 +1366,8 @@ class AgentLoop:
                 last_archived=session.last_archived,
             )
             try:
-                await self.consolidator.archive_session(archived, archive_end=len(snapshot), runtime=self.runtime)
+                runtime = await self.runtime_for_session(session)
+                await self.consolidator.archive_session(archived, archive_end=len(snapshot), runtime=runtime)
             except Exception:
                 pass
         session.clear()
@@ -1229,8 +1387,9 @@ class AgentLoop:
         if not lock_held:
             async with self._get_session_lock(session_key):
                 return await self.compact_session(session_key, events=events, lock_held=True)
+        runtime = await self.runtime_for_session(self.sessions.get_or_create(session_key))
         return await self.consolidator.compact_idle_session(
-            session_key, runtime=self.runtime, events=events, notify=True, reason="manual"
+            session_key, runtime=runtime, events=events, notify=True, reason="manual"
         )
 
     async def run_dream(self) -> str:
@@ -1257,6 +1416,7 @@ class AgentLoop:
                 tools=self.memory.build_dream_tools(),
                 # Dream edits the agent's own files, never the project.
                 workspace_scope=self.agent_workspace_scope,
+                runtime=self.dream_runtime(),
             )
             elapsed = time.monotonic() - start
             if response.stop_reason == "completed":

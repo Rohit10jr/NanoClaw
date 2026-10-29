@@ -35,6 +35,7 @@ recovery, governance) for later.
 | 17 | More tools: `apply_patch`, `rg`, unchanged-file reads, MCP servers | done |
 | 18 | Isolation: bubblewrap sandbox, separate project folder (`--project`) | done |
 | 19 | Subagents v2: the `subagent` tool (create, send, cancel, check) | done |
+| 20 | Providers: registry, model presets, `/model`, Anthropic (Claude), fallback models | done |
 
 Phase 1 (the core agent) is complete. Phase 2 builds the production backend
 (layers 11–25; progress in [`docs/PHASE2_PROGRESS.md`](docs/PHASE2_PROGRESS.md)).
@@ -104,9 +105,49 @@ uv run nanoclaw config path      # where the file is (-c FILE or NANOCLAW_CONFIG
 }
 ```
 
+The provider is chosen as nanobot does: `agents.defaults.provider` if set,
+else the model's prefix or name (`deepseek-chat` → DeepSeek, `claude-…` →
+Anthropic), else the first provider with a key (gateways such as OpenRouter
+first). Known providers (OpenRouter, OpenAI, Anthropic, DeepSeek, Gemini,
+Groq, Moonshot, Mistral, Ollama, vLLM, LM Studio, …) need only an `apiKey`
+(local ones an `apiBase`); any other name under `providers` is a custom
+OpenAI-compatible endpoint with its own `apiBase`. `extraHeaders`,
+`extraBody` and `extraQuery` are sent with every request.
+
+Model presets name a model and its settings; `agents.defaults.modelPreset`
+picks one, `--preset NAME` (on `chat` and `ask`) overrides it for a run, and
+`/model NAME` switches the current conversation (`/model` lists them;
+`/model default` goes back to `agents.defaults`):
+
+```json
+{
+  "agents": { "defaults": { "model": "deepseek-chat", "modelPreset": "fast" } },
+  "providers": { "deepseek": { "apiKey": "${DEEPSEEK_API_KEY}" },
+                 "openrouter": { "apiKey": "${OPENROUTER_API_KEY}" } },
+  "modelPresets": {
+    "fast": { "model": "deepseek-chat", "maxTokens": 4096, "temperature": 0.3 },
+    "deep": { "model": "anthropic/claude-opus-4-5", "provider": "openrouter",
+              "reasoningEffort": "high", "contextWindowTokens": 200000 }
+  }
+}
+```
+
 Failed model requests are retried (rate limits, timeouts, server errors; 1, 2,
 4 seconds or the server's Retry-After); quota and authentication errors stop
-at once. `"providerRetryMode": "persistent"` keeps retrying. Add `--logs` to
+at once. `"providerRetryMode": "persistent"` keeps retrying.
+
+`fallbackModels` lists backup models, tried in order once the model's retries
+run out (timeouts, server errors, rate limits, quota and authentication
+errors; not content-filter, context-length or other bad-request errors). Each
+entry is a preset name or an inline model; omitted limits come from the
+active model, and the context budget is the smallest window of the chain.
+After 3 failed requests in a row the model is skipped for 60 seconds. The
+chat shows `↳ Using fallback model …` when a backup answered:
+
+```json
+{ "agents": { "defaults": { "modelPreset": "fast", "fallbackModels": [
+    "deep", { "provider": "deepseek", "model": "deepseek-reasoner", "maxTokens": 4096 } ] } } }
+``` Add `--logs` to
 `chat`, `ask`, `compact` or `dream` to see what the agent does internally.
 
 Conversations are saved in `~/.nanoclaw/sessions/`, outside the workspace, so
@@ -121,7 +162,7 @@ Replies stream word by word, with the model's reasoning shown as dim `✻` lines
 
 In the chat, slash commands: `/new` (start over), `/compact`, `/stop` (cancel
 the running turn and background subagents; finished work is kept), `/status`,
-`/history [n]`, `/dream`, `/skill`, `/help`. While the agent works you see what
+`/model [preset]`, `/history [n]`, `/dream`, `/skill`, `/help`. While the agent works you see what
 it does (`↳ $ ls`, `↳ read notes.txt`), and you can keep typing: a new message
 is folded into the running turn, as in nanobot.
 

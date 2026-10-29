@@ -34,6 +34,7 @@ from nanoclaw.bus.outbound_events import (
     StreamDeltaEvent,
     StreamedResponseEvent,
     StreamEndEvent,
+    TurnModelUpdatedEvent,
 )
 from nanoclaw.bus.queue import MessageBus
 from nanoclaw.bus.runtime_events import RuntimeEventPublisher
@@ -60,6 +61,9 @@ _NOTIFICATION_AUDIENCES: dict[type[AgentEvent], str] = {
     RecoveryStateEvent: "interactive",
     RetryStatusEvent: "interactive",
     ResponseSourceEvent: "interactive",
+    # nanobot sends it to the WebUI only (webui_turns.py:555); NanoClaw shows
+    # the fallback model as a progress line of user turns.
+    TurnModelUpdatedEvent: "lifecycle",
 }
 
 # Inbound metadata a channel sets to get the answer as stream events

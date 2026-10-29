@@ -739,6 +739,21 @@ Note: [`notes/19-subagents-v2.md`](notes/19-subagents-v2.md). Links point at nan
 | `SubagentTaskChanged` (`bus/runtime_events.py`) | [`bus/runtime_events.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/bus/runtime_events.py) | Published; no consumer yet |
 | `templates/agent/subagent_announce.md` | [`templates/agent/subagent_announce.md`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/templates/agent/subagent_announce.md) | Identical |
 
+## Layer 20 — Providers: registry, presets, `/model`, Anthropic, fallback
+
+Note: [`notes/20-providers.md`](notes/20-providers.md). Links point at nanobot `c4dac64`.
+
+| NanoClaw | nanobot (`c4dac64`) | How it compares |
+|---|---|---|
+| `nanoclaw/providers/registry.py` `ProviderSpec`, `PROVIDERS` | [`providers/registry.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/providers/registry.py) | 19 of ~45 specs |
+| `nanoclaw/providers/routing.py` `resolve_provider_route`, request overrides | [`providers/routing.py:95`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/providers/routing.py#L95) | 60 of 63 cases identical, 3 deliberate |
+| `make_provider`, `_make_provider_core`, `_make_anthropic_provider`, `chain_context_window_tokens` (`providers/factory.py`) | [`providers/factory.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/providers/factory.py) | Same; no Responses API |
+| `ModelPresetConfig`, `InlineFallbackConfig`, `fallbackModels`, `DreamConfig` (`config/schema.py`) | [`config/schema.py:148, 167, 212`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/config/schema.py#L148) | Same names |
+| `nanoclaw/agent/model_presets.py`, `model_runtime.py` `ModelRuntimeResolver`; `session/model_selection.py`; `/model` | [`agent/model_presets.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/model_presets.py), [`agent/model_runtime.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/model_runtime.py) | `/model` 16/16 identical; no hot reload |
+| `nanoclaw/providers/anthropic_provider.py` `AnthropicProvider` | [`providers/anthropic_provider.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/providers/anthropic_provider.py) | 132 of 134 comparisons identical (2: no `json_repair`) |
+| `LLMResponse.thinking_blocks`, `build_assistant_message(thinking_blocks=)` | [`providers/base.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/providers/base.py), [`agent/runner.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/runner.py) | Same |
+| `nanoclaw/providers/fallback_provider.py` `FallbackProvider`; `on_retry_exhausted`; `TurnModelUpdatedEvent` line | [`providers/fallback_provider.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/providers/fallback_provider.py) | 72 scenarios identical |
+
 [nb-pta]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/providers/base.py#L118
 [nb-tcr]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/providers/base.py#L72
 [nb-tcr-hvn]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/providers/base.py#L81

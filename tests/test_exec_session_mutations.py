@@ -305,20 +305,21 @@ async def test_wait_for_matches_text_split_across_polls(tmp_path):
     tool = ExecTool(working_dir=str(tmp_path), exec_session_manager=manager)
     try:
         # Nothing is printed until the test creates "go", so exec's own read
-        # can't consume "ab" however loaded the machine is: both halves must
-        # reach the wait.
+        # can't consume "gh" however loaded the machine is: both halves must
+        # reach the wait. The text uses letters outside hex, so it can't match
+        # the random session id in the output (it did: "6203abb9ce92").
         initial = await tool.execute(
-            command="while [ ! -f go ]; do sleep 0.05; done; printf 'ab'; sleep 0.8; printf 'cd'; sleep 30",
+            command="while [ ! -f go ]; do sleep 0.05; done; printf 'gh'; sleep 0.8; printf 'ij'; sleep 30",
             yield_time_ms=0,
         )
-        assert "ab" not in initial
+        assert "gh" not in initial, initial
         (tmp_path / "go").write_text("", encoding="utf-8")
         # A missed match would end at the timeout with "Wait target not
         # observed", so no wall-clock assertion is needed (it failed under load).
         result = await ExecSessionTool(manager=manager).execute(
-            session_id=_session_id(initial), wait_for="bc", timeout_ms=10000,
+            session_id=_session_id(initial), wait_for="hi", timeout_ms=10000,
         )
-        assert "Wait target not observed" not in result
+        assert "Wait target not observed" not in result, result
     finally:
         await manager.close_all()
 

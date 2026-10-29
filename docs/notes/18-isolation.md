@@ -108,7 +108,8 @@ subagents binding the given scope without a parent turn; `chat -p`.
 Equivalent (8): values that a later check drops anyway (a blank bind path
 becomes `.`, which is relative), extra read roots never consulted when
 unrestricted, scopes that always equal the loop's on the paths concerned, and
-a context reset in a task that ends right after. The split `wait_for` test,
-which failed four times under parallel load, now waits for a file the test
-creates instead of a sleep.
+a context reset in a task that ends right after. The split `wait_for` test
+failed four times; it now waits for a file the test creates instead of a
+sleep (the real cause, found in layer 20: its text "ab" sometimes appeared in
+the random hex session id).
 

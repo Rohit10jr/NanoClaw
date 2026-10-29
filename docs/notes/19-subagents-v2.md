@@ -99,6 +99,6 @@ Equivalent (17): guards covered by another check (a cancelled task can't pass
 the semaphore; two cancellation checks each cover the other, removing both
 would matter); saves that write the same live session object; fields only the
 `subagent` tool reads, which children don't have; and branches only `send` and
-`cancel` can reach. The split `wait_for` test (layer 16) failed once in
-hundreds of parallel runs; it didn't reproduce under load afterwards.
+`cancel` can reach. The split `wait_for` test (layer 16) failed once; the
+cause, found in layer 20, was its own text matching the random session id.
 

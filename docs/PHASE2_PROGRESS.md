@@ -121,11 +121,23 @@ Legend: ⏳ in progress · ✅ done and verified · ⛔ blocked
 | Docs | note 19, CODE_MAP, README, ROADMAP, note 08 | main session | — | ✅ |
 | PR | `p2/layer-19` → `main` | main session | PR #11 | ✅ |
 
+## Layer 20 — providers: registry, presets, `/model`, Anthropic, fallback (`p2/layer-20`) ✅
+
+| Task | Scope (files) | Sub-agent | Verification | Status |
+|---|---|---|---|---|
+| 20.1 Registry, presets, `/model` | `providers/registry.py`, `factory.py`, model presets and runtime, `--preset`, `/model`, config | sub-agent (worktree), phase A | 63 routing cases: 60 identical, 3 deliberate; `/model` 16/16; re-run after integration | ✅ |
+| 20.2 Anthropic adapter | new `providers/anthropic_provider.py`, `anthropic` dependency | sub-agent (worktree), phase A | 134 request/response/stream/error comparisons: 2 deliberate (malformed replay args), 0 unexpected | ✅ |
+| 20.3 Fallback models | `providers/fallback_provider.py`, `fallbackModels` | sub-agent (worktree), phase B | 72 scenarios identical; re-run after merging | ✅ |
+| Integration | merges, factory builds the real Anthropic adapter | main session | No conflicts; comparisons re-run; 2,596 passed, 6 skipped | ✅ |
+| Mutation checks | 309 rules | sub-agent (worktree); interrupted by a container restart, finished by a second sub-agent | 300 caught, 9 equivalent (59 tests added); 2,655 passed | ✅ |
+| Docs | note 20, CODE_MAP, README, ROADMAP, notes 01/12 | main session | — | ✅ |
+| PR | `p2/layer-20` → `main` | main session | PR #12 | ✅ |
+
 ## Blockers and open items
 
 | Item | Status |
 |---|---|
 | Real-model tests need API keys as environment secrets | Open; FakeProvider only until then |
 | Windows shell (16.4) not yet run on Windows | Needs a run of `uv run pytest` on Windows by the user |
-| PRs #2–#4 merged; #5–#10 (layers 13–18) open; later layers stacked on them | — |
+| PRs #2–#4 merged; #5–#11 (layers 13–19) open; later layers stacked on them | — |
 | Rewrite earlier commits to the user's author | After phase 2 (user decision) |

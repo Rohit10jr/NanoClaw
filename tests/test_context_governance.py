@@ -419,6 +419,19 @@ async def test_provider_reported_context_tokens_trigger_compaction():
     assert summarizer.calls == [] and result.summary_checkpoint is None
 
 
+async def test_a_fallback_models_reported_tokens_do_not_trigger_compaction():
+    # Mutation-testing gap (layer 20): another model's count cannot bound the
+    # next request (nanobot runner.py:1340), so the run falls back to estimates.
+    reg = registry(Fetch(size=10))
+    first = (await sizes_without_limit(["x"], reg))[0]
+    window = first + 2000 + 100 + 1024
+    answer = fetch_call("c1", usage=LLMUsage.reported(input_tokens=first + 2000, output_tokens=5))
+    answer.is_fallback = True
+    fake, summarizer = FakeProvider([answer, "done"]), Summarizer("- S")
+    result = await run_spec(fake, reg, window, summarizer)
+    assert summarizer.calls == [] and result.summary_checkpoint is None
+
+
 async def test_a_retry_note_stays_in_the_accepted_request():
     # nanobot runner.py:1076 adds the note to the request as sent, which becomes H.
     nameless = LLMResponse(

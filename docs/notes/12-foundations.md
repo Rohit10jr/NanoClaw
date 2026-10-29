@@ -38,12 +38,29 @@ resolved; a missing variable is an error naming the field) → `NANOCLAW_*`
 environment variables (the phase 1 names keep working) → flags (`-w`,
 `--restrict`, which can only turn the restriction on).
 
-**Which provider entry is used** (a simplified `_match_provider`,
+**Which provider entry is used** (layer 12: a simplified `_match_provider`,
 `schema.py:588`): the one `agents.defaults.provider` names; under `auto`, the
 entry named by the model's prefix (`openrouter/...`) if it has a key or base;
 otherwise the first entry with a key or base. With no base, nanobot's default
 base is used for openrouter, deepseek, aihubmix, siliconflow and huggingface;
 otherwise api.openai.com.
+
+*Since layer 20 (task 20.1)* this is nanobot's own choice:
+`nanoclaw/providers/registry.py` (`ProviderSpec`, 19 providers in nanobot's
+order: custom, openrouter, huggingface, aihubmix, siliconflow, anthropic,
+openai, deepseek, gemini, zhipu, dashscope, moonshot, minimax, mistral, vllm,
+ollama, lm_studio, nvidia, groq), `Config._match_provider` (forced provider →
+model prefix → model keyword → configured local provider → first provider
+with a key, gateways first → first custom provider with a base) and
+`nanoclaw/providers/routing.py` (`resolve_provider_route`: backend, base,
+nanobot's "requires api_base" / "No API key configured" errors). Results
+that changed: with no prefix or keyword match, the first provider with a key
+in *registry* order wins (was: file order), and a prefix needs an API key
+(was: key or base). Two layer 12 behaviours are kept on purpose: a `custom`
+entry without `apiBase` means api.openai.com (so `NANOCLAW_API_KEY` alone
+still works; nanobot requires a base), and with nothing configured under
+`auto` the client still goes to api.openai.com without a key (nanobot
+refuses to start).
 
 Commands: `nanoclaw config path`, `config show` (keys masked), `config init`
 (writes defaults, or adds only the missing settings to an existing file so
@@ -104,7 +121,7 @@ token-counter and violation log calls.
 |---|---|---|---|---|
 | 1 | Defaults | workspace `~/.nanobot/workspace`, model `anthropic/claude-opus-4-5`, window 200,000 | `~/.nanoclaw/workspace`, `gpt-4o-mini`, 128,000 | NanoClaw's own defaults (window: layer 6) |
 | 2 | Environment variables | `NANOBOT_` prefix with `__` nesting (pydantic-settings) | The phase 1 `NANOCLAW_*` names, mapped by hand | Keep phase 1 working; no pydantic-settings |
-| 3 | Provider choice | Registry of ~40 providers, prefix stripping | First configured entry; a few default bases | No registry until layer 20 |
+| 3 | Provider choice | Registry of ~40 providers, prefix stripping | First configured entry; a few default bases | No registry until layer 20. **Closed in layer 20 (task 20.1):** nanobot's registry (19 of its providers), `_match_provider` and `resolve_provider_route`; see below |
 | 4 | `config init` on an existing file | `onboard --refresh` re-saves the whole file | Adds only missing settings | Keeps nanobot-only sections |
 | 5 | When logging is turned off | Per CLI command; library use logs | At package import | Quiet library use and tests; same for CLI users |
 | 6 | Retry status in the UI | `RetryStatusEvent`s and a heartbeat every 30 s | A plain `on_retry_wait(text)` callback, not yet shown in the chat | Events arrive with layer 13 |
@@ -115,7 +132,9 @@ token-counter and violation log calls.
 
 ## Left for later
 
-Model presets, fallback models and `/model` (layer 20); showing retry waits in
+Model presets, fallback models and `/model` (layer 20; presets and `/model`
+done in task 20.1, fallback models (`agents.defaults.fallbackModels`,
+`providers/fallback_provider.py`) in task 20.3); showing retry waits in
 the chat (layer 13); the timezone in the time block; the usage store.
 
 ## Tests

@@ -36,6 +36,7 @@ import asyncio
 import copy
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from contextlib import nullcontext
+from contextvars import ContextVar
 from functools import cache
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -71,8 +72,11 @@ from nanoclaw.agent.tools import ToolRegistry, is_tool_error
 from nanoclaw.agent.tools.file_state import file_read_context
 from nanoclaw.agent.tools.registry import with_retry_hint
 from nanoclaw.agent.tools.violations import classify_violation, is_ssrf_violation
+from nanoclaw.agent.tools.context import current_request_context
+from nanoclaw.bus.outbound_events import TurnModelUpdatedEvent
 from nanoclaw.events import NO_EVENTS, EventSink, RetryWaitEvent
 from nanoclaw.providers import LLMProvider, LLMResponse, LLMUsage, ToolCallRequest
+from nanoclaw.providers.fallback_provider import FallbackModelSelection
 from nanoclaw.session.summary import SessionSummaryCheckpoint
 from nanoclaw.utils.progress_events import output_events
 
@@ -92,6 +96,34 @@ CheckpointCallback = Callable[[dict[str, Any]], Awaitable[None]]
 # {"role": "user", "content": ...} dicts (kept as they are, extra keys too),
 # objects with a ``.content`` (e.g. InboundMessage) or anything else (str()).
 InjectionCallback = Callable[[], Awaitable[Iterable[Any] | None]]
+
+
+# The events of the model request in flight, so the process-level fallback
+# observer can address the turn that asked (nanobot routes it through
+# ``current_request_context()``, webui_turns.py:555).
+_request_events: ContextVar[EventSink | None] = ContextVar("nanoclaw_request_events", default=None)
+
+
+async def publish_fallback_model(selection: FallbackModelSelection) -> None:
+    """A ``FallbackProvider`` observer: report the fallback model that answered.
+
+    nanobot's ``build_webui_fallback_model_observer`` publishes a
+    ``TurnModelUpdatedEvent(fallback=True)`` to the WebUI chat of the current
+    request; NanoClaw publishes it to the running request's event sink, where
+    the terminal and text channels show it as a progress line.
+    """
+    events = _request_events.get()
+    if events is None or not events.accepts(TurnModelUpdatedEvent):
+        return
+    context = current_request_context()
+    await events.emit(
+        TurnModelUpdatedEvent(
+            model=selection.model,
+            model_preset=context.runtime.model_preset if context is not None and context.runtime is not None else None,
+            fallback=True,
+            reauth_provider=selection.reauth_provider,
+        )
+    )
 
 
 def _raise_if_cancelling() -> None:
@@ -478,7 +510,9 @@ class AgentRunner:
             context.response = response
             context.tool_calls = list(response.tool_calls)
             # Reasoning out, inline <think> stripped (nanobot runner.py:516-531).
-            reasoning_text, response.content = extract_reasoning(response.reasoning_content, response.content)
+            reasoning_text, response.content = extract_reasoning(
+                response.reasoning_content, response.thinking_blocks, response.content
+            )
             context.usage = raw_usage
             usage = _add_usage(usage, raw_usage)
             if reasoning_text and not context.streamed_reasoning:
@@ -494,6 +528,7 @@ class AgentRunner:
                     response.content,
                     tool_calls=[tc.to_openai_tool_call() for tc in response.tool_calls],
                     reasoning_content=response.reasoning_content,
+                    thinking_blocks=response.thinking_blocks,
                 )
                 messages.append(assistant_message)
                 await self._emit_checkpoint(
@@ -594,7 +629,9 @@ class AgentRunner:
 
             final_message: dict[str, Any] | None = None
             if not response.is_error and not is_blank(clean):
-                final_message = build_assistant_message(clean, reasoning_content=response.reasoning_content)
+                final_message = build_assistant_message(
+                    clean, reasoning_content=response.reasoning_content, thinking_blocks=response.thinking_blocks
+                )
 
             # Input that arrived during the answer continues the turn. It is
             # checked BEFORE the stream is closed, so a streaming channel keeps
@@ -740,17 +777,21 @@ class AgentRunner:
         # A dependency that swallowed a cancellation must not start or finish
         # model work (nanobot runner.py:919-1035 and :1257-1273).
         _raise_if_cancelling()
-        response = await spec.provider.chat_stream_with_retry(
-            **kwargs,
-            **(stream or {}),
-            retry_mode=spec.provider_retry_mode,
-            on_retry_wait=self._retry_wait_callback(spec),
-        )
+        events_token = _request_events.set(spec.events)
+        try:
+            response = await spec.provider.chat_stream_with_retry(
+                **kwargs,
+                **(stream or {}),
+                retry_mode=spec.provider_retry_mode,
+                on_retry_wait=self._retry_wait_callback(spec),
+            )
+        finally:
+            _request_events.reset(events_token)
         _raise_if_cancelling()
         response.usage = self._usage_or_estimate(spec.provider, response, kwargs)
-        # nanobot runner.py:1341 skips this after provider-native compaction or
-        # a fallback provider's answer (D10); NanoClaw has neither.
-        state.usage = response.usage
+        # Another model's count cannot bound the next request (nanobot
+        # runner.py:1340; NanoClaw has no provider-native compaction).
+        state.usage = None if response.is_fallback else response.usage
         return response
 
     @staticmethod
