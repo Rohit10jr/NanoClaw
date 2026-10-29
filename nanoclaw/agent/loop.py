@@ -76,6 +76,7 @@ from nanoclaw.agent.subagent import (
 from nanoclaw.agent.tools import ToolRegistry, build_default_tools
 from nanoclaw.agent.tools.exec_session import ExecSessionManager
 from nanoclaw.agent.tools.context import RequestContext, bind_request_context, reset_request_context
+from nanoclaw.agent.tools.file_state import FileStateStore, bind_file_states, reset_file_states
 from nanoclaw.agent.tools.spawn import SpawnTool
 from nanoclaw.agent.turn_delivery import TurnDelivery, TurnDeliveryFactory
 from nanoclaw.agent.turn_hooks import AgentTurnHookSpec, build_agent_turn_hook
@@ -96,6 +97,7 @@ from nanoclaw.runtime_context import (
     record_iteration_limit,
 )
 from nanoclaw.session import Session, SessionManager
+from nanoclaw.session.manager import SESSION_CACHE_MAX_SIZE
 from nanoclaw.session.recovery import (
     PENDING_USER_TURN_KEY,
     RUNTIME_CHECKPOINT_KEY,
@@ -226,6 +228,11 @@ class AgentLoop:
             logger.info("Registered {} tools: {}", len(tools.tool_names), tools.tool_names)
         self.tools = tools
         self.sessions = sessions if sessions is not None else SessionManager(workspace)
+        # One file-read/write tracker per session (nanobot loop.py:389). The
+        # tool registry is shared by this loop, so tools resolve the active
+        # state via contextvars; ``read_file`` uses it to answer a repeat read
+        # with "[File unchanged since last read: ...]".
+        self._file_state_store = FileStateStore(max_sessions=SESSION_CACHE_MAX_SIZE)
         self.consolidator = Consolidator(
             self.memory, self.sessions, self.context.build_messages, self.tools.get_definitions, compaction=compaction
         )
@@ -950,6 +957,7 @@ class AgentLoop:
                 ephemeral=ephemeral,
             )
         )
+        file_state_token = bind_file_states(self._file_state_store.for_session(session.key))
         try:
             result = await self.runner.run(
                 AgentRunSpec(
@@ -987,6 +995,7 @@ class AgentLoop:
             )
         finally:
             reset_request_context(token)
+            reset_file_states(file_state_token)
         if result.stop_reason == "max_iterations":
             logger.warning("Max iterations ({}) reached", self.max_iterations)
             # Push the final text through the stream so streaming outputs
@@ -1095,7 +1104,13 @@ class AgentLoop:
             return
         await self._new_session(session_key)
 
+    def discard_session_file_state(self, key: str) -> None:
+        """Forget ephemeral file-read state for a reset session (nanobot loop.py:997)."""
+        self._file_state_store.discard(key)
+
     async def _new_session(self, session_key: str) -> None:
+        # nanobot cmd_new (builtin.py:319): the new conversation has read nothing.
+        self.discard_session_file_state(session_key)
         session = self.sessions.get_or_create(session_key)
         snapshot = list(session.messages)
         if session.last_archived < len(snapshot):

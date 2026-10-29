@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import codecs
 import difflib
+import hashlib
 import mimetypes
 import re
 from dataclasses import dataclass
@@ -17,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from nanoclaw.agent.tools.base import Tool, ToolResult
+from nanoclaw.agent.tools.file_state import FileStates, current_file_states
 from nanoclaw.agent.tools.schema import object_schema
 from nanoclaw.security.workspace_policy import resolve_allowed_path
 
@@ -30,8 +32,20 @@ class _FsTool(Tool):
     ``PermissionError``), which each tool returns as an error.
     """
 
-    def __init__(self, workspace: Path | None = None, *, restrict_to_workspace: bool = False) -> None:
+    def __init__(
+        self,
+        workspace: Path | None = None,
+        *,
+        restrict_to_workspace: bool = False,
+        file_states: FileStates | None = None,
+    ) -> None:
         self._workspace = workspace
+        # Explicit state is used by isolated runners like Dream/subagents.
+        # Main AgentLoop tools leave this unset and resolve state from the
+        # current async task, which keeps shared tool instances session-safe.
+        # (nanobot filesystem.py:71-105)
+        self._explicit_file_states = file_states
+        self._fallback_file_states = FileStates()
         self._allowed_dir = workspace if restrict_to_workspace and workspace is not None else None
         if workspace is not None:
             from nanoclaw.agent.skills import BUILTIN_SKILLS_DIR
@@ -42,6 +56,12 @@ class _FsTool(Tool):
             self._extra_read_allowed_files = [resolved / "memory" / "history.jsonl"]
         else:
             self._extra_read_allowed_dirs, self._extra_read_allowed_files = [], []
+
+    @property
+    def _file_states(self) -> FileStates:
+        if self._explicit_file_states is not None:
+            return self._explicit_file_states
+        return current_file_states(self._fallback_file_states)
 
     def _resolve_read(self, path: str) -> Path:
         restricted = self._allowed_dir is not None
@@ -160,10 +180,18 @@ class ReadFileTool(_FsTool):
             path={"type": "string", "description": "The file path to read"},
             offset={"type": "integer", "description": "1-based line to start from (default 1)", "minimum": 1},
             limit={"type": "integer", "description": "Maximum lines to return (default 2000)", "minimum": 1},
+            force={"type": "boolean", "description": "Return an unchanged range again", "default": False},
             required=["path"],
         )
 
-    async def execute(self, path: str | None = None, offset: int = 1, limit: int | None = None, **kwargs: Any) -> str:
+    async def execute(
+        self,
+        path: str | None = None,
+        offset: int = 1,
+        limit: int | None = None,
+        force: bool = False,
+        **kwargs: Any,
+    ) -> str:
         try:
             if not path:
                 return ToolResult.error("Error reading file: Unknown path")
@@ -193,6 +221,13 @@ class ReadFileTool(_FsTool):
             raw = fp.read_bytes()
             if not raw:
                 return f"(Empty file: {path})"
+            # Same range, same bytes, and the earlier result still in the
+            # model's input: say so instead of sending it again (nanobot :340).
+            content_hash = hashlib.sha256(raw).hexdigest()
+            if not force and self._file_states.is_unchanged(
+                fp, offset=offset, limit=limit, content_hash=content_hash,
+            ):
+                return f"[File unchanged since last read: {path}]"
             text = _decode_bom_text(raw)
             if text is None:
                 try:
@@ -244,6 +279,9 @@ class ReadFileTool(_FsTool):
                 result += f"\n\n(Showing lines {offset}-{end} of {total}. Use offset={end + 1} to continue.)"
             else:
                 result += f"\n\n(End of file — {total} lines total)"
+            self._file_states.record_read(
+                fp, offset=offset, limit=limit, content_hash=content_hash, result=result,
+            )
             return result
         except PermissionError as e:
             return ToolResult.error(f"Error: {e}")
@@ -264,9 +302,9 @@ class WriteFileTool(_FsTool):
     @property
     def description(self) -> str:
         return (
-            "Create a new file or intentionally replace an entire file with "
-            "the provided content. Overwrites existing files and creates parent "
-            "directories as needed. For partial edits, prefer edit_file."
+            "Create a file or replace an entire file. "
+            "Overwrites existing files and creates parent directories. "
+            "Prefer apply_patch for partial edits."
         )
 
     @property
@@ -288,6 +326,7 @@ class WriteFileTool(_FsTool):
             # newline="" writes the text as given: no "\n" -> "\r\n" on
             # Windows (nanobot ae6801d, filesystem.py:580).
             fp.write_text(content, encoding="utf-8", newline="")
+            self._file_states.record_write(fp)
             return f"Successfully wrote {len(content)} characters to {fp}"
         except PermissionError as e:
             return ToolResult.error(f"Error: {e}")
@@ -407,6 +446,16 @@ class _MatchSpan:
     end: int
     text: str
     line: int
+
+
+def _match_end_line(match: _MatchSpan) -> int:
+    """Last line the match covers; a trailing newline doesn't reach the next line."""
+    comparable = match.text[:-1] if match.text.endswith("\n") else match.text
+    return match.line + comparable.count("\n")
+
+
+def _match_covers_line(match: _MatchSpan, line: int) -> bool:
+    return match.line <= line <= _match_end_line(match)
 
 
 def _find_exact_matches(content: str, old_text: str) -> list[_MatchSpan]:
@@ -537,8 +586,8 @@ class EditFileTool(_FsTool):
     def description(self) -> str:
         return (
             "Perform a small, exact replacement in one file. "
-            "Copy old_text from read_file. occurrence and replace_all=true are mutually exclusive. "
-            "With old_text empty, creates a new file."
+            "Prefer apply_patch for multi-file, structural, or generated edits. "
+            "occurrence, line_hint, and replace_all=true are mutually exclusive."
         )
 
     @property
@@ -556,6 +605,19 @@ class EditFileTool(_FsTool):
                 "description": "Optional 1-based occurrence to replace when old_text appears multiple times.",
                 "minimum": 1,
             },
+            line_hint={
+                "type": ["integer", "null"],
+                "description": (
+                    "Optional exact 1-based target line copied from read_file. "
+                    "The selected old_text match must cover this line."
+                ),
+                "minimum": 1,
+            },
+            expected_replacements={
+                "type": ["integer", "null"],
+                "description": "Optional guard for the number of replacements that must be made.",
+                "minimum": 1,
+            },
             required=["path", "old_text", "new_text"],
         )
 
@@ -571,6 +633,8 @@ class EditFileTool(_FsTool):
         new_text: str | None = None,
         replace_all: bool = False,
         occurrence: int | None = None,
+        line_hint: int | None = None,
+        expected_replacements: int | None = None,
         **kwargs: Any,
     ) -> str:
         try:
@@ -580,6 +644,14 @@ class EditFileTool(_FsTool):
                 raise ValueError("Unknown old_text")
             if new_text is None:
                 raise ValueError("Unknown new_text")
+            # Schema validation already enforces minimum 1; direct callers get
+            # nanobot's messages (filesystem.py:933).
+            if occurrence is not None and occurrence < 1:
+                return ToolResult.error("Error: occurrence must be >= 1.")
+            if line_hint is not None and line_hint < 1:
+                return ToolResult.error("Error: line_hint must be >= 1.")
+            if expected_replacements is not None and expected_replacements < 1:
+                return ToolResult.error("Error: expected_replacements must be >= 1.")
             fp = self._resolve_write(path)
             file_exists = fp.exists()
             if file_exists and old_text == new_text:
@@ -590,6 +662,7 @@ class EditFileTool(_FsTool):
                 if old_text == "":
                     fp.parent.mkdir(parents=True, exist_ok=True)
                     fp.write_text(new_text, encoding="utf-8", newline="")  # nanobot ae6801d
+                    self._file_states.record_write(fp)
                     return self._summary(fp, "", new_text, created=True)
                 return self._file_not_found_msg(path, fp)
 
@@ -603,6 +676,7 @@ class EditFileTool(_FsTool):
                 if content.strip():
                     return ToolResult.error(f"Error: Cannot create file — {path} already exists and is not empty.")
                 fp.write_text(new_text, encoding="utf-8", newline="")  # nanobot ae6801d
+                self._file_states.record_write(fp)
                 return self._summary(fp, content, new_text)
 
             uses_crlf = b"\r\n" in raw
@@ -615,11 +689,15 @@ class EditFileTool(_FsTool):
             count = len(matches)
             if replace_all and occurrence is not None:
                 return ToolResult.error("Error: occurrence cannot be used with replace_all=true.")
+            if replace_all and line_hint is not None:
+                return ToolResult.error("Error: line_hint cannot be used with replace_all=true.")
+            if occurrence is not None and line_hint is not None:
+                return ToolResult.error("Error: line_hint cannot be used with occurrence.")
             if occurrence is not None and occurrence > count:
                 return ToolResult.error(
                     f"Error: occurrence {occurrence} is out of range; old_text appears {count} time(s)."
                 )
-            if count > 1 and not replace_all and occurrence is None:
+            if count > 1 and not replace_all and occurrence is None and line_hint is None:
                 lines = [m.line for m in matches]
                 preview = ", ".join(f"line {n}" for n in lines[:3]) + (", ..." if len(lines) > 3 else "")
                 # A warning, not an error, exactly as in nanobot: nothing is changed.
@@ -635,8 +713,28 @@ class EditFileTool(_FsTool):
                 selected = matches
             elif occurrence is not None:
                 selected = [matches[occurrence - 1]]
+            elif line_hint is not None:
+                # The chosen match must cover the hinted line (nanobot filesystem.py:1010).
+                candidates = [m for m in matches if _match_covers_line(m, line_hint)]
+                if not candidates:
+                    locations = ", ".join(f"line {m.line}" for m in matches[:3]) + (", ..." if len(matches) > 3 else "")
+                    return ToolResult.error(
+                        f"Error: line_hint {line_hint} does not match the old_text location. "
+                        f"old_text appears at {locations}. Re-read the intended region and "
+                        "copy old_text that covers the target line."
+                    )
+                if len(candidates) > 1:
+                    return ToolResult.error(
+                        f"Error: line_hint {line_hint} is ambiguous; "
+                        f"old_text appears {len(candidates)} times on that line."
+                    )
+                selected = candidates
             else:
                 selected = [matches[0]]
+            if expected_replacements is not None and len(selected) != expected_replacements:
+                return ToolResult.error(
+                    f"Error: expected {expected_replacements} replacements but would make {len(selected)}."
+                )
 
             new_content = content
             for match in reversed(selected):
@@ -667,6 +765,7 @@ class EditFileTool(_FsTool):
 
             out = new_content.replace("\n", "\r\n") if uses_crlf else new_content
             fp.write_bytes(out.encode("utf-8"))
+            self._file_states.record_write(fp)
             return self._summary(fp, content, new_content)
         except PermissionError as e:
             return ToolResult.error(f"Error: {e}")
@@ -729,9 +828,8 @@ class ListDirTool(_FsTool):
     @property
     def description(self) -> str:
         return (
-            "List the contents of a directory. "
-            "Set recursive=true to explore nested structure. "
-            "Common noise directories (.git, node_modules, __pycache__, etc.) are auto-ignored."
+            "List directory contents, skipping common noise directories "
+            "(.git, node_modules, __pycache__, etc.)."
         )
 
     @property

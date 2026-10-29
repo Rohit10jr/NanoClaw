@@ -106,7 +106,7 @@ The count starts again with each run. Dream's own boundary errors use the same w
 | Trusting a proxy's DNS | `trust_remote_dns` | For image generation behind a trusted proxy | **Phase 2** |
 | Configured fetch proxy | `web.proxy` | A proxy just for `web_fetch` (environment proxies already work) | **Phase 2: configuration** |
 | Workspace scopes / separate project folder | `security/workspace_access.py` | Per-chat project folders, each with its own restriction | **Phase 2: Separate project folder** |
-| SSRF checks for MCP servers | `agent/tools/mcp.py` | Same guard for MCP connections | **Phase 2: MCP** |
+| SSRF checks for MCP servers | `agent/tools/mcp.py` | Same guard for MCP connections | **Done in task 17.4** (URL check, per-request hook incl. redirects, DNS pinning) |
 | Repeated-lookup throttle | `repeated_external_lookup_error` | Stops the model repeating the same search or fetch | **Phase 2** (skipped since layer 2) |
 
 ## Files

@@ -32,6 +32,7 @@ recovery, governance) for later.
 | 14 | Message bus, session workers, `/stop`, injections | done |
 | 15 | Crash recovery, compaction before every model request | done |
 | 16 | Shell: background exec sessions, Windows PowerShell | done |
+| 17 | More tools: `apply_patch`, `rg`, unchanged-file reads, MCP servers | done |
 
 Phase 1 (the core agent) is complete. Phase 2 builds the production backend
 (layers 11–25; progress in [`docs/PHASE2_PROGRESS.md`](docs/PHASE2_PROGRESS.md)).
@@ -156,6 +157,19 @@ it, sends it input or stops it. `/new`, `/stop` and leaving the chat stop the
 commands it started. On Windows commands run in PowerShell (or `cmd`). Limits
 and allowed commands go in the config file under `tools.exec` (`maxRuntime`,
 `idleTimeout`, `allowPatterns`, `denyPatterns`, `enable`, ...).
+
+MCP servers, as in nanobot, go under `tools.mcpServers`: a `command` (stdio)
+or a `url` (streamable HTTP; SSE for URLs ending in `/sse`). Their tools appear
+as `mcp_<server>_<tool>`; `enabledTools` limits which, `toolTimeout` (30 s)
+bounds each call. Private-network URLs are blocked unless listed in
+`tools.ssrfWhitelist`. OAuth servers and `useProxy` are not supported.
+
+```json
+{ "tools": { "mcpServers": {
+  "fs": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"] },
+  "remote": { "url": "https://mcp.example.com/mcp", "headers": { "Authorization": "Bearer ${MCP_TOKEN}" } }
+} } }
+```
 
 The agent's personality and instructions live in editable Markdown files in
 the workspace (`~/.nanoclaw/workspace` by default, change with `-w`):

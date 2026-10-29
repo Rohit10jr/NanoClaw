@@ -116,7 +116,7 @@ def test_dream_prompt(store):
 
 async def test_dream_tools_write_only_memory_files(ws, store, tmp_path):
     tools = store.build_dream_tools()
-    assert sorted(tools.tool_names) == ["edit_file", "read_file", "write_file"]
+    assert sorted(tools.tool_names) == ["apply_patch", "edit_file", "read_file", "write_file"]
     ok = await tools.execute("write_file", {"path": "memory/MEMORY.md", "content": "# Facts\n- likes tea\n"})
     assert not getattr(ok, "is_error", False)
     assert (ws / "memory/MEMORY.md").read_text(encoding="utf-8") == "# Facts\n- likes tea\n"
@@ -135,6 +135,41 @@ async def test_dream_tools_write_only_memory_files(ws, store, tmp_path):
     refused = await tools.execute("read_file", {"path": str(outside)})
     assert refused.is_error and "outside allowed directory" in refused
     assert "likes tea" in await tools.execute("read_file", {"path": "memory/MEMORY.md"})
+
+
+async def test_dream_apply_patch_uses_the_write_guard(ws, store):
+    """nanobot tests/agent/test_dream.py TestDreamTools (apply_patch parts)."""
+    tools = store.build_dream_tools()
+    store.memory_file.write_text("Project X active\n", encoding="utf-8")
+    store.history_file.write_text("before\n", encoding="utf-8")
+
+    ok = await tools.execute(
+        "apply_patch",
+        {
+            "edits": [
+                {"path": "memory/MEMORY.md", "action": "replace", "old_text": "Project X active", "new_text": "Project Y active"},
+                {"path": "skills/scoped/SKILL.md", "action": "add", "new_text": "---\nname: scoped\n---\n"},
+            ]
+        },
+    )
+    assert ok == "Patch applied:\n- update memory/MEMORY.md (+1/-1)\n- add skills/scoped/SKILL.md (+3/-0)"
+    assert store.memory_file.read_text(encoding="utf-8") == "Project Y active\n"
+
+    for path in ("memory/history.jsonl", "memory/MEMORY.md/evil.txt", "notes.txt"):
+        refused = await tools.execute(
+            "apply_patch",
+            {
+                "edits": [
+                    {"path": "USER.md", "action": "add", "new_text": "first edit is fine"},
+                    {"path": path, "action": "add", "new_text": "owned"},
+                ]
+            },
+        )
+        assert refused.is_error
+        assert refused.startswith(f"Error: Path {path} is outside allowed directory {ws.resolve() / 'skills'}")
+    assert store.history_file.read_text(encoding="utf-8") == "before\n"
+    assert "first edit is fine" not in store.user_file.read_text(encoding="utf-8")
+    assert not (ws / "notes.txt").exists()
 
 
 # --- raw fallback ------------------------------------------------------------------------------

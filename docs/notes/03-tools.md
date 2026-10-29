@@ -28,7 +28,9 @@ model: Changed the port to 9090.
 |---|---|---|
 | `agent/tools/schema.py` | `object_schema`, `validate_json_schema_value`, `validate_params`, `cast_params` | `agent/tools/base.py` (Schema, `cast_params`), `agent/tools/schema.py` |
 | `agent/tools/filesystem.py` | `read_file`, `write_file`, `edit_file`, `list_dir` | `agent/tools/filesystem.py` |
+| `agent/tools/apply_patch.py` *(layer 17)* | `apply_patch` | `agent/tools/apply_patch.py` |
 | `agent/tools/shell.py` | `exec` | `agent/tools/shell.py` |
+| `agent/tools/rg.py` | `rg` *(layer 17)* | `agent/tools/rg.py` |
 | `agent/tools/web.py` | `web_fetch`, `web_search` | `agent/tools/web.py` |
 | `agent/tools/__init__.py` | `build_default_tools(workspace)` | `agent/tools/loader.py` (auto-discovery) |
 
@@ -60,7 +62,7 @@ of `path` is reported instead of silently ignored.
 
 ## The tools
 
-### `read_file(path, offset=1, limit=2000)`
+### `read_file(path, offset=1, limit=2000, force=false)`
 - Numbered lines: `12| some text`, so the model can quote exact lines to `edit_file`.
 - Footer tells the model what to do next:
   `(Showing lines 1-2000 of 5400. Use offset=2001 to continue.)` or
@@ -74,11 +76,19 @@ of `path` is reported instead of silently ignored.
 - *(Since layer 7)* A relative `skills/<name>/...` path missing from the
   workspace is read from the built-in skills folder (nanobot
   `_builtin_skill_read_path`); see `07-skills.md`.
+- *(Since layer 17)* A repeat read of the same range of an unchanged file
+  returns `[File unchanged since last read: <path>]` instead of the
+  contents, but only while the earlier result is still, unchanged, in the
+  input the model just answered (nanobot `agent/tools/file_state.py`).
+  After compaction, a truncation or a `/new`, the next read returns the
+  contents again; `force=true` always does. `write_file` and `edit_file`
+  forget the read. State is per session (bound by the loop), and each
+  subagent and Dream run has its own. See `agent/tools/file_state.py`.
 
 ### `write_file(path, content)`
 Creates parent folders; overwrites; replies `Successfully wrote N characters to <path>`.
 
-### `edit_file(path, old_text, new_text, replace_all=false, occurrence=null)`
+### `edit_file(path, old_text, new_text, replace_all=false, occurrence=null, line_hint=null, expected_replacements=null)`
 The most model-friendly tool, because models rarely copy text perfectly:
 - **Matching gets looser step by step:** exact → each line trimmed of
   indentation → also treating curly and straight quotes as equal.
@@ -93,10 +103,30 @@ The most model-friendly tool, because models rarely copy text perfectly:
   (`letter case differs`, `whitespace differs`, ...). The comparison is by
   whole lines, so this helps when most lines of a multi-line `old_text`
   are right; a single line with a typo gets "No similar text found" (same in nanobot).
+- *(Layer 17)* **Choosing a match:** `occurrence` (1-based) or `line_hint`
+  (a line number from `read_file`; the chosen match must cover that line,
+  and exactly one may) picks one of several matches; `replace_all=true`
+  takes all. The three are mutually exclusive. `expected_replacements`
+  refuses the edit unless exactly that many replacements would be made
+  (`Error: expected 1 replacements but would make 2.`).
 - `old_text=""` creates a new file. CRLF files stay CRLF. Deleting whole
   lines also removes their line breaks. Trailing spaces in `new_text` are
   removed except in Markdown (where two spaces mean a line break).
 - Replies `Patch applied:\n- update app.py (+1/-1)`.
+
+### `apply_patch(edits, dry_run=false)` *(layer 17)*
+nanobot's default tool for code edits. `edits` is a list of 1-20
+`{path, action, old_text, new_text}` objects, applied in order (a later edit
+sees the earlier ones): `replace` swaps one exact, unique match (CRLF
+normalized, no fuzzy matching); `add` creates a file or appends to an
+existing one, on a new line. Results end with a newline; CRLF files stay CRLF.
+All or nothing: any bad edit (missing anchor, ambiguous match, missing file,
+outside the workspace when restricted, ...) changes nothing, and a failed
+write rolls back the files already written. `dry_run=true` returns the
+summary without writing. Replies
+`Patch applied:\n- update a.py (+1/-1)\n- add b.py (+3/-0)`; errors are
+`Error applying patch: ...` (or `Error: Path ... is outside allowed directory ...`).
+Dream gets it too, with its own write scope checked for each edit.
 
 ### `list_dir(path, recursive=false, max_entries=200)`
 `📁 src` / `📄 README.md`; skips `.git`, `node_modules`, `__pycache__`,
@@ -124,6 +154,24 @@ sessions; the layer-3 version is described in git history.)*
   `PYTHONUNBUFFERED` (bash supplies a default `PATH`). Your `NANOCLAW_API_KEY`
   is invisible to anything the model runs. This is nanobot's `_build_env`.
 - **Deny list** (see the differences below).
+
+### `rg(args, working_dir, max_runtime, yield_time_ms, ...)`
+*(Layer 17, nanobot `agent/tools/rg.py`.)* `ExecTool` with an argument array
+instead of a shell command: `args=["-n", "-g", "*.py", "needle", "."]` runs
+`rg -n -g '*.py' needle .` directly, without a shell, so quotes, `|` or
+`$(...)` in an argument reach rg as text. Everything else is `exec`'s: exec
+sessions, budgets, output limits, PATH settings, the workspace checks and the
+guard (which sees `shlex.join(["rg", *args])`). rg's exit code 1 (no match) and
+2 (bad regex, missing path) are plain results, not tool errors.
+- Registered for the main agent and subagents (not Dream) only when
+  `tools.exec.enable` is on and `rg` is found on PATH with `pathPrepend`/
+  `pathAppend`. nanobot then unregisters its `grep`/`find_files`
+  (loader.py:130); NanoClaw never had them.
+- `--pre CMD` (rg runs CMD per file) is not blocked, as in nanobot; in
+  restricted mode an absolute `CMD` outside the workspace trips the path check.
+- Difference: NanoClaw's guard runs on every call, so unrestricted searches for
+  text such as `rm -rf`, `shutdown` or `http://169.254.169.254` are blocked,
+  which nanobot allows outside restricted mode.
 
 ### `web_fetch(url, extractMode="markdown", maxChars=50000)`
 - Only `http`/`https`; redirects followed one at a time (max 5), and each
@@ -206,14 +254,15 @@ blocked and the slip-through cases are tested in `tests/test_shell_tool.py`.
 | Workspace restriction, extra allowed dirs | `_FsTool._resolve_*`, `security/workspace_*.py` | Keep tools inside the workspace (**done in layer 9**; extra allowed dirs: phase 2) |
 | Private-network (SSRF) blocking | `security/network.py`, `_validate_url_safe` | Stop `web_fetch` reaching `localhost` or cloud metadata (**done in layer 9**) |
 | Sandbox (bubblewrap / macOS seatbelt) | `tools/sandbox.py` | OS-level isolation for `exec` (**phase 2**, decided in layer 9) |
-| "File unchanged since last read" | `file_state.py` | Saves tokens when the model rereads a file |
-| `edit_file` `line_hint`, `expected_replacements` | `filesystem.py` | Pick a match by line number; guard the number of replacements |
-| `apply_patch`, ripgrep `search` | `tools/apply_patch.py`, `tools/search.py` | Multi-file patches, fast code search |
+| "File unchanged since last read" | `file_state.py` | Saves tokens when the model rereads a file (**done in layer 17**) |
+| `edit_file` `line_hint`, `expected_replacements` | `filesystem.py` | Pick a match by line number; guard the number of replacements (**done in layer 17**) |
+| `apply_patch`, `grep`/`find_files` | `tools/apply_patch.py`, `tools/search.py` | Multi-file patches (**`apply_patch` done in layer 17**); code search without ripgrep (ripgrep `rg`, `tools/rg.py`: **done in layer 17**) |
 | Background shell sessions | `exec_session.py`, `yield_time_ms` | Long-running commands the model polls (**done in layer 16**) |
 | Shell choice, login shells, PATH config, Windows | `shell.py`, `_windows_job.py` | Platform support (**done in layer 16**: shell/login/PATH; Windows in task 16.4: PowerShell or cmd, a Job object or `taskkill /T /F` for the process tree, the Windows environment; not yet run on Windows, see `docs/WINDOWS.md`) |
 | Jina Reader, image fetching, proxies | `web.py` | Better extraction for JS-heavy pages |
 | Other search providers (Brave, Tavily, ...) | `web.py` | ~10 providers with API keys |
 | Tool auto-discovery and plugins | `tools/loader.py`, entry points | Third-party tools without code changes |
+| MCP servers | `agent/tools/mcp.py`, `mcp_oauth.py` | Tools from external MCP servers (**done in task 17.4**: stdio, streamable HTTP and SSE, tools only, `enabledTools`, `toolTimeout`, SSRF checks with DNS pinning, reconnect on "session terminated"; left out: resource and prompt wrappers, OAuth, the shared proxy (`useProxy` ignored), hot reload, runtime status, image artifacts (an image becomes a short note), plugin servers. Subagents get no MCP tools, as in nanobot) |
 
 ## Tests
 
@@ -221,6 +270,15 @@ blocked and the slip-through cases are tested in `tests/test_shell_tool.py`.
   parameters, `{"arguments": ...}` unwrapping.
 - `tests/test_filesystem_tools.py`: real files in a temp folder; paging,
   caps, every edit strategy and error, CRLF, best-match diff, list_dir rules.
+- *(Layer 17)* `tests/test_apply_patch_tool.py` (nanobot's apply_patch tests,
+  rollback, the 20-edit limit, tool descriptions) and
+  `tests/test_edit_file_line_hint.py` (`occurrence`, `line_hint`,
+  `expected_replacements`).
+- `tests/test_file_state.py` *(layer 17)*: the "[File unchanged since last
+  read]" stub only while the earlier result is in the model's input (kept,
+  summarized, truncated, orphaned, compacted away), `force`, ranges, writes,
+  per-session, subagent and loop state (nanobot `test_file_state_store.py`,
+  `test_runner_file_reads.py`, the dedup parts of `test_read_enhancements.py`).
 - `tests/test_shell_tool.py`: real bash (PowerShell variants on Windows); output format, exit codes, timeout
   killing child processes, secrets not visible, deny list (blocked,
   allowed, and slip-through cases; since the end of layer 6 also writes to

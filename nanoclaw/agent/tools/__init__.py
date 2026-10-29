@@ -10,6 +10,7 @@ from nanoclaw.agent.tools.registry import RETRY_HINT, ToolRegistry
 
 if TYPE_CHECKING:
     from nanoclaw.agent.tools.exec_session import ExecSessionManager
+    from nanoclaw.agent.tools.file_state import FileStates
     from nanoclaw.config.schema import ExecToolConfig
 
 
@@ -19,6 +20,7 @@ def build_default_tools(
     restrict_to_workspace: bool = False,
     exec_session_manager: ExecSessionManager | None = None,
     exec_config: ExecToolConfig | None = None,
+    file_states: FileStates | None = None,
 ) -> ToolRegistry:
     """The standard tool set, rooted at ``workspace``.
 
@@ -33,26 +35,37 @@ def build_default_tools(
     shell.py:169, exec_session.py:788, :947). Its sandbox fields are not
     read yet (layer 18).
 
+    ``rg`` (ripgrep through exec sessions) is added when exec is enabled and
+    ``rg`` is on the exec PATH (nanobot ``RgTool.enabled``, rg.py).
+
+    ``file_states`` gives the file tools their own read/write state
+    (nanobot ``ToolContext.file_state_store``; subagents pass a fresh one).
+    Without it they use the state the loop binds per session
+    (``bind_file_states``), or a private fallback outside a turn.
+
     nanobot discovers tools by scanning its tools package (agent/tools/loader.py);
     NanoClaw lists them explicitly.
     """
+    from nanoclaw.agent.tools.apply_patch import ApplyPatchTool
     from nanoclaw.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
     from nanoclaw.agent.tools.exec_session import ExecSessionTool, ListExecSessionsTool
+    from nanoclaw.agent.tools.rg import RgTool
     from nanoclaw.agent.tools.shell import ExecTool
     from nanoclaw.agent.tools.web import WebFetchTool, WebSearchTool
     from nanoclaw.config.schema import ExecToolConfig
 
     cfg = exec_config if exec_config is not None else ExecToolConfig()
     tools: list[Tool] = [
-        ReadFileTool(workspace, restrict_to_workspace=restrict_to_workspace),
-        WriteFileTool(workspace, restrict_to_workspace=restrict_to_workspace),
-        EditFileTool(workspace, restrict_to_workspace=restrict_to_workspace),
-        ListDirTool(workspace, restrict_to_workspace=restrict_to_workspace),
+        ReadFileTool(workspace, restrict_to_workspace=restrict_to_workspace, file_states=file_states),
+        WriteFileTool(workspace, restrict_to_workspace=restrict_to_workspace, file_states=file_states),
+        EditFileTool(workspace, restrict_to_workspace=restrict_to_workspace, file_states=file_states),
+        ApplyPatchTool(workspace, restrict_to_workspace=restrict_to_workspace, file_states=file_states),
+        ListDirTool(workspace, restrict_to_workspace=restrict_to_workspace, file_states=file_states),
     ]
     if cfg.enable:
         # nanobot ExecTool.create (shell.py:173).
-        tools += [
-            ExecTool(
+        def exec_tool(cls: type[ExecTool]) -> ExecTool:
+            return cls(
                 working_dir=workspace,
                 max_runtime=cfg.max_runtime,
                 max_runtime_limit=cfg.max_runtime_limit,
@@ -65,10 +78,16 @@ def build_default_tools(
                 allow_patterns=list(cfg.allow_patterns),
                 deny_patterns=list(cfg.deny_patterns),
                 exec_session_manager=exec_session_manager,
-            ),
+            )
+
+        tools += [
+            exec_tool(ExecTool),
             ExecSessionTool(manager=exec_session_manager),
             ListExecSessionsTool(manager=exec_session_manager),
         ]
+        if RgTool.enabled(cfg):
+            # nanobot RgTool inherits ExecTool.create, so it gets the same settings.
+            tools.append(exec_tool(RgTool))
     tools += [WebFetchTool(), WebSearchTool()]
     registry = ToolRegistry()
     for tool in tools:

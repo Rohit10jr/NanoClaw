@@ -86,11 +86,24 @@ Legend: ⏳ in progress · ✅ done and verified · ⛔ blocked
 | Docs | note 16, CODE_MAP, README, ROADMAP, WINDOWS, notes 03/08 | main session | — | ✅ |
 | PR | `p2/layer-16` → `main` | main session | PR #8 | ✅ |
 
+## Layer 17 — more tools: `apply_patch`, `rg`, file state, MCP (`p2/layer-17`) ✅
+
+| Task | Scope (files) | Sub-agent | Verification | Status |
+|---|---|---|---|---|
+| 17.1 `apply_patch`, edit options | new `agent/tools/apply_patch.py`; `filesystem.py` descriptions, `edit_file` `line_hint`/`expected_replacements` | sub-agent (worktree), parallel | 78 cases identical (results and file bytes); re-run after integration | ✅ |
+| 17.2 `rg` | new `agent/tools/rg.py` (on exec sessions), registration when ripgrep is installed | sub-agent (worktree), parallel | 45 cases identical after the guard fix in integration | ✅ |
+| 17.3 File state | new `agent/tools/file_state.py`, `read_file` `force`, runner read context | sub-agent (worktree), parallel | 19 runner scenarios identical; re-run after integration | ✅ |
+| 17.4 MCP | new `agent/tools/mcp.py` (stdio + streamable HTTP, tools only), `mcpServers` config, loop lifecycle, registry order | sub-agent (worktree), parallel | Definitions 10/10, calls 19/20 identical (images: deliberate) | ✅ |
+| Integration | merges, `apply_patch` → file state, `rg` guard rule, a racy test fixed | main session | 3 small conflicts; 1,907 passed, 6 skipped | ✅ |
+| Mutation checks | 274 rules | sub-agent (worktree) | 264 caught, 10 equivalent (79 tests added); 1,986 passed | ✅ |
+| Docs | note 17, CODE_MAP, README, ROADMAP, notes 03/06/07/08/09 | main session | — | ✅ |
+| PR | `p2/layer-17` → `main` | main session | PR #9 | ✅ |
+
 ## Blockers and open items
 
 | Item | Status |
 |---|---|
 | Real-model tests need API keys as environment secrets | Open; FakeProvider only until then |
 | Windows shell (16.4) not yet run on Windows | Needs a run of `uv run pytest` on Windows by the user |
-| PRs #2–#4 merged; #5–#7 (layers 13–15) open; later layers stacked on them | — |
+| PRs #2–#4 merged; #5–#8 (layers 13–16) open; later layers stacked on them | — |
 | Rewrite earlier commits to the user's author | After phase 2 (user decision) |

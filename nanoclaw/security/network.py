@@ -21,7 +21,7 @@ import socket
 from contextlib import contextmanager, suppress
 from typing import Any, cast
 from urllib.parse import urlparse
-from urllib.request import getproxies
+from urllib.request import getproxies, proxy_bypass
 
 import httpx
 
@@ -129,6 +129,30 @@ def validate_url_target(url: str) -> tuple[bool, str]:
     """Validate a URL is safe to fetch: scheme, hostname, and resolved IPs."""
     ok, error, _ = resolve_url_target(url)
     return ok, error
+
+
+def env_proxy_applies_to_url(url: str) -> bool:
+    """Return True when process proxy settings would proxy this URL.
+
+    (nanobot network.py:154; the MCP client skips its TCP probe then, since
+    the proxy, not this machine, connects to the server.)
+    """
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return False
+
+    proxies = getproxies()
+    proxy_url = proxies.get(parsed.scheme) or proxies.get("all")
+    if not proxy_url:
+        return False
+
+    host = parsed.hostname
+    if parsed.port is not None:
+        host = f"[{host}]:{parsed.port}" if ":" in host else f"{host}:{parsed.port}"
+    return not proxy_bypass(host)
 
 
 def httpx_env_proxy_mounts() -> dict[str, httpx.AsyncBaseTransport | None]:

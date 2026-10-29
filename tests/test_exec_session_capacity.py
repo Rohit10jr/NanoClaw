@@ -1,13 +1,15 @@
-"""Ported from nanobot tests/tools/test_exec_session_capacity.py (c4dac64): session capacity and retained results; the rg variant is left out (no rg tool)."""
+"""Ported from nanobot tests/tools/test_exec_session_capacity.py (c4dac64): session capacity and retained results."""
 
 from __future__ import annotations
 
 import asyncio
 import re
+import shutil
 import sys
 import time
 from pathlib import Path
 
+import pytest
 
 from nanoclaw.agent.tools.context import RequestContext, request_context
 from nanoclaw.agent.tools.exec_session import (
@@ -16,6 +18,7 @@ from nanoclaw.agent.tools.exec_session import (
     ListExecSessionsTool,
 )
 from nanoclaw.agent.tools import is_tool_error as is_tool_error_result
+from nanoclaw.agent.tools.rg import RgTool
 from nanoclaw.agent.tools.shell import ExecTool
 
 
@@ -42,8 +45,11 @@ async def _wait_finished(manager: ExecSessionManager, owner: str | None, session
     raise AssertionError(f"session {session_id} did not finish")
 
 
-# nanobot also runs this with its rg tool, which NanoClaw doesn't have.
-async def test_finished_results_do_not_block_other_owner_tools(tmp_path):
+@pytest.mark.parametrize("tool_name", [
+    "exec",
+    pytest.param("rg", marks=pytest.mark.skipif(shutil.which("rg") is None, reason="ripgrep not installed")),
+])
+async def test_finished_results_do_not_block_other_owner_tools(tmp_path, tool_name):
     manager = ExecSessionManager(max_sessions=2)
     tool = ExecTool(working_dir=str(tmp_path), exec_session_manager=manager)
     session_tool = ExecSessionTool(manager=manager)
@@ -60,8 +66,14 @@ async def test_finished_results_do_not_block_other_owner_tools(tmp_path):
         with request_context(owner_b):
             assert await ListExecSessionsTool(manager=manager).execute() == "No active exec sessions."
             assert is_tool_error_result(await session_tool.execute(session_id=newest, timeout_ms=0))
-            result = await tool.execute(command=[sys.executable, "-c", "print('other owner')"])
-            assert "other owner" in result
+            if tool_name == "rg":
+                result = await RgTool(working_dir=str(tmp_path), exec_session_manager=manager).execute(
+                    args=["--version"],
+                )
+                assert "ripgrep" in result
+            else:
+                result = await tool.execute(command=[sys.executable, "-c", "print('other owner')"])
+                assert "other owner" in result
             assert not is_tool_error_result(result), result
             assert "Exit code: 0" in result
 

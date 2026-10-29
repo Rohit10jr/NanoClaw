@@ -49,6 +49,7 @@ from nanoclaw.agent.skills import SkillsLoader
 from nanoclaw.agent.tools import ToolRegistry, ToolResult, build_default_tools
 from nanoclaw.agent.tools.context import RequestContext, bind_request_context, reset_request_context
 from nanoclaw.agent.tools.exec_session import ExecSessionManager
+from nanoclaw.agent.tools.file_state import FileStates
 from nanoclaw.bus.events import InboundMessage
 from nanoclaw.bus.queue import MessageBus
 from nanoclaw.utils.llm_runtime import LLMRuntime
@@ -202,12 +203,16 @@ class SubagentManager:
     def _build_tools(self, exec_manager: ExecSessionManager | None = None) -> ToolRegistry:
         """The child's own tool set: the standard tools, without ``spawn``, with
         the main agent's workspace restriction and exec settings (nanobot
-        ``_build_tools`` / ``_subagent_tools_config``, subagent.py:511-541)."""
+        ``_build_tools`` / ``_subagent_tools_config``, subagent.py:511-541).
+
+        Each child gets a fresh file-read state (nanobot subagent.py:535), so
+        it never inherits the parent session's reads."""
         return build_default_tools(
             self.workspace,
             restrict_to_workspace=self.restrict_to_workspace,
             exec_session_manager=exec_manager or self._exec_session_manager,
             exec_config=self.exec_config,
+            file_states=FileStates(),
         )
 
     def _new_exec_manager(self, task_id: str) -> ExecSessionManager:
