@@ -188,8 +188,8 @@ async def test_a_failed_injection_puts_the_snapshot_back_in_order(ws, tmp_path, 
 
 async def test_turn_waits_for_its_subagent_and_folds_the_report_in(ws, tmp_path):
     gate, started = asyncio.Event(), asyncio.Event()
-    script = [call("spawn", {"task": "check weather", "label": "Weather"}), "On it.", "It is sunny."]
-    async with Rig(ws, tmp_path, script, spawn=True) as rig:
+    script = [call("subagent", {"action": "create", "task": "check weather", "label": "Weather"}), "On it.", "It is sunny."]
+    async with Rig(ws, tmp_path, script, subagent_tool=True) as rig:
         route_children(rig.provider, gate=gate, started=started)
         await rig.send("weather?")
         await started.wait()
@@ -212,7 +212,7 @@ async def test_turn_waits_for_its_subagent_and_folds_the_report_in(ws, tmp_path)
 async def test_terminal_wait_gives_up_after_the_timeout(ws, tmp_path, monkeypatch):
     monkeypatch.setattr(loop_module, "_SUBAGENT_TERMINAL_WAIT_SECONDS", 0.05)
     gate = asyncio.Event()
-    async with Rig(ws, tmp_path, [call("spawn", {"task": "slow"}), "Started.", "Late report seen."], spawn=True) as rig:
+    async with Rig(ws, tmp_path, [call("subagent", {"action": "create", "task": "slow"}), "Started.", "Late report seen."], subagent_tool=True) as rig:
         route_children(rig.provider, gate=gate)
         await rig.send("go")
         await rig.settle(1)
@@ -229,12 +229,14 @@ async def test_terminal_wait_gives_up_after_the_timeout(ws, tmp_path, monkeypatc
 
 
 async def test_report_on_the_bus_round_trips(ws):
-    report = SubagentResult("abcd1234", "Weather", "[report]", "incomplete", "cli:a", "cli", "a", "max_iterations", True)
+    content = "[Subagent 'Weather' stopped before completing the task]\n\nTask: t"
+    report = SubagentResult("abcd1234", "Weather", content, "incomplete", "cli:a", "cli", "a", "max_iterations", True)
     msg = report.to_inbound()
     assert (msg.channel, msg.sender_id, msg.chat_id, msg.session_key) == ("system", "subagent", "cli:a", "cli:a")
     assert not msg.is_user_input
     assert msg.metadata["subagent_state"] == "incomplete" and msg.metadata["subagent_partial"] is True
-    assert SubagentResult.from_inbound(msg) == report
+    assert msg.metadata["subagent_message_receipts"] == {}
+    assert SubagentResult.from_inbound(msg) == report  # the label comes back from the first line
 
 
 # --- commands, sessions, locks ----------------------------------------------------

@@ -21,7 +21,7 @@ from nanoclaw.agent.hook import AgentHook
 from nanoclaw.agent.loop import AgentLoop, ContextWindowExceededError
 from nanoclaw.agent.runner import AgentRunner, AgentRunSpec
 from nanoclaw.agent.tools import ToolRegistry
-from nanoclaw.agent.tools.spawn import SpawnTool
+from nanoclaw.agent.tools.subagent import SubagentTool
 from nanoclaw.bus.outbound_events import ProgressEvent, StreamDeltaEvent, StreamEndEvent
 from nanoclaw.cli.chat import Chat
 from nanoclaw.config import ChannelsConfig
@@ -545,11 +545,11 @@ async def test_subagent_report_streams_in_the_same_turn(ws, tmp_path):
     so the answer to it streams as part of the same turn (before, it was a
     follow-up turn of its own)."""
     chat, provider, out = make_chat(ws, tmp_path, [], [])
-    chat.loop.tools.register(SpawnTool(chat.loop.subagents))
+    chat.loop.tools.register(SubagentTool(chat.loop.subagents))
     provider.queue(
         LLMResponse(
             content=None,
-            tool_calls=[ToolCallRequest(id="s1", name="spawn", arguments={"task": "check", "label": "Weather"})],
+            tool_calls=[ToolCallRequest(id="s1", name="subagent", arguments={"action": "create", "task": "check", "label": "Weather"})],
             finish_reason="tool_calls",
         ),
         "On it.",

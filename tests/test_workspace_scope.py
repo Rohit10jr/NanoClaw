@@ -23,7 +23,7 @@ from nanoclaw.agent.tools.context import RequestContext, request_context
 from nanoclaw.agent.tools.filesystem import ListDirTool, ReadFileTool, WriteFileTool
 from nanoclaw.agent.tools.rg import RgTool
 from nanoclaw.agent.tools.shell import ExecTool
-from nanoclaw.agent.tools.spawn import SpawnTool
+from nanoclaw.agent.tools.subagent import SubagentTool
 from nanoclaw.providers import FakeProvider, LLMResponse, ToolCallRequest
 from nanoclaw.runtime_context import RUNTIME_CONTEXT_END, RUNTIME_CONTEXT_TAG
 from nanoclaw.security.workspace_access import (
@@ -437,7 +437,7 @@ async def test_rg_searches_the_project_by_default(layout):
 # --- subagents ------------------------------------------------------------------------------------
 
 
-async def test_spawn_tool_forwards_current_workspace_scope(tmp_path):
+async def test_subagent_tool_forwards_current_workspace_scope(tmp_path):
     project = tmp_path / "project"
     project.mkdir()
     scope = scope_for(project, "restricted", tmp_path)
@@ -449,9 +449,9 @@ async def test_spawn_tool_forwards_current_workspace_scope(tmp_path):
             Manager.seen = kwargs
             return "spawned"
 
-    tool = SpawnTool(Manager())  # type: ignore[arg-type]
+    tool = SubagentTool(Manager())  # type: ignore[arg-type]
     with bound(scope), request_context(RequestContext(channel="cli", session_key="cli:direct", runtime=object())):  # type: ignore[arg-type]
-        result = await tool.execute(task="inspect")
+        result = await tool.execute(action="create", task="inspect")
     assert result == "spawned"
     assert Manager.seen["workspace_scope"] == scope
 
@@ -459,7 +459,7 @@ async def test_spawn_tool_forwards_current_workspace_scope(tmp_path):
 async def test_subagent_works_in_the_project(layout, tmp_path):
     agent, project = layout
     child_script = [calls(("write_file", {"path": "child.txt", "content": "from child"})), "Wrote it."]
-    main_script = [calls(("spawn", {"task": "write child.txt", "wait": True})), "Done."]
+    main_script = [calls(("subagent", {"action": "create", "task": "write child.txt", "wait": True})), "Done."]
 
     class Routing(FakeProvider):
         def __init__(self):

@@ -34,6 +34,7 @@ recovery, governance) for later.
 | 16 | Shell: background exec sessions, Windows PowerShell | done |
 | 17 | More tools: `apply_patch`, `rg`, unchanged-file reads, MCP servers | done |
 | 18 | Isolation: bubblewrap sandbox, separate project folder (`--project`) | done |
+| 19 | Subagents v2: the `subagent` tool (create, send, cancel, check) | done |
 
 Phase 1 (the core agent) is complete. Phase 2 builds the production backend
 (layers 11–25; progress in [`docs/PHASE2_PROGRESS.md`](docs/PHASE2_PROGRESS.md)).
@@ -149,9 +150,12 @@ Summaries are kept in a journal, `memory/history.jsonl` in the workspace;
 agent sees in every system prompt.
 
 Subagents, as in nanobot: the agent can hand a task to a child agent with the
-`spawn` tool. With `wait=true` it waits for the answer; otherwise the child
-works in the background (up to 4 at once) and the agent tells you the result
-when it's done. `nanoclaw ask` waits for background children before exiting.
+`subagent` tool (`action=create`). With `wait=true` it waits for the answer;
+otherwise the child works in the background (up to 4 at once) and its report
+comes back by itself, so the agent tells you the result when it's done. While
+a child runs, the agent can `send` it a message, `cancel` it, or `check` its
+status and results (each task belongs to the conversation that started it).
+`nanoclaw ask` waits for background children before exiting.
 
 Safety, as in nanobot: `web_fetch` and shell commands can't reach private or
 internal network addresses (`localhost`, `192.168.x.x`, cloud metadata, ...),

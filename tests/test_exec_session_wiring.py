@@ -341,7 +341,7 @@ async def test_each_child_gets_its_own_exec_manager(ws):
     assert len(seen) == 2 and seen[0] is not seen[1]
     assert sm._exec_session_manager not in seen
     assert all(m._closed for m in seen)  # closed when the child ended
-    assert not sm._exec_managers and not sm.has_pending_work
+    assert not sm._tasks and not sm.has_pending_work
 
 
 async def test_child_processes_end_when_the_child_finishes(ws):
@@ -349,13 +349,13 @@ async def test_child_processes_end_when_the_child_finishes(ws):
     sm = SubagentManager(ws)
     provider = FakeProvider([started_session(sleeper), "child done"])
     seen = []
-    original = sm._cleanup_exec
+    original = sm._start_cleanup
 
-    async def spy(task_id):
+    def spy(record, **kwargs):
         seen.append(bool(running(sleeper)))
-        return await original(task_id)
+        return original(record, **kwargs)
 
-    sm._cleanup_exec = spy
+    sm._start_cleanup = spy
     result = await sm.run_inline("t", runtime=runtime(provider))
 
     assert result == "child done"
@@ -411,23 +411,23 @@ async def test_failed_child_cleanup_is_an_error_and_retried_on_close(ws):
     reduced: the result is the cleanup error and close() tries again."""
     sm = SubagentManager(ws)
     created = []
-    original_new = sm._new_exec_manager
+    original_run = sm._run_subagent
 
-    def new_manager(task_id):
-        manager = original_new(task_id)
-        original_close = manager.close_all
-        manager.close_all = AsyncMock(side_effect=[RuntimeError("cleanup failed"), 0])
-        created.append((manager, original_close))
-        return manager
+    async def run_subagent(record):
+        record.exec_manager.close_all = AsyncMock(side_effect=[RuntimeError("cleanup failed"), 0])
+        created.append(record.exec_manager)
+        return await original_run(record)
 
-    sm._new_exec_manager = new_manager
+    sm._run_subagent = run_subagent
     result = await sm.run_inline("t", runtime=runtime(FakeProvider(["child done"])))
 
+    # The child's answer stays, as partial output of a failed task (nanobot
+    # ``_SubagentTask.finish``: the last remembered text replaces the error).
     assert is_tool_error(result)
-    assert result.startswith("Error cleaning up task processes: cleanup failed")
+    assert result == "Error cleaning up task processes: cleanup failed\nPartial result:\nchild done"
     assert sm.has_pending_work
     await sm.close()
-    assert created[0][0].close_all.await_count == 2
+    assert created[0].close_all.await_count == 2
     assert not sm.has_pending_work
 
 
@@ -486,7 +486,7 @@ def test_exec_disabled_registers_no_exec_tools(ws):
     loop = _make_loop(FakeProvider([]), ws, config=config)
     assert not EXEC_TOOLS & set(loop.tools.tool_names)
     assert not EXEC_TOOLS & set(loop.subagents._build_tools().tool_names)
-    assert {"read_file", "spawn", "web_fetch"} <= set(loop.tools.tool_names)
+    assert {"read_file", "subagent", "web_fetch"} <= set(loop.tools.tool_names)
 
 
 async def test_configured_deny_pattern_blocks_a_command(ws, tmp_path):

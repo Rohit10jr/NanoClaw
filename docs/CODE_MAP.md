@@ -27,7 +27,7 @@ so line numbers stay correct even as nanobot changes.
 | 5 Sessions + AgentLoop | `nanoclaw/session/`, `nanoclaw/agent/loop.py`, `agent/context_governance.py` | ~580 | `session/manager.py`, `agent/loop.py` | ~4,400 |
 | 6 Memory + compaction | `nanoclaw/agent/memory.py`, `session/summary.py`, `utils/tokens.py`, `utils/llm_runtime.py` + loop/context changes | ~1,100 | `agent/memory.py`, `agent/autocompact.py`, `session/summary.py`, parts of `agent/context_governance.py`, `utils/helpers.py`, `command/builtin.py` | ~2,500 |
 | 7 Skills | `nanoclaw/agent/skills.py` + 6 built-in skills, context/loop/read_file/Dream changes | ~290 + skills | `agent/skills.py`, `skills/`, parts of `context.py`, `filesystem.py`, `memory.py` | ~420 + skills |
-| 8 Subagents | `nanoclaw/agent/subagent.py`, `tools/spawn.py`, `tools/context.py` + runner/loop/CLI changes | ~470 | `agent/subagent.py`, `agent/tools/spawn.py`, parts of `tools/context.py`, `runner.py`, `loop.py` | ~800 |
+| 8 Subagents | `nanoclaw/agent/subagent.py`, `tools/spawn.py` (replaced by `tools/subagent.py` in layer 19), `tools/context.py` + runner/loop/CLI changes | ~470 | `agent/subagent.py`, `agent/tools/spawn.py`, parts of `tools/context.py`, `runner.py`, `loop.py` | ~800 |
 | 9 Safety | `nanoclaw/security/` (2 modules), `agent/tools/violations.py` + shell/file/web/runner changes | ~650 | `security/network.py`, `security/workspace_policy.py`, parts of `shell.py`, `filesystem.py`, `web.py`, `execution.py`, `utils/runtime.py` | ~1,100 |
 | 10 Terminal chat | `nanoclaw/cli/` (2 modules), `utils/tool_hints.py`, `utils/path.py` + runner/loop changes | ~950 | classic parts of `cli/agent.py`, `cli/terminal.py`, `cli/stream.py`, parts of `command/builtin.py`, `command/router.py`, `utils/tool_hints.py`, `utils/path.py` | ~1,500 |
 | CLI (`chat`, `ask`, `compact`, `dream`, `skills`, `prompt`) | `nanoclaw/__main__.py` | ~265 | `cli/agent.py`, `cli/commands.py` | ~1,180 |
@@ -432,6 +432,8 @@ Note: [`notes/08-subagents.md`](notes/08-subagents.md)
 
 ### Tools — `nanoclaw/agent/tools/spawn.py`, `context.py`
 
+*Since layer 19 `spawn.py` is gone: the main agent's tool is `subagent` (`action=create|send|cancel|check`, `nanoclaw/agent/tools/subagent.py`), as in nanobot `c4dac64`; see [note 08, "Since layer 19"](notes/08-subagents.md#since-layer-19). The `SpawnTool` rows below describe layer 8.*
+
 | NanoClaw | nanobot | How it compares |
 |---|---|---|
 | [`SpawnTool`](../nanoclaw/agent/tools/spawn.py#L15) | [`agent/tools/spawn.py:48`][nb-l8-spawntool] | Same schema, description and replies (checked) |
@@ -443,7 +445,7 @@ Note: [`notes/08-subagents.md`](notes/08-subagents.md)
 | NanoClaw | nanobot | How it compares |
 |---|---|---|
 | `AgentRunSpec.finalize_on_max_iterations`, `max_iterations_message`; [`_max_iterations_fallback()`](../nanoclaw/agent/runner.py#L320) | [`agent/runner.py:101`][nb-l8-runspec], [`:795`][nb-l8-finalize], [`:1249`][nb-l8-fallback] | Same (`error_message` not needed: same default) |
-| `AgentLoop.__init__`: `self.subagents`, `spawn` in the main tools | `agent/loop.py:392`, tool loader | Same: main agent only |
+| `AgentLoop.__init__`: `self.subagents`, `spawn` (since layer 19: `subagent`) in the main tools | `agent/loop.py:392`, tool loader | Same: main agent only |
 | `_process_turn` binds the request context around the run and copies the iteration limit to the subagents | `_request_context_for_turn`, [`_sync_subagent_runtime_limits` :517][nb-l8-sync] | Simplified / Same |
 | [`process_subagent_result()`](../nanoclaw/agent/loop.py#L163) | [`agent/loop.py:2066`][nb-l8-isub] (system turn) | Same request and saved rows (checked); runs after the main turn, not injected into it ([`:1095`][nb-l8-inject], difference #3) |
 | [`_persist_subagent_followup()`](../nanoclaw/agent/loop.py#L446) | [`:2454`][nb-l8-persist] | Same; the summary boundary is recorded before it, so a repeated report compacts correctly (nanobot: [bug 5](UPSTREAM_BUGS.md#5-summary-marker-one-message-too-early-on-a-repeated-subagent-report)) |
@@ -562,7 +564,7 @@ Note: [`notes/10-terminal-chat.md`](notes/10-terminal-chat.md)
 | `tests/test_session.py` | history replay rules, file format, safe file names, atomic save, corrupt lines, cache, storage location, workspace ID |
 | `tests/test_memory.py` | journal, cursors, trimming; Dream prompt and tool limits; raw fallback; archiving with the model; summary checkpoints; token limit in history; prompt sections; token counting |
 | `tests/test_compaction.py` | a compacting turn end to end, the next turn, budgets, raw dump on large overflow, errors, `compact`, ephemeral turns, Dream, CLI commands and settings |
-| `tests/test_subagents.py` | `spawn` schema; main vs child tools; `wait=true` (child request, answer, temperature, errors, out of iterations); child prompt; background reply, report and follow-up turn; replay; saved once; failures; 4 at once; cancel/close; waiting; runner options; `ask` waiting for children; iteration-limit sync; repeated-report compaction boundary |
+| `tests/test_subagents.py` | `spawn` schema (since layer 19: the `subagent` tool); main vs child tools; `wait=true` (child request, answer, temperature, errors, out of iterations); child prompt; background reply, report and follow-up turn; replay; saved once; failures; 4 at once; cancel/close; waiting; runner options; `ask` waiting for children; iteration-limit sync; repeated-report compaction boundary |
 | `tests/test_chat.py` | the chat with scripted input: turns, exit words and signals, progress lines and tool hints (escaped markup), Markdown, every slash command and unknown commands, subagent results while idle, CLI `chat` options, `ask` progress |
 | `tests/test_skills.py` | frontmatter, discovery and precedence, requirements, always-on and `$skill` skills, summary, bundled skills, `read_file` fallback, prompt sections, saved `$skill` turn, Dream's skills access, CLI |
 | `tests/test_loop.py` | two-turn memory, restart, byte-identical replay, tool messages saved and replayed, user message saved before the run, crashed turn closed, interrupted turn, model error, save rules, separate sessions, `--new`, per-session lock, generation settings, CLI options and defaults |
@@ -722,7 +724,20 @@ Note: [`notes/18-isolation.md`](notes/18-isolation.md). Links point at nanobot `
 | `workspace_access_block` | [`agent/runtime_control.py:186`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/runtime_control.py#L186) | Same lines |
 | `_FsTool._access`, extra read-allowed dirs (`agent/tools/filesystem.py`) | [`agent/tools/filesystem.py:71-105`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/tools/filesystem.py#L71) | 496 decisions identical |
 | `ContextBuilder` `workspace=`, `# Current Project` (`agent/context.py`), skills root (`agent/skills.py`) | [`agent/context.py:105`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/context.py#L105) | Same |
-| Scope binding in `AgentLoop._run_agent_loop`; subagent inheritance (`agent/subagent.py`, `tools/spawn.py`) | [`agent/loop.py:1293`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/loop.py#L1293), [`agent/subagent.py:824`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/subagent.py#L824) | Same |
+| Scope binding in `AgentLoop._run_agent_loop`; subagent inheritance (`agent/subagent.py`, `tools/spawn.py`; since layer 19 `tools/subagent.py`) | [`agent/loop.py:1293`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/loop.py#L1293), [`agent/subagent.py:824`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/subagent.py#L824) | Same |
+
+## Layer 19 — Subagents v2: the `subagent` tool
+
+Note: [`notes/19-subagents-v2.md`](notes/19-subagents-v2.md). Links point at nanobot `c4dac64`.
+
+| NanoClaw | nanobot (`c4dac64`) | How it compares |
+|---|---|---|
+| `nanoclaw/agent/tools/subagent.py` `SubagentTool` (replaces `tools/spawn.py`) | [`agent/tools/subagent.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/tools/subagent.py) | Same schema, description, texts |
+| `SubagentManager` `spawn`, `run_inline`, `send`, `cancel`, `check`, `cancel_by_session`, `close`, `recover_interrupted`; `_SubagentTask`, `_SubagentHook` (`agent/subagent.py`) | [`agent/subagent.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/subagent.py) | 89 checks identical; no parallel tool calls |
+| `nanoclaw/agent/subagent_sessions.py`, `subagent_status.py` | [`agent/subagent_sessions.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/subagent_sessions.py), [`subagent_status.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/subagent_status.py) | JSONL sessions instead of SQLite |
+| `nanoclaw/agent/session_activity.py` | [`agent/session_activity.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/agent/session_activity.py) | No file-edit activity hook |
+| `SubagentTaskChanged` (`bus/runtime_events.py`) | [`bus/runtime_events.py`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/bus/runtime_events.py) | Published; no consumer yet |
+| `templates/agent/subagent_announce.md` | [`templates/agent/subagent_announce.md`](https://github.com/HKUDS/nanobot/blob/c4dac64/nanobot/templates/agent/subagent_announce.md) | Identical |
 
 [nb-pta]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/providers/base.py#L118
 [nb-tcr]: https://github.com/HKUDS/nanobot/blob/d3d70f20655bce5d3c7a017bfbe803efe09a2438/nanobot/providers/base.py#L72

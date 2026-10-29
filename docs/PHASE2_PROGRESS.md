@@ -110,11 +110,22 @@ Legend: ⏳ in progress · ✅ done and verified · ⛔ blocked
 | Docs | note 18, CODE_MAP, README, ROADMAP, notes 03/04/08/09 | main session | — | ✅ |
 | PR | `p2/layer-18` → `main` | main session | PR #10 | ✅ |
 
+## Layer 19 — subagents v2: the `subagent` tool (`p2/layer-19`) ✅
+
+| Task | Scope (files) | Sub-agent | Verification | Status |
+|---|---|---|---|---|
+| 19.1 Subagent manager v2 | `agent/subagent.py` (tasks, outcomes, status hook, partial results, send/cancel/check, inbox via injections), child sessions `subagent:<id>`, `subagent_status`, report template | sub-agent (worktree); interrupted by a container restart, finished by a second sub-agent from the saved work | 89 checks through both `AgentLoop`s identical | ✅ |
+| 19.2 The `subagent` tool | 19.1 also takes the tool and the tests; 19.2 the model-facing text (prompts, templates, skills, help) and docs | sub-agent (worktree), in parallel with 19.1 | No model-facing text named `spawn`; prompts differ from nanobot only as in layer 11 | ✅ |
+| Integration | merges | main session | No conflicts; 2,189 passed, 6 skipped | ✅ |
+| Mutation checks | 255 rules | sub-agent (worktree) | 238 caught, 17 equivalent (37 tests added); 2,226 passed | ✅ |
+| Docs | note 19, CODE_MAP, README, ROADMAP, note 08 | main session | — | ✅ |
+| PR | `p2/layer-19` → `main` | main session | PR #11 | ✅ |
+
 ## Blockers and open items
 
 | Item | Status |
 |---|---|
 | Real-model tests need API keys as environment secrets | Open; FakeProvider only until then |
 | Windows shell (16.4) not yet run on Windows | Needs a run of `uv run pytest` on Windows by the user |
-| PRs #2–#4 merged; #5–#9 (layers 13–17) open; later layers stacked on them | — |
+| PRs #2–#4 merged; #5–#10 (layers 13–18) open; later layers stacked on them | — |
 | Rewrite earlier commits to the user's author | After phase 2 (user decision) |

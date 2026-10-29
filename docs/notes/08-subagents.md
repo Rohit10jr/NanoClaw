@@ -9,6 +9,10 @@ The main agent can hand a task to a **child agent** (a subagent) with the
 task as its only message, and its own set of tools. It works through the task
 alone and its final answer goes back to the main agent.
 
+*Since layer 19 the tool is `subagent` (`action=create`, with `send`, `cancel`
+and `check` for running tasks), as in nanobot `c4dac64` (decision 3); this
+note describes layer 8's `spawn`. See [Since layer 19](#since-layer-19).*
+
 This keeps big side jobs (research, a long multi-file change) out of the main
 conversation, and several can run at the same time.
 
@@ -116,7 +120,7 @@ returns.
 | 4 | How the report travels | `InboundMessage` on the message bus (channel `system`, sender `subagent`) | ~~`SubagentResult` on the manager's `results` queue~~ **Gone in layer 14**: the same `InboundMessage` on the loop's bus (`SubagentResult.to_inbound`) | NanoClaw had no bus | Done in layer 14 |
 | 5 | Child tools | Also `apply_patch`, `rg`, `run_cli_app` *(`apply_patch`: added in layer 17)* | The tools NanoClaw has (`exec_session` and `list_exec_sessions` since layer 16) | Those tools aren't ported (layer 3) | With those tools |
 | 6 | Line in the child prompt | Also "Tools like 'read_file' and 'web_fetch' can return native image content…" | Not included | The same image line left out in layer 4 (NanoClaw's tools don't return images) | — |
-| 7 | Several `spawn` calls in one model reply | Run at the same time (`spawn` is `concurrency_safe`, and the main loop runs such tools in parallel) | Run one after another | NanoClaw's runner runs tools one at a time (parallel tools were skipped in layer 2). The results, requests and saved conversation are the same (checked); only the waiting time differs | Phase 2 (parallel tools) |
+| 7 | Several `spawn` calls (since layer 19: `subagent` create calls) in one model reply | Run at the same time (`spawn` is `concurrency_safe`, and the main loop runs such tools in parallel) | Run one after another | NanoClaw's runner runs tools one at a time (parallel tools were skipped in layer 2). The results, requests and saved conversation are the same (checked); only the waiting time differs | Phase 2 (parallel tools) |
 | 8 | Compaction on a **repeated** report | The summary marker goes one message too early, so a summarized message is replayed again ([upstream bug 5](../UPSTREAM_BUGS.md#5-summary-marker-one-message-too-early-on-a-repeated-subagent-report)) | Marker after everything that was summarized | Found in the second review; NanoClaw records the boundary before saving the report, so it was already correct. Kept, with a regression test | — |
 
 Everything else matches nanobot (checked by running both; see below).
@@ -125,8 +129,8 @@ Everything else matches nanobot (checked by running both; see below).
 
 | nanobot feature | Where | What it does | Later phase |
 |---|---|---|---|
-| Live status reporting | `_SubagentHook`, `SubagentStatus.iteration/tool_events/usage`, `runtime_statuses`, the `my` tool, web UI | Shows each child's iteration, tool calls and token use while it runs. NanoClaw keeps the phase (`queued`, `initializing`, `done`, `error`) only | **Phase 2: Hooks / Web UI** |
-| Logging of child tool calls | `_SubagentHook.before_execute_tools` | Debug log line per child tool call | **Phase 2: Hooks, Logging** |
+| Live status reporting | `_SubagentHook`, `SubagentStatus.iteration/tool_events/usage`, `runtime_statuses`, the `my` tool, web UI | Shows each child's iteration, tool calls and token use while it runs. NanoClaw keeps the phase (`queued`, `initializing`, `done`, `error`) only | **Phase 2: Hooks / Web UI** *(layer 19: done for the model: the status hook and `subagent(action="check")`; the `my` tool and web UI come later)* |
+| Logging of child tool calls | `_SubagentHook.before_execute_tools` | Debug log line per child tool call | **Phase 2: Hooks, Logging** *(layer 19: done, with the subagent hook)* |
 | Compaction during a child's run | `consolidate_history`, `consolidate_provider_compaction` (`:450`) | Summarizes a child's own messages if its run outgrows the context window (session key `subagent:<id>`, not saved) | **Phase 2: Context governance** *(layer 15: done; `persist=False`, logged as `subagent:<id>`; NanoClaw keeps no child transcript, so no summary marker is saved)* |
 | Project-folder scope | `workspace_scope`, `bind_workspace_scope` | Runs the child in the main agent's project folder, with workspace restriction | **Layer 9** (restriction) / **done in layer 18** (task 18.2: `spawn` passes the turn's scope, the child binds it) |
 | Background shell sessions of children | `ExecSessionManager`, `exec_session` tools | Each child owns its shell sessions; they are ended when it finishes, fails or is cancelled, before its report | **Done in layer 16** (`_exec_managers`; a failed cleanup makes the result an error and is retried by `close()`) |
@@ -135,12 +139,32 @@ Everything else matches nanobot (checked by running both; see below).
 | Provider conversation state for reports | `_SUBAGENT_PROVIDER_TASK_META`, `provider_state` | Adds the report to server-side conversation state | **Phase 2: Provider conversation state** |
 | Old constructor arguments | `provider=`/`model=`, `set_provider()` | Deprecated compatibility paths | Not needed |
 
+## Since layer 19
+
+Layer 19 replaces `spawn` with nanobot's `subagent` tool (decision 3). One
+tool manages the conversation's own child tasks, chosen by `action`:
+
+| `action` | What it does |
+|---|---|
+| `create` | Starts a task (`task`, optional `label`, `temperature`, `wait`). As before, `wait=true` returns the child's answer in the same turn; otherwise the child runs in the background and its report arrives by itself as a follow-up (no polling needed). Returns the full task ID |
+| `send` | Queues a message (`task_id`, `message`, at most 8192 bytes) for a running task; it is injected into the child's conversation |
+| `cancel` | Asks a task to stop (`task_id`); cancelling twice is harmless |
+| `check` | A task's status, delivery receipts and result (`task_id`), or, without `task_id`, the conversation's active and recently finished tasks |
+
+Tasks belong to the session that created them: another conversation cannot
+send to, cancel or check them. Partial results or a child stopped at its
+iteration limit are reported as not complete. The model-facing texts
+(system prompt, templates, skills, slash-command help) never named `spawn`,
+so only the tool itself, its hints and this documentation changed; the
+rendered system prompt still differs from nanobot's only as in layer 11.
+Exact behaviour (child sessions, receipts, outcomes): [`19-subagents-v2.md`](19-subagents-v2.md).
+
 ## Files
 
 | File | Contents | nanobot |
 |---|---|---|
 | `nanoclaw/agent/subagent.py` | `SubagentManager` (`spawn`, `run_inline`, the 4-slot queue, child tools and prompt, report), `SubagentStatus`, `SubagentResult` | `agent/subagent.py` |
-| `nanoclaw/agent/tools/spawn.py` | `SpawnTool` | `agent/tools/spawn.py` |
+| `nanoclaw/agent/tools/spawn.py` | `SpawnTool` *(replaced in layer 19 by `agent/tools/subagent.py`, `SubagentTool`)* | `agent/tools/spawn.py` (`c4dac64`: `agent/tools/subagent.py`) |
 | `nanoclaw/agent/tools/context.py` | `RequestContext`, `bind_request_context`, `current_request_context` | `agent/tools/context.py` (request part) |
 | `nanoclaw/agent/runner.py` | `finalize_on_max_iterations`, `max_iterations_message`, `_max_iterations_fallback` | `agent/runner.py` |
 | `nanoclaw/agent/loop.py` | `spawn` in the main tools; request context around each run; `process_subagent_result`, `_persist_subagent_followup`, `next_subagent_result`, `close` | `agent/loop.py` (`_build_turn`, `_persist_subagent_followup`, `aclose`) |
